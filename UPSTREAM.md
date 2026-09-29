@@ -36,6 +36,7 @@ when necessary. Every such change is recorded below.
 | File | Reason | Date |
 |------|--------|------|
 | `docs/README.md` | Appended a ShadowTracer docs section; original Wazuh manager doc intro preserved above it | 2026-09-29 |
+| `.github/workflows/*` (all except `ci.yml`) | Deleted (77 files). Upstream CI needs Wazuh's own infrastructure (AWS OIDC roles, self-hosted runners, internal secrets) that doesn't exist in this fork; left in place they'd fire on every push and fail instantly. `.github/actions/` and `.github/scripts/` were left as-is (inert without a workflow invoking them). | 2026-09-29 |
 
 ## Upstream check log
 
