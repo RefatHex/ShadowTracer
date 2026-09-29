@@ -1,0 +1,41 @@
+name: ShadowTracer CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-project:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - run: git fetch https://github.com/wazuh/wazuh.git tag v4.14.8
+      - run: bash check-project.sh
+
+  shellcheck-syntax:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          status=0
+          for f in $(git ls-files '*.sh'); do
+            bash -n "$f" || status=1
+          done
+          exit $status
+
+  build-agent:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential automake autoconf libtool cmake
+      - run: cd src && make deps TARGET=agent
+      - run: cd src && make TARGET=agent -j$(nproc)
