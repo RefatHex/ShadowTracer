@@ -6,14 +6,31 @@ cd "$(dirname "$0")"
 fail=0
 die() { echo "FAIL: $1" >&2; fail=1; }
 
-# install.sh (the entry point) must be executable. src/init/*.sh is not
-# checked blanket: several of those files are upstream library scripts
-# meant to be `source`d, not executed, and are never +x in upstream.
-[ -x install.sh ] || die "install.sh is not executable"
-
 # No CRLF in tracked shell scripts
 crlf=$(git grep -lI $'\r' -- '*.sh' 2>/dev/null)
 [ -z "$crlf" ] || die "CRLF found in: $(echo "$crlf" | tr '\n' ' ')"
+
+# No file outside our own paths (shadowtracer/, deploy/) may have a
+# different mode (e.g. lost/gained an exec bit) from v4.14.8.
+if git rev-parse v4.14.8^{commit} >/dev/null 2>&1; then
+    mode_changes=$(git diff --summary v4.14.8 -- . ':!shadowtracer' ':!deploy' 2>/dev/null | grep 'mode change')
+    [ -z "$mode_changes" ] || die "file mode changed vs v4.14.8 outside shadowtracer/ and deploy/: $(echo "$mode_changes" | tr '\n' ';')"
+
+    # Every inherited file that changed or was deleted vs v4.14.8 must be
+    # recorded in UPSTREAM.md's "Wazuh files we modified" table.
+    patterns=$(grep -oE '^\| `[^`]+`' UPSTREAM.md | sed -E 's/^\| `//; s/`$//')
+    missing=""
+    while IFS=$'\t' read -r status path; do
+        case "$status" in M|D) ;; *) continue ;; esac
+        matched=0
+        while IFS= read -r pat; do
+            [ -z "$pat" ] && continue
+            case "$path" in $pat) matched=1; break ;; esac
+        done <<<"$patterns"
+        [ "$matched" -eq 1 ] || missing="$missing $path"
+    done < <(git diff --name-status v4.14.8 -- . ':!shadowtracer' ':!deploy' 2>/dev/null)
+    [ -z "$missing" ] || die "inherited file(s) changed/deleted but not recorded in UPSTREAM.md:$missing"
+fi
 
 # http-request submodule must be present and populated
 [ -d src/shared_modules/http-request ] || die "src/shared_modules/http-request is missing"
