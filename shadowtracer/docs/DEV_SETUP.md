@@ -62,3 +62,40 @@ so the first build needs outbound HTTPS access.
 | `make TARGET=agent -j$(nproc)` | 2s | OK — `Done building agent` (shares already-built objects with the server build), 4 warnings, 0 errors |
 
 Both `src/wazuh-analysisd` and `src/wazuh-agentd` were produced.
+
+That 2s `TARGET=agent` number is not a real agent build — it reused object
+files already compiled for `TARGET=server` moments earlier. The real,
+from-clean number is below.
+
+### Real agent build (2026-09-29, fresh `ubuntu:22.04` container, host: WSL2)
+
+`make deps`, then `make clean`, then `make TARGET=agent`, nothing else in
+between:
+
+| Step | Time | Result |
+|------|------|--------|
+| `make deps` | 1m18s | OK |
+| `make clean` | 2s | OK |
+| `make TARGET=agent -j$(nproc)` | 34s, then **Error 127** | `cd external/dbus/ && ./configure ...` → `./configure: not found` |
+
+**`make clean` breaks a from-scratch build.** `make deps` fetches a
+*prebuilt* dbus binary (only `external/dbus/lib/` and `external/dbus/include/`
+— no source, no `configure` script). `make clean`'s dbus rule
+(`rm -rf external/dbus/lib external/dbus/include`, `Makefile:2676`) assumes a
+from-source build and deletes the only two directories that exist, leaving
+`external/dbus/` completely empty. `make TARGET=agent` then tries to rebuild
+`libdbus-1.a` from source (`Makefile:1290`) and there's nothing there to
+configure.
+
+The fix is simply to run `make deps` again before building — its dbus fetch
+step is unconditional (unlike its source-fallback path, it isn't guarded by
+`test -d external/dbus`), so it always re-populates the directory:
+
+| Step | Time | Result |
+|------|------|--------|
+| `make deps` (recovers `external/dbus/`) | 1m0s | OK |
+| `make TARGET=agent -j$(nproc)` | 1m18s | OK — `Done building agent`, 0 errors |
+
+`src/wazuh-agentd` was produced. **Takeaway:** don't run `make clean` between
+`make deps` and the first build in a fresh checkout; if you do, run
+`make deps` once more before building.
