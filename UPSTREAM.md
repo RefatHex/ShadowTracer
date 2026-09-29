@@ -19,7 +19,11 @@ release candidate.
 
 All original ShadowTracer code lives under [`shadowtracer/`](shadowtracer/).
 Everything else in this repository is inherited Wazuh code, changed only
-when necessary. Every such change is recorded below.
+when necessary. Every such change is recorded below. `docs/` stays exactly
+as upstream ships it; our own project docs live in
+[`shadowtracer/docs/`](shadowtracer/docs/) — see
+[DECISIONS.md](shadowtracer/docs/DECISIONS.md) and
+[DEV_SETUP.md](shadowtracer/docs/DEV_SETUP.md).
 
 ## How to pull a security fix from upstream
 
@@ -35,7 +39,7 @@ when necessary. Every such change is recorded below.
 
 | File | Reason | Date |
 |------|--------|------|
-| `docs/README.md` | Appended a ShadowTracer docs section; original Wazuh manager doc intro preserved above it | 2026-09-29 |
+| `.gitignore` | Appended ShadowTracer-specific ignore patterns (`__pycache__/`, `node_modules/`, `.env`, etc.) below upstream's list | 2026-09-29 |
 | `.github/workflows/*` (all except `ci.yml`) | Deleted (77 files). Upstream CI needs Wazuh's own infrastructure (AWS OIDC roles, self-hosted runners, internal secrets) that doesn't exist in this fork; left in place they'd fire on every push and fail instantly. `.github/actions/` and `.github/scripts/` were left as-is (inert without a workflow invoking them). | 2026-09-29 |
 
 ## Upstream check log

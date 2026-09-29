@@ -20,3 +20,8 @@ when necessary. Every such change is recorded in [UPSTREAM.md](../UPSTREAM.md).
 - `common/` — shared code used across the above modules
 
 Modules are currently empty scaffolding (Phase 0). No product code yet.
+
+## Docs
+
+- [docs/DECISIONS.md](docs/DECISIONS.md) — architecture decisions
+- [docs/DEV_SETUP.md](docs/DEV_SETUP.md) — dev environment setup
