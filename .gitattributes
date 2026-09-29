@@ -1,10 +1,2 @@
-* text=auto eol=lf
-*.sh eol=lf
-*.py eol=lf
-*.service eol=lf
-*.init eol=lf
-*.bat eol=crlf
-*.png binary
-*.dll binary
-*.exe binary
-*.pkl binary
+shadowtracer/** text=auto eol=lf
+deploy/** text=auto eol=lf
