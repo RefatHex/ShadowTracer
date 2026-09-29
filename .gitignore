@@ -171,3 +171,12 @@ src/result-*.txt
 
 # Tool files
 tools/repository_bumper_*
+
+# ShadowTracer hygiene additions
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+dist/
+*.tsbuildinfo
+.env
