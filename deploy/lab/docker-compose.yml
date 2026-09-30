@@ -1,0 +1,134 @@
+name: shadowtracer-lab
+
+x-manager-build: &manager-build
+  context: ../..
+  dockerfile: deploy/lab/manager.Dockerfile
+
+x-agent-env: &agent-env
+  MANAGER_ENROLL_HOST: wazuh-master
+  ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+
+services:
+  wazuh-master:
+    build: *manager-build
+    image: shadowtracer-lab/manager:local
+    hostname: wazuh-master
+    environment:
+      CLUSTER_NODE_TYPE: master
+      CLUSTER_NODE_NAME: master
+      CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
+      ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+    ports:
+      # Only the API goes to the host - 1514/1515 stay internal to the lab
+      # network (the Windows host has had Hyper-V reserve those before).
+      - "127.0.0.1:55000:55000"
+    networks:
+      - lab
+
+  wazuh-worker1:
+    build: *manager-build
+    image: shadowtracer-lab/manager:local
+    hostname: wazuh-worker1
+    environment:
+      CLUSTER_NODE_TYPE: worker
+      CLUSTER_NODE_NAME: worker1
+      CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
+      ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+    depends_on:
+      wazuh-master:
+        condition: service_healthy
+    networks:
+      - lab
+
+  wazuh-worker2:
+    build: *manager-build
+    image: shadowtracer-lab/manager:local
+    hostname: wazuh-worker2
+    environment:
+      CLUSTER_NODE_TYPE: worker
+      CLUSTER_NODE_NAME: worker2
+      CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
+      ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+    depends_on:
+      wazuh-master:
+        condition: service_healthy
+    networks:
+      - lab
+
+  # Agent data plane (1514) load balancer. Its hostname "shadowtracer-lb" is
+  # baked into the agent images as USER_AGENT_SERVER_NAME, so agents connect
+  # here for events; enrollment (1515) bypasses this and goes to the master.
+  shadowtracer-lb:
+    image: haproxy:2.9-alpine
+    hostname: shadowtracer-lb
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - wazuh-worker1
+      - wazuh-worker2
+    networks:
+      - lab
+
+  agent-ubuntu-1:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/agent-ubuntu.Dockerfile
+    image: shadowtracer-lab/agent-ubuntu:local
+    hostname: agent-ubuntu-1
+    environment: *agent-env
+    depends_on:
+      wazuh-master:
+        condition: service_healthy
+      shadowtracer-lb:
+        condition: service_started
+    networks:
+      - lab
+
+  agent-ubuntu-2:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/agent-ubuntu.Dockerfile
+    image: shadowtracer-lab/agent-ubuntu:local
+    hostname: agent-ubuntu-2
+    environment: *agent-env
+    depends_on:
+      wazuh-master:
+        condition: service_healthy
+      shadowtracer-lb:
+        condition: service_started
+    networks:
+      - lab
+
+  agent-rocky-1:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/agent-rocky.Dockerfile
+    image: shadowtracer-lab/agent-rocky:local
+    hostname: agent-rocky-1
+    environment: *agent-env
+    depends_on:
+      wazuh-master:
+        condition: service_healthy
+      shadowtracer-lb:
+        condition: service_started
+    networks:
+      - lab
+
+  agent-rocky-2:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/agent-rocky.Dockerfile
+    image: shadowtracer-lab/agent-rocky:local
+    hostname: agent-rocky-2
+    environment: *agent-env
+    depends_on:
+      wazuh-master:
+        condition: service_healthy
+      shadowtracer-lb:
+        condition: service_started
+    networks:
+      - lab
+
+networks:
+  lab:
+    driver: bridge

@@ -5,3 +5,16 @@ datasets
 .env
 build
 *.log
+
+# Stray host-side Wazuh build output. Never ship it into a build context:
+# a leftover CMakeCache.txt baked with a different absolute path breaks
+# cmake ("source does not match the source used to generate cache").
+src/build/
+src/external/*
+src/**/build/
+*.o
+*.a
+*.so
+src/agent-auth
+src/agent_control
+deploy/lab/.env
