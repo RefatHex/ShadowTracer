@@ -43,11 +43,33 @@ if ! grep -q "$AUTH_LOG" "$OSSEC_CONF"; then
     mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
 fi
 
+# --- one-time runtime config: enable the osquery wodle and give osqueryd
+# an actual query schedule - the wodle ships <disabled>yes</disabled> and
+# /etc/osquery/osquery.conf never existed, so osqueryd ran with nothing to
+# collect and Wazuh's own osquery module exited immediately either way ---
+if grep -q '<wodle name="osquery">' "$OSSEC_CONF"; then
+    sed -i '/<wodle name="osquery">/,/<\/wodle>/ s|<disabled>yes</disabled>|<disabled>no</disabled>|' "$OSSEC_CONF"
+fi
+if [ ! -f /etc/osquery/osquery.conf ]; then
+    mkdir -p /etc/osquery
+    cat > /etc/osquery/osquery.conf <<'EOF'
+{
+  "schedule": {
+    "system_info": { "query": "SELECT hostname, cpu_brand, physical_memory FROM system_info;", "interval": 60 },
+    "listening_ports": { "query": "SELECT pid, port, protocol FROM listening_ports;", "interval": 60 }
+  }
+}
+EOF
+fi
+
 # --- system services the capability tests need ---
+# osqueryd itself is NOT started here: the osquery wodle above runs with
+# <run_daemon>yes</run_daemon>, meaning Wazuh spawns and owns its own
+# osqueryd process. A second, independently-started osqueryd collides with
+# it over osquery's own sqlite lock file and osqueryd exits (code 78).
 mkdir -p /run/sshd
 service rsyslog start || rsyslogd || true
 /usr/sbin/sshd
-command -v osqueryd >/dev/null 2>&1 && (osqueryd --config_path=/etc/osquery/osquery.conf --pidfile=/var/run/osqueryd.pid --daemonize --disable_watchdog || true)
 
 # --- enroll with the master if we don't already have keys ---
 if [ ! -s "$CLIENT_KEYS" ]; then

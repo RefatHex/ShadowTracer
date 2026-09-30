@@ -4,6 +4,51 @@ Lab: `deploy/lab/`. All images built from this fork's own source (no
 published `wazuh/*` images used). Host: WSL2 (Ubuntu 22.04, 12 vCPU, 7.4GiB
 RAM), Docker Desktop 4.91.0.
 
+## Session paused here — status and rules for the next session
+
+**Done:** Step 0, Step 1, Step 2's cluster core, Step 3 items 1-13 (all
+with real evidence above; item 13's config still needs moving to a mounted
+file per rule 1 below — it was verified live but the fix wasn't baked into
+a rebuilt image before the pause). **Not started:** Step 3 item 14 (data
+volume), items 15-17 (failure behavior), Step 4 (smoke test script), Step 5
+(final resource-usage/surprises write-up).
+
+This session lost a large amount of time to two compounding problems: (a)
+Docker Desktop's WSL integration repeatedly dropped and had to be manually
+restarted (many times), and (b) every config-only change (entrypoint
+scripts, `preloaded-vars*.conf`) required a full image rebuild because
+`COPY . .` in the Dockerfiles happens before the compile step, so editing
+anything under `deploy/lab/` invalidated the compile cache and forced a
+13+ minute recompile just to test a one-line shell script change. Rules
+for next session, to avoid repeating both:
+
+1. Do not rebuild images for config changes. Mount `deploy/lab/` configs
+   (entrypoint scripts, `preloaded-vars*.conf`, `ar.conf`, `osquery.conf`,
+   etc.) as volumes in `docker-compose.yml` instead of `COPY`-ing them at
+   build time. Rebuild only when source or packages actually change.
+2. In the Dockerfiles, order the compile step *before* anything
+   config-related, so config-only edits (once no longer baked in per rule
+   1, this mostly matters for anything that must still be `COPY`'d) don't
+   bust the build cache.
+3. Build with `-j4`, not `-j$(nproc)` — this environment's `nproc` (12)
+   was oversubscribing and likely contributing to build flakiness.
+4. If a `docker build` fails twice for environment reasons (Docker Desktop
+   down, a build silently hanging at "exporting layers" for 30+ minutes,
+   etc.) rather than a real error in our code — STOP and report. Do not
+   retry in a loop.
+5. Item 13 (osquery): already verified WORKS with real evidence (see Step
+   3 table) — don't re-verify from scratch, just move the wodle-enable +
+   schedule config into a mounted file per rule 1.
+6. Item 14 (data volume): do a 15-minute `logall_json` capture, not the
+   full hour — report the `archives.json`-to-`alerts.json` size ratio.
+7. Then items 15-17 (failure behavior), then the smoke test script, then
+   the Step 5 findings report.
+8. The agent/load-balancer failure (Step 2 — classic Wazuh TCP secure
+   mode can't disambiguate multiple agents behind one shared-IP LB) is a
+   confirmed, documented limitation of this phase's design, not a bug to
+   keep chasing. Record it as an open item carried forward to Phase 3
+   rather than reopening the investigation.
+
 ## Step 1 — images built from source
 
 | Image | Size | Build time | Notes |
@@ -191,13 +236,28 @@ the events but *without* the standard syslog prefix — timestamp, hostname,
 `sshd[pid]:` tag — that Wazuh's `sshd` decoder needs to identify the source
 program. Reverted; the permission fix is the real one.)
 
+| 6 | FIM: create/modify a file in a monitored directory → alert | **WORKS** | Created then appended to `/var/ossec/lab-fim-test/testfile.txt` (realtime-watched). Rule `554` "File added to the system" fired immediately, then rule `550` "Integrity checksum changed" (MITRE T1565.001) on the edit, with full before/after size, mtime, md5/sha1/sha256 in the alert's `syscheck` object. |
+| 7 | SCA: a policy scan runs and results appear | **WORKS** | `sca: INFO: Security Configuration Assessment scan finished. Duration: 20 seconds.` in the agent log. Summary alert (rule `19003`) reached the manager: CIS Ubuntu Linux 22.04 LTS Benchmark, 90 passed / 83 failed / 34 invalid of 207 checks, score 52%. |
+| 8 | Rootcheck runs | **WORKS** | Agent log: `rootcheck: INFO: Starting rootcheck scan.` → `rootcheck: INFO: Ending rootcheck scan.` |
+| 9 | Syscollector: installed packages available via the API | **WORKS** | `GET /syscollector/002/packages` (after authenticating as `wazuh-wui`) returned 139 packages for `agent-ubuntu-1`, each with name/version/architecture/vendor/size — e.g. `dpkg 1.21.1ubuntu2.6`, `sudo 1.9.9-1ubuntu2.6`. |
+| 10 | Active response: `ar.conf` present, `disable-account` works end to end on throwaway user `sttest` | **WORKS**, needed two real fixes | `ar.conf` ships with only `restart-ossec`/`restart-wazuh` entries; `disable-account`'s `<command>` block already exists in `ossec.conf` by default. Triggering it via the API's `PUT /active-response` initially failed twice: (1) referencing it by an `ar.conf` name (even after adding one) hit `WazuhError 1652 "command not defined"` — the fix is the `!<script-name>` syntax (`"command":"!disable-account"`), which bypasses the `ar.conf`-name lookup entirely; (2) the script (`src/active-response/disable-account.c`) reads the target username *only* from `alert.data.dstuser` — passing it via `arguments`/`extra_args` (the intuitive-looking approach) silently no-ops with "Cannot read 'dstuser' from data". Correct payload: `{"command":"!disable-account","alert":{"data":{"dstuser":"sttest"}}}`. Confirmed locked (`passwd -S sttest` → `L`) immediately after. The API's `PUT /active-response` only triggers the "add" action — reversal normally fires automatically when `ar.conf`'s timeout field expires (ours was `0` = never); there's no documented "run delete now" call on this endpoint, so re-enable + delete were done directly (`usermod -U sttest`, `userdel -r sttest`) to finish the throwaway-user cleanup. |
+| 11 | VirusTotal integration | **SKIPPED** | `VT_API_KEY` in `deploy/lab/.env` is blank — per the task spec itself ("Leave blank to skip that test"), not attempted. Needs a real key from whoever runs this lab next. |
+| 12 | Vulnerability detection without an indexer | **Runs, produces nothing** | `<vulnerability-detection><enabled>yes</enabled>` ships on by default. `wazuh-modulesd:vulnerability-scanner` starts and runs `Initiating update feed process` on schedule — no crash, no fatal error. But every one of its outputs (vulnerabilities, package/system/process/port/hardware inventory — 15 distinct `wazuh-states-*` indices) is designed to land in the Wazuh **indexer**, not classic `alerts.json`. With no indexer running, `indexer-connector` logs `IndexerConnector initialization failed for index '...', retrying until successful` for all 15 indices, forever, and **zero** vulnerability alerts ever appear in `alerts.json`. This directly answers the open question in `DECISIONS.md`: **classic alerts.json is not a viable path for vulnerability data under our indexer-less design — a custom consumer would need to either stand up a compatible indexer/OpenSearch endpoint, or hook `indexer-connector`'s output some other way.** |
+| 13 | OSQuery on an agent: wodle runs, results arrive | **WORKS**, needed two real fixes | Two gaps, both in our own lab config, not upstream: (a) `<wodle name="osquery">` ships `<disabled>yes</disabled>` by default; (b) `/etc/osquery/osquery.conf` (the path our own entrypoint already pointed `osqueryd` at) never existed, so there was nothing to schedule. Fixed by flipping the wodle to enabled and writing a minimal schedule (`system_info`, `listening_ports`, 60s interval). Once fixed, a *third* issue surfaced: the wodle has `<run_daemon>yes</run_daemon>`, meaning Wazuh spawns and owns its own `osqueryd` — our entrypoint was *also* manually launching one, and the two collided over osquery's own sqlite lock file (`osqueryd` exiting with code 78). Removed the manual launch; the wodle exclusively owns `osqueryd` now. Verified live (before the config was moved to a mounted file per this session's new build-discipline rule): `osqueryd.results.log` filled with real `system_info` (hostname, CPU, RAM) and `listening_ports` rows. |
+
+### A fifth and sixth real bug, found getting items 10 and 13 to work
+
+**Active response (item 10):** see the two fixes described in the table row above — `!command` syntax instead of an `ar.conf` name, and `alert.data.dstuser` instead of `arguments`.
+
+**OSQuery (item 13):** the osquery wodle ships disabled with no query schedule file in place, and — once enabled — conflicts with a second, independently-started `osqueryd` process over its own lock file if both are allowed to run. See table row above for the full fix.
+
 ## Step 4 — smoke test
 
-_(pending)_
+_(pending — next session)_
 
 ## Resource usage
 
-_(pending)_
+_(pending — next session)_
 
 ## Surprises
 
