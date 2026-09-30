@@ -4,6 +4,15 @@ x-manager-build: &manager-build
   context: ../..
   dockerfile: deploy/lab/manager.Dockerfile
 
+# Agents connect directly to their assigned worker (see PHASE1_FINDINGS.md:
+# classic Wazuh TCP secure mode identifies "any"-registered agents by the
+# !<id>! dynamic-ID prefix, which this build's wazuh-agentd doesn't send -
+# confirmed via packet capture - so remoted falls back to IP-based lookup,
+# which can never disambiguate multiple agents sharing one address. That
+# breaks agent traffic through a shared-IP load balancer. Agents are
+# registered with their own static IP instead of "any", split 2-and-2
+# directly across the two workers. shadowtracer-lb is kept running (Step 2
+# still asked for it) but no agent traffic actually flows through it.
 x-agent-env: &agent-env
   MANAGER_ENROLL_HOST: wazuh-master
   ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
@@ -23,7 +32,8 @@ services:
       # network (the Windows host has had Hyper-V reserve those before).
       - "127.0.0.1:55000:55000"
     networks:
-      - lab
+      lab:
+        ipv4_address: 172.28.0.10
 
   wazuh-worker1:
     build: *manager-build
@@ -38,7 +48,8 @@ services:
       wazuh-master:
         condition: service_healthy
     networks:
-      - lab
+      lab:
+        ipv4_address: 172.28.0.11
 
   wazuh-worker2:
     build: *manager-build
@@ -53,11 +64,11 @@ services:
       wazuh-master:
         condition: service_healthy
     networks:
-      - lab
+      lab:
+        ipv4_address: 172.28.0.12
 
-  # Agent data plane (1514) load balancer. Its hostname "shadowtracer-lb" is
-  # baked into the agent images as USER_AGENT_SERVER_NAME, so agents connect
-  # here for events; enrollment (1515) bypasses this and goes to the master.
+  # Agent event traffic (1514) load balancer. Kept running per the Step 2
+  # spec, but agent traffic bypasses it - see the note above x-agent-env.
   shadowtracer-lb:
     image: haproxy:2.9-alpine
     hostname: shadowtracer-lb
@@ -67,7 +78,8 @@ services:
       - wazuh-worker1
       - wazuh-worker2
     networks:
-      - lab
+      lab:
+        ipv4_address: 172.28.0.13
 
   agent-ubuntu-1:
     build:
@@ -75,14 +87,15 @@ services:
       dockerfile: deploy/lab/agent-ubuntu.Dockerfile
     image: shadowtracer-lab/agent-ubuntu:local
     hostname: agent-ubuntu-1
-    environment: *agent-env
+    environment:
+      <<: *agent-env
+      AGENT_MANAGER_DATA_HOST: wazuh-worker1
     depends_on:
-      wazuh-master:
+      wazuh-worker1:
         condition: service_healthy
-      shadowtracer-lb:
-        condition: service_started
     networks:
-      - lab
+      lab:
+        ipv4_address: 172.28.0.21
 
   agent-ubuntu-2:
     build:
@@ -90,14 +103,15 @@ services:
       dockerfile: deploy/lab/agent-ubuntu.Dockerfile
     image: shadowtracer-lab/agent-ubuntu:local
     hostname: agent-ubuntu-2
-    environment: *agent-env
+    environment:
+      <<: *agent-env
+      AGENT_MANAGER_DATA_HOST: wazuh-worker2
     depends_on:
-      wazuh-master:
+      wazuh-worker2:
         condition: service_healthy
-      shadowtracer-lb:
-        condition: service_started
     networks:
-      - lab
+      lab:
+        ipv4_address: 172.28.0.22
 
   agent-rocky-1:
     build:
@@ -105,14 +119,15 @@ services:
       dockerfile: deploy/lab/agent-rocky.Dockerfile
     image: shadowtracer-lab/agent-rocky:local
     hostname: agent-rocky-1
-    environment: *agent-env
+    environment:
+      <<: *agent-env
+      AGENT_MANAGER_DATA_HOST: wazuh-worker1
     depends_on:
-      wazuh-master:
+      wazuh-worker1:
         condition: service_healthy
-      shadowtracer-lb:
-        condition: service_started
     networks:
-      - lab
+      lab:
+        ipv4_address: 172.28.0.23
 
   agent-rocky-2:
     build:
@@ -120,15 +135,19 @@ services:
       dockerfile: deploy/lab/agent-rocky.Dockerfile
     image: shadowtracer-lab/agent-rocky:local
     hostname: agent-rocky-2
-    environment: *agent-env
+    environment:
+      <<: *agent-env
+      AGENT_MANAGER_DATA_HOST: wazuh-worker2
     depends_on:
-      wazuh-master:
+      wazuh-worker2:
         condition: service_healthy
-      shadowtracer-lb:
-        condition: service_started
     networks:
-      - lab
+      lab:
+        ipv4_address: 172.28.0.24
 
 networks:
   lab:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

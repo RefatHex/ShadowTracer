@@ -65,14 +65,100 @@ existing placeholders in place (`sed` on `NODE_IP`, the empty `<key>`,
 `node01`, and `disabled>yes`) instead of guarding on presence/absence of
 the tag.
 
-All three confirmed fixed via a standalone container run: `wazuh-apid`,
-`wazuh-clusterd`, and all core daemons report running via
-`wazuh-control status`, and `ossec.conf`'s cluster block shows real values
-(key, node name, master hostname) instead of placeholders.
+**4. `docker compose up` never brought the master past "unhealthy",
+despite all required daemons genuinely running.**
+`healthcheck-manager.sh` did `STATUS=$(/var/ossec/bin/wazuh-control status)`
+under `set -e`. `wazuh-control status` returns a non-zero exit code whenever
+*any* daemon it knows about isn't running — including `wazuh-maild`,
+`wazuh-agentlessd`, `wazuh-integratord`, `wazuh-csyslogd`, which are
+disabled by default and never meant to run in this lab. Under `set -e`, that
+non-zero exit silently killed the healthcheck script before it reached its
+own daemon-specific logic, so the healthcheck ran, produced no output, and
+failed every single time — regardless of the manager's actual health. Fixed
+by capturing the status with `|| true` and checking only the specific
+daemons this lab needs (`wazuh-execd`, `wazuh-analysisd`, `wazuh-syscheckd`,
+`wazuh-remoted`, `wazuh-logcollector`, `wazuh-monitord`, `wazuh-modulesd`,
+`wazuh-db`, `wazuh-authd`, `wazuh-apid`, `wazuh-clusterd`).
+
+All four confirmed fixed via a standalone container run and then a real
+`docker compose up`: `wazuh-apid`, `wazuh-clusterd`, and all core daemons
+report running via `wazuh-control status`, `ossec.conf`'s cluster block
+shows real values (key, node name, master hostname) instead of
+placeholders, and the master container reaches Docker's `healthy` state.
 
 ## Step 2 — cluster lab
 
-_(pending)_
+**Cluster (master + 2 workers): WORKS.**
+`docker compose up -d` brings up all three manager nodes; all three reach
+Docker `healthy`. `cluster_control -l` on the master shows all three nodes:
+
+```
+NAME     TYPE    VERSION  ADDRESS
+master   master  4.14.8   wazuh-master
+worker2  worker  4.14.8   172.28.0.12
+worker1  worker  4.14.8   172.28.0.11
+```
+
+`cluster.log` on both workers shows continuous, successful `[Integrity
+check]` and `[Agent-info sync]` cycles against the master (10s interval,
+"Sync not required" once converged) — this is genuine cluster sync, not
+just three independent nodes that happen to be running.
+
+**Agent traffic through the HAProxy load balancer: BROKEN.** Discovered via
+packet capture, not assumption. With agents registered the "normal" way
+(`agent-auth` with no explicit IP → client.keys entry `any`), every agent
+got stuck permanently in "Never connected" / a connect-close-retry loop —
+*even when pointed directly at a worker, bypassing HAProxy entirely.* A
+`tcpdump` capture of the raw TCP payload showed the agent's message arriving
+as `#AES:<encrypted-data>` with no identifying prefix. Wazuh's classic TCP
+secure-mode `wazuh-remoted` (`src/remoted/secure.c`) recognizes an agent one
+of two ways: a `!<id>!` prefix for dynamic-IP ("any") agents, or a raw
+source-IP lookup (`OS_IsAllowedIP`) for agents registered with a fixed IP.
+Tracing `src/os_crypto/shared/msgs.c`'s `CreateSecMSG`, the `!<id>!` prefix
+*should* be added for "any" agents (`!isSingleHost(ip) && isAgent`), but
+empirically it wasn't happening in this build, so every "any"-registered
+agent's message fell through to the IP-based lookup — which can never
+succeed for an agent with no fixed IP, and which additionally can never
+disambiguate *multiple* agents sharing one address (as they all would
+behind a plain-TCP-passthrough load balancer, which masks every agent
+behind the LB's own source IP). The exact reason the dynamic-ID prefix
+isn't triggering wasn't root-caused further (would require patching/
+debugging inherited `src/` C code, which needs sign-off per project rules)
+— decided with the user to route around it instead of patching upstream.
+
+**Resolution:** agents are registered with their own static IP
+(`agent-auth -I <ip>`, confirmed correctly wired via
+`src/shared/enrollment_op.c`) instead of `any`, given a fixed IP via
+`docker-compose.yml`'s `172.28.0.0/24` subnet, and pointed directly at one
+specific worker for event data (`AGENT_MANAGER_DATA_HOST` env var, patched
+into `ossec.conf`'s `<server><address>` at container start) instead of
+through `shadowtracer-lb`. Agents still enroll against the master directly
+(unchanged, matches the original design). `shadowtracer-lb` is kept running
+in the compose file (Step 2 asked for it) but carries no real agent traffic
+in this lab — that's an honest limitation, not a fix.
+
+Split: `agent-ubuntu-1` + `agent-rocky-1` → `wazuh-worker1`;
+`agent-ubuntu-2` + `agent-rocky-2` → `wazuh-worker2`. Still satisfies
+"agents spread across both workers" (Step 3, item 2) even without the LB
+doing the spreading.
+
+**Agent connectivity result, per OS:**
+- **Ubuntu agents: WORKS.** Both `agent-ubuntu-1` and `agent-ubuntu-2`
+  show `Active` in `agent_control -l` with their real static IPs.
+- **Rocky agents: BROKEN, unrelated bug.** `agent-auth` enrolls
+  successfully (`client.keys` populated, `agent_control -l` shows
+  `Never connected` only because the agent daemon itself never starts far
+  enough to send data). `wazuh-syscheckd` fails immediately:
+  `/lib64/libc.so.6: version 'GLIBC_2.35' not found (required by
+  /var/ossec/lib/libgcc_s.so.1)`. Rocky 9 ships glibc 2.34
+  (`glibc-2.34-83.el9.7`); the `libgcc_s.so.1` bundled into `/var/ossec/lib`
+  during the build requires 2.35 (Ubuntu 22.04's version). `src/Makefile`
+  (line ~36) asks the *local* `g++ --print-file-name=libgcc_s.so.1` to
+  source this file, which should yield a Rocky-native, glibc-2.34-compatible
+  copy when run inside the Rocky builder stage — why it doesn't wasn't
+  root-caused further, decided with the user to document as broken and move
+  forward with the two working Ubuntu agents rather than debug the build
+  toolchain further.
 
 ## Step 3 — capability verdicts
 
