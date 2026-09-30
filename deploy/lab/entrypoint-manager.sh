@@ -12,25 +12,18 @@ ENROLL_PASSWORD="${ENROLL_PASSWORD:?ENROLL_PASSWORD is required}"
 
 OSSEC_CONF=/var/ossec/etc/ossec.conf
 
-if ! grep -q "<cluster>" "$OSSEC_CONF"; then
-    cluster_block=$(cat <<EOF
-  <cluster>
-    <name>shadowtracer-lab</name>
-    <node_name>${CLUSTER_NODE_NAME}</node_name>
-    <node_type>${CLUSTER_NODE_TYPE}</node_type>
-    <key>${CLUSTER_KEY}</key>
-    <port>1516</port>
-    <bind_addr>0.0.0.0</bind_addr>
-    <nodes>
-      <node>${CLUSTER_MASTER_NAME}</node>
-    </nodes>
-    <hidden>no</hidden>
-    <disabled>no</disabled>
-  </cluster>
-EOF
-)
-    awk -v block="$cluster_block" '/<\/ossec_config>/{print block} {print}' "$OSSEC_CONF" > "${OSSEC_CONF}.tmp"
-    mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
+# The installed ossec.conf already ships a <cluster> block with placeholder
+# values (empty <key>, node_name=node01, <node>NODE_IP</node>, disabled=yes)
+# - it's never absent, so patch those placeholders in place rather than
+# guarding on "<cluster> missing" (which never happens and silently no-ops).
+if grep -q "<node>NODE_IP</node>" "$OSSEC_CONF"; then
+    sed -i \
+        -e "s:<node_name>node01</node_name>:<node_name>${CLUSTER_NODE_NAME}</node_name>:" \
+        -e "s:<node_type>master</node_type>:<node_type>${CLUSTER_NODE_TYPE}</node_type>:" \
+        -e "s:<key></key>:<key>${CLUSTER_KEY}</key>:" \
+        -e "s:<node>NODE_IP</node>:<node>${CLUSTER_MASTER_NAME}</node>:" \
+        -e "s:<disabled>yes</disabled>:<disabled>no</disabled>:" \
+        "$OSSEC_CONF"
 
     # authd: require a password for enrollment (default ships use_password=no)
     sed -i 's:<use_password>no</use_password>:<use_password>yes</use_password>:' "$OSSEC_CONF"
@@ -42,7 +35,7 @@ fi
 # API: bind all interfaces, raise the request rate limit for lab load-testing.
 API_YAML=/var/ossec/api/configuration/api.yaml
 if [ -f "$API_YAML" ] && ! grep -q "^host:" "$API_YAML"; then
-    { echo "host: ['0.0.0.0']"; echo "max_request_per_minute: 99999"; } >> "$API_YAML"
+    { echo "host: ['0.0.0.0']"; echo "access:"; echo "  max_request_per_minute: 99999"; } >> "$API_YAML"
 fi
 
 /var/ossec/bin/wazuh-control start
