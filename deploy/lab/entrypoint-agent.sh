@@ -27,6 +27,22 @@ if ! grep -q "$FIM_TEST_DIR" "$OSSEC_CONF"; then
     mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
 fi
 
+# --- one-time runtime config: monitor the sshd auth log (not in the
+# default localfile list) so the brute-force/active-response tests fire ---
+AUTH_LOG=/var/log/auth.log
+[ -f /etc/debian_version ] || AUTH_LOG=/var/log/secure
+if ! grep -q "$AUTH_LOG" "$OSSEC_CONF"; then
+    # rsyslog runs as syslog:adm (mode 0640) after dropping root - pre-create
+    # the file with root:root/644 (plain touch) and rsyslog can never write
+    # to it, so nothing ever lands here. Match rsyslog's own file ownership.
+    touch "$AUTH_LOG"
+    chown syslog:adm "$AUTH_LOG" 2>/dev/null || true
+    chmod 640 "$AUTH_LOG"
+    auth_block="  <localfile><log_format>syslog</log_format><location>${AUTH_LOG}</location></localfile>"
+    awk -v block="$auth_block" '/<\/ossec_config>/{print block} {print}' "$OSSEC_CONF" > "${OSSEC_CONF}.tmp"
+    mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
+fi
+
 # --- system services the capability tests need ---
 mkdir -p /run/sshd
 service rsyslog start || rsyslogd || true

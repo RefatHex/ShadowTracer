@@ -162,7 +162,34 @@ doing the spreading.
 
 ## Step 3 — capability verdicts
 
-_(pending — table of all 17 items to follow)_
+| # | Item | Verdict | Evidence |
+|---|---|---|---|
+| 1 | All 3 nodes connected | **WORKS** | `cluster_control -l` on the master lists all 3 nodes (master, worker1, worker2), each `4.14.8`, workers showing their real cluster-network IPs. |
+| 2 | Agents spread across both workers, all active | **PARTIAL** | 2 of 4 agents active (both Ubuntu, one per worker — `agent-ubuntu-1`→worker1, `agent-ubuntu-2`→worker2), spread as designed. Rocky agents broken on an unrelated glibc bug (below). |
+| 3 | Every node writes its own alerts.json, with `cluster.node`/`manager.name` | **WORKS** | worker1's alert: `"cluster":{"name":"wazuh","node":"worker1"},"manager":{"name":"wazuh-worker1"}`. worker2's: `"cluster":{"name":"wazuh","node":"worker2"},"manager":{"name":"wazuh-worker2"}`. Both fields present and correctly distinct per node. |
+| 4 | Can two workers produce the same alert "id"? | **YES, they can collide** | The `id` field is `<unix_timestamp>.<per-manager-counter>` — e.g. worker1 produced `1790808809.1702794`, worker2 produced `1790808851.1702462`. Both components are generated **independently per manager process** with no node/cluster discriminator embedded. In this run the timestamps happened to differ enough to keep them apart, but nothing prevents two workers from firing an alert in the same second with the same local counter value and producing an identical `id`. **Consequence for later phases:** `id` alone is not a safe dedup/primary key across a cluster — pair it with `cluster.node` or `manager.name`. |
+| 5 | SSH brute force → sshd rules fire | **WORKS** | 8 failed logins against each of the 2 active agents fired real rules: `5760` "sshd: authentication failed" (level 5), `5551` "PAM: Multiple failed logins in a small period of time" (level 10), `5763` "sshd: brute force trying to get access to the system" (level 10) — all tagged MITRE ATT&CK T1110 (Brute Force). Fired on both workers, for both agents. |
+
+### A fourth real bug, found getting item 5 to work: rsyslog silently drops auth-facility messages written to a `touch`-created file
+
+`entrypoint-agent.sh` added `/var/log/auth.log` as a monitored `<localfile>` (the
+default agent config doesn't monitor it at all — a gap in our own lab config,
+not Wazuh's), and pre-created the file with a plain `touch` so Wazuh wouldn't
+choke on a missing file at startup. The failed SSH logins landed in `sshd`'s
+own log stream correctly, but **nothing ever reached `/var/log/auth.log`** —
+confirmed with `logger -p auth.info "test"` landing nowhere, while
+`logger -p mail.err "test"` (untouched, rsyslog-owned file) worked fine.
+Root cause: `touch` (running as root) created the file `root:root` mode
+`644`. `rsyslog.conf` has `$PrivDropToUser syslog` / `$PrivDropToGroup syslog`
+— rsyslog drops root after starting and then can't *write* to a file it
+doesn't own that isn't group-writable. It fails silently; no error surfaced
+anywhere we were looking. `mail.err` worked because rsyslog created that file
+itself (`syslog:adm`, `0640`, matching its own `$FileCreateMode`). Fixed by
+`chown syslog:adm` + `chmod 640` immediately after the `touch`. (A detour:
+first tried `sshd -E <file>` to bypass syslog entirely, which does capture
+the events but *without* the standard syslog prefix — timestamp, hostname,
+`sshd[pid]:` tag — that Wazuh's `sshd` decoder needs to identify the source
+program. Reverted; the permission fix is the real one.)
 
 ## Step 4 — smoke test
 
