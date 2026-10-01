@@ -35,12 +35,20 @@ as upstream ships it; our own project docs live in
 5. Rebuild (`cd src && make deps && make TARGET=server && make TARGET=agent`).
 6. Smoke test the affected component before merging.
 
-## Wazuh files we modified
+## Change categories
 
-| File | Reason | Date |
+Every inherited-path change (added/modified/deleted) vs `v4.14.8` is listed
+in [`shadowtracer/docs/MODIFIED_FILES.txt`](shadowtracer/docs/MODIFIED_FILES.txt)
+(regenerate with `shadowtracer/scripts/gen-modified-files.sh`). Every path
+in that file must match at least one `Patterns` entry below — `check-
+project.sh` fails otherwise, so a new kind of change means a new row here
+before it can land, not a note added after the fact.
+
+| Category | Patterns | Reason |
 |------|--------|------|
-| `.gitignore` | Appended ShadowTracer-specific ignore patterns (`__pycache__/`, `node_modules/`, `.env`, etc.) below upstream's list | 2026-09-29 |
-| `.github/workflows/*` (all except `ci.yml`) | Deleted (77 files). Upstream CI needs Wazuh's own infrastructure (AWS OIDC roles, self-hosted runners, internal secrets) that doesn't exist in this fork; left in place they'd fire on every push and fail instantly. `.github/actions/` and `.github/scripts/` were left as-is (inert without a workflow invoking them). | 2026-09-29 |
+| CI workflow replacement | `.github/workflows/*` | Upstream's `4_*.yml` workflows need Wazuh's own infrastructure (AWS OIDC roles, self-hosted runners, internal secrets) that doesn't exist in this fork; left in place they'd fire on every push and fail instantly. Deleted all 77 and added one `ci.yml` that actually runs here. `.github/actions/` and `.github/scripts/` were left as-is (inert without a workflow invoking them). |
+| gitignore additions | `.gitignore` | Appended ShadowTracer-specific ignore patterns (`__pycache__/`, `node_modules/`, `.env`, etc.) below upstream's list. |
+| Repo governance files | `UPSTREAM.md` `check-project.sh` `.dockerignore` `.gitattributes` | New root-level files that track and enforce the fork boundary and build hygiene; they describe the whole repository rather than our own code, so they live at the root, not under `shadowtracer/`. |
 
 ## Upstream check log
 

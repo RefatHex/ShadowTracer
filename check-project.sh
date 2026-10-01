@@ -16,20 +16,31 @@ if git rev-parse v4.14.8^{commit} >/dev/null 2>&1; then
     mode_changes=$(git diff --summary v4.14.8 -- . ':!shadowtracer' ':!deploy' 2>/dev/null | grep 'mode change')
     [ -z "$mode_changes" ] || die "file mode changed vs v4.14.8 outside shadowtracer/ and deploy/: $(echo "$mode_changes" | tr '\n' ';')"
 
-    # Every inherited file that changed or was deleted vs v4.14.8 must be
-    # recorded in UPSTREAM.md's "Wazuh files we modified" table.
-    patterns=$(grep -oE '^\| `[^`]+`' UPSTREAM.md | sed -E 's/^\| `//; s/`$//')
+    # shadowtracer/docs/MODIFIED_FILES.txt must exactly match the real
+    # inherited-path diff - it's generated, not hand-maintained, so a stale
+    # copy means someone changed an inherited file and forgot to rerun
+    # gen-modified-files.sh (or regenerate it and forgot to commit it).
+    current_diff=$(shadowtracer/scripts/gen-modified-files.sh 2>/dev/null)
+    committed_list=$(cat shadowtracer/docs/MODIFIED_FILES.txt 2>/dev/null)
+    if [ "$current_diff" != "$committed_list" ]; then
+        die "shadowtracer/docs/MODIFIED_FILES.txt is stale - rerun shadowtracer/scripts/gen-modified-files.sh and commit the result"
+    fi
+
+    # Every path in MODIFIED_FILES.txt must match a Patterns entry in
+    # UPSTREAM.md's change-categories table - a reason recorded by category,
+    # not hunted down file by file after the fact.
+    patterns=$(awk -F'|' '/^\|/{print $3}' UPSTREAM.md | grep -oE '`[^`]+`' | sed -E 's/`//g')
     missing=""
     while IFS=$'\t' read -r status path; do
-        case "$status" in M|D) ;; *) continue ;; esac
+        [ -z "$path" ] && continue
         matched=0
         while IFS= read -r pat; do
             [ -z "$pat" ] && continue
             case "$path" in $pat) matched=1; break ;; esac
         done <<<"$patterns"
         [ "$matched" -eq 1 ] || missing="$missing $path"
-    done < <(git diff --name-status v4.14.8 -- . ':!shadowtracer' ':!deploy' 2>/dev/null)
-    [ -z "$missing" ] || die "inherited file(s) changed/deleted but not recorded in UPSTREAM.md:$missing"
+    done <<<"$committed_list"
+    [ -z "$missing" ] || die "inherited path(s) changed but not covered by any category in UPSTREAM.md:$missing"
 fi
 
 # http-request submodule must be present and populated
