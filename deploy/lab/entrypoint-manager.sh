@@ -25,6 +25,18 @@ if grep -q "<node>NODE_IP</node>" "$OSSEC_CONF"; then
         -e "s:<disabled>yes</disabled>:<disabled>no</disabled>:" \
         "$OSSEC_CONF"
 
+    # Phase 3 DECISIONS.md: pin hide_cluster_info to "no". The installed
+    # template already ships <hidden>no</hidden> in the cluster block, but
+    # pin it explicitly (covering both "tag present but yes" and "tag
+    # missing") so this doesn't silently regress if a future upstream
+    # template changes the default - alert identity in Phase 3 depends on
+    # cluster.node always being present.
+    if grep -q "<hidden>" "$OSSEC_CONF"; then
+        sed -i 's:<hidden>yes</hidden>:<hidden>no</hidden>:' "$OSSEC_CONF"
+    else
+        sed -i '/<\/cluster>/i\    <hidden>no</hidden>' "$OSSEC_CONF"
+    fi
+
     # authd: require a password for enrollment (default ships use_password=no)
     sed -i 's:<use_password>no</use_password>:<use_password>yes</use_password>:' "$OSSEC_CONF"
     echo -n "${ENROLL_PASSWORD}" > /var/ossec/etc/authd.pass

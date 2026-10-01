@@ -8,11 +8,32 @@
 
 ## Open decisions
 
-- Capacity target
-- Queue technology
 - ML feature location
-- Tenancy model
 - Licensing model
+
+## Phase 3: queue, tenancy, alert identity, capacity (decided)
+
+- **Queue: Apache Kafka, KRaft mode (no ZooKeeper), Apache 2.0 licence.**
+  Lab runs 1 broker (combined controller+broker). Production runs 3 brokers
+  (quorum tolerates 1 node loss). Official `apache/kafka` image used, not a
+  vendor repackaging, to stay inside the Apache 2.0 licence decision.
+- **Tenancy: every event carries `tenant_id`.** The lab's only tenant is
+  `"lab"`. `tenant_id` is the leading component of the Kafka message key
+  (`tenant_id + agent_id`) and the first column in ClickHouse's sort key, so
+  both partitioning and query pruning are tenant-aware from day one even
+  with a single tenant in the lab.
+- **Alert identity: `(cluster.node, alert id)`.** Phase 1 (item 4) proved
+  Wazuh's own `id` field (`<unix_timestamp>.<counter>`) is generated
+  per-manager-process with no cluster discriminator and can collide across
+  nodes. `hide_cluster_info` is pinned to `no` on every manager (see
+  `deploy/lab/entrypoint-manager.sh`) so `cluster.node` is always present in
+  alert JSON. If `cluster.node` is ever missing (e.g. a non-clustered
+  manager), the normaliser falls back to `manager.name` and logs a counted
+  warning - see `shadowtracer/docs/PHASE3_DATA_PLATFORM.md`.
+- **Capacity target (placeholder for sizing, not measured): 5,000
+  endpoints, 90 days hot/searchable, 1 year archived.** Re-measured against
+  real ingest rates in Phase 6; today it only shapes the ClickHouse TTL
+  policy (see the data-platform doc).
 
 ## Operational findings carried from Phase 1
 
@@ -39,6 +60,74 @@
   it only re-evaluates the server list on its next connection loss. Any
   load-rebalancing design must account for this (manual or forced
   reconnect, not automatic rebalancing).
+
+## Phase 3 Step 0: carry-over fixes from Phase 1/2
+
+**Packaging (`.deb`/`.rpm`): still blocked, unchanged from Phase 2.**
+`cat /proc/cmdline` on this host shows no `vsyscall=emulate` (kernel
+6.18.40.1-microsoft-standard-WSL2 doesn't support the flag at all - it's not
+missing from the boot config, the kernel has no vsyscall page). Re-ran the
+Phase 2 reproduction directly: `docker run --rm debian:7 bash -c "apt-get
+update"` segfaults immediately (exit 139 = SIGSEGV), identically to Phase 2.
+Since the host is unchanged, this doesn't newly fix the Rocky glibc failure
+either (that's a separate, already-diagnosed bug - see Phase 1 Step 2: the
+Rocky image's bundled `libgcc_s.so.1` wants glibc 2.35, Rocky 9 ships 2.34).
+**Recorded, not re-attempted further** - per the task's own instruction, needs
+a host with real vsyscall support (older kernel, or a VM) or a from-scratch
+non-`debian:7` packaging base, neither of which is in scope to improvise here.
+
+**Agent event loss during failover: root cause is the transport, not a
+buffer setting.** Traced through `src/client-agent/{buffer,sendmsg,receiver}.c`:
+- `queue_size`/`events_per_second` (`client_buffer` block, defaults 5000 /
+  500/s) only govern the agent's in-memory ring buffer. At 20 events over a
+  5.5-minute outage, that buffer was never remotely close to full - this
+  wasn't a capacity problem.
+- `send_msg()` (`src/client-agent/sendmsg.c`) has **no requeue on failure**.
+  `dispatch_buffer()` pops a message off the ring buffer *before* calling
+  `send_msg()`; if the send fails, the message is logged and freed, never
+  put back. There is no per-event application-level ACK in classic Wazuh's
+  TCP secure mode - "sent" means "accepted into the OS socket buffer," not
+  "received by the manager."
+- Outage detection (`os_setwait()`, which pauses `dispatch_buffer` via
+  `os_wait()`) only fires when `receive_msg()` returns an error in
+  `receiver.c`'s 1-second `select()` loop - i.e. on the *read* side noticing
+  the connection is dead. Between the manager process actually dying and
+  that read-side error surfacing, a `send()` on a TCP socket can return
+  success purely because the OS buffered it locally, even though the peer
+  is already gone (no RST has arrived yet). A message sent in that narrow
+  window is silently swallowed - accepted by the local kernel, never
+  delivered, and (per the point above) never retried because `send_msg()`
+  already reported success and freed it.
+- **Conclusion:** this is an inherent gap in classic Wazuh's fire-and-forget
+  TCP transport, not a misconfigured client.conf. No `client_buffer` setting
+  closes it. This is exactly why Phase 3's shipper (Step 3) does not trust
+  the agent-to-manager wire for durability - it tails the manager's own
+  `alerts.json` after the fact and treats *that* as the durable source of
+  truth, with its own Kafka-acked offset. Not fixed (fixing it would mean
+  patching inherited `src/client-agent` C code, same class of change Phase 2
+  explicitly deferred without sign-off); recorded as a known upstream
+  limitation that Phase 3's design already routes around.
+
+**Agent load balancer: real root cause found, not a config issue.** Phase 1
+traced the symptom (no `!<id>!` dynamic-ID prefix on "any"-registered
+agents' traffic) but didn't find the cause. Found it this session in
+`src/shared/validate_op.c`'s `OS_IsValidIP()`: when the input IP string is
+literally `"any"`, the function takes an early-return path that **never
+allocates `final_ip->ipv4`** (it stays NULL from the initial `memset`) -
+that branch is only populated when the regex-based IPv4/IPv6 matching runs,
+which is skipped entirely for `"any"`. `isSingleHost()`
+(`src/headers/validate_op.h`) then unconditionally dereferences
+`x->ipv4->netmask` whenever `x->is_ipv6` is false - a NULL-pointer read for
+every "any"-registered agent's key entry. `CreateSecMSG()`
+(`src/os_crypto/shared/msgs.c`) uses `!isSingleHost(...) && isAgent` to
+decide whether to prepend the dynamic-ID prefix; the undefined read makes
+that check unreliable, matching the observed behavior (no prefix ever sent).
+**This is a genuine bug in inherited, shared (non-agent-only) C code, not a
+lab config problem** - no `ossec.conf` setting can route around a NULL
+dereference inside shared validation code. Per the same sign-off rule as
+Phase 2's daemon-rename decision, not patched here. Phase 1's workaround
+(static IPs per agent, direct-to-worker, LB carries no real agent traffic)
+stands as the documented resolution for this lab.
 
 ## Phase 2 Pass C decision: daemon names and the system user are kept
 
