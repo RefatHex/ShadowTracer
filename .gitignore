@@ -180,3 +180,4 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env
+.venv/
