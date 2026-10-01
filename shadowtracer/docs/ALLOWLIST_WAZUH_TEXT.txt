@@ -1,0 +1,572 @@
+api/api/spec/spec.yaml:12329:      the filesystem relative to Wazuh installation folder"
+api/api/spec/spec.yaml:14854:                  -  Updated by Wazuh, Inc.
+api/api/spec/spec.yaml:14855:                  -  Copyright (C) 2015, Wazuh Inc.
+api/api/spec/spec.yaml:15637:                  -  Wazuh decoders
+api/api/spec/spec.yaml:15638:                  -  Created by Wazuh, Inc.
+api/api/spec/spec.yaml:15639:                  -  Copyright (C) 2015, Wazuh Inc.
+api/api/spec/spec.yaml:18131:                name: "Wazuh"
+api/api/spec/spec.yaml:19866:                    - version: "Wazuh v4.3.0"
+api/api/spec/spec.yaml:19892:                      version: "Wazuh v4.3.0"
+api/api/spec/spec.yaml:4172:          against the Wazuh ruleset to raise alerts. This variable shows usage of that queue"
+api/api/spec/spec.yaml:7922:                      version: Wazuh v4.3.0
+api/api/spec/spec.yaml:7947:                      version: Wazuh v4.3.0
+api/api/spec/spec.yaml:7972:                      version: Wazuh v4.3.0
+api/api/spec/spec.yaml:9231:                      version: Wazuh v3.0.0
+api/api/spec/spec.yaml:9256:                      version: Wazuh v3.0.0
+api/api/spec/spec.yaml:9789:                      version: Wazuh v4.3.0
+api/api/spec/spec.yaml:9815:                      version: Wazuh v4.3.0
+api/api/spec/spec.yaml:9841:                      version: Wazuh v4.3.0
+etc/templates/br/messages.txt:103:tostart="Para iniciar Wazuh"
+etc/templates/br/messages.txt:104:tostop="Para parar Wazuh"
+etc/templates/br/messages.txt:110:wanttoupdate="Wazuh ja esta instalado. Deseja atualiza-lo?"
+etc/templates/br/messages.txt:14:starting="Iniciando Wazuh"
+etc/templates/br/messages.txt:16:modifiedinit="O script de inicialização foi modificado para executar Wazuh durante o boot."
+etc/templates/br/messages.txt:32:wheretoinstall="Escolha onde instalar Wazuh"
+etc/templates/br/messages.txt:47:serverip="Qual é o endereço de IP do servidor Wazuh?"
+etc/templates/br/messages.txt:48:serveraddr="Qual é o endereço de IP/hostname do servidor Wazuh?"
+etc/templates/br/messages.txt:96:startwazuh="Deseja iniciar o Wazuh após a instalação?"
+etc/templates/br/messages.txt:97:nowazuhstart="Wazuh não iniciará no final da instalação."
+etc/templates/br/messages.txt:98:yeswazuhstart="Wazuh começará no final da instalação."
+etc/templates/br/messages/0x101-initial.txt:2: Você está iniciando o processo de instalação do Wazuh.
+etc/templates/br/messages/0x103-thanksforusing.txt:2:   Obrigado por usar Wazuh.
+etc/templates/br/messages/0x105-noboot.txt:2: - Nenhuma ação foi tomada para que Wazuh inicie
+etc/templates/br/messages/0x109-castore.txt:5:       o certificado raiz do Wazuh está instalado.
+etc/templates/cn/messages.txt:101:tostart="要启动 Wazuh"
+etc/templates/cn/messages.txt:102:tostop="要停止 Wazuh"
+etc/templates/cn/messages.txt:108:wanttoupdate="您已经安装过 Wazuh ,要升级它吗?"
+etc/templates/cn/messages.txt:13:starting="正在启动 Wazuh "
+etc/templates/cn/messages.txt:15:modifiedinit="修改启动脚本使 Wazuh 在系统启动时自动运行 "
+etc/templates/cn/messages.txt:31:wheretoinstall="请选择 Wazuh 的安装路径"
+etc/templates/cn/messages.txt:32:installat="Wazuh 将安装在 "
+etc/templates/cn/messages.txt:46:serverip="请输入 Wazuh 服务器的IP地址"
+etc/templates/cn/messages.txt:47:serveraddr="请输入 Wazuh 服务器的IP地址或主机名"
+etc/templates/cn/messages.txt:94:startwazuh="你想在安装后启动Wazuh吗？"
+etc/templates/cn/messages.txt:95:nowazuhstart="Wazuh不会在安装结束时开始。"
+etc/templates/cn/messages.txt:96:yeswazuhstart="Wazuh将在安装结束时开始。"
+etc/templates/cn/messages/0x101-initial.txt:2: 您将开始 Wazuh 的安装.
+etc/templates/cn/messages/0x103-thanksforusing.txt:2:    感謝您使用Wazuh。
+etc/templates/cn/messages/0x105-noboot.txt:2: - 未能配置 Wazuh 在系统启动时自动允许.
+etc/templates/cn/messages/0x109-castore.txt:5:       安裝了Wazuh的根證書。
+etc/templates/config/generic/header-comments.template:2:  Wazuh - TYPE - Default configuration for DISTRIBUTION VERSION
+etc/templates/de/messages.txt:103:tostart="Um Wazuh zu starten"
+etc/templates/de/messages.txt:104:tostop="Um Wazuh zu stoppen"
+etc/templates/de/messages.txt:110:wanttoupdate="Wazuh ist bereits installiert. Möchten Sie es updaten?"
+etc/templates/de/messages.txt:14:starting="Starte Wazuh"
+etc/templates/de/messages.txt:16:modifiedinit="Init script wurde verändert um Wazuh beim boot zu starten."
+etc/templates/de/messages.txt:32:wheretoinstall="Bitte wöhlen Sie wo Wazuh installiert werden soll"
+etc/templates/de/messages.txt:47:serverip="Wie lautet die IP Adresse des Wazuh Servers?"
+etc/templates/de/messages.txt:48:serveraddr="Wie lautet die IP Adresse/Host des Wazuh Servers?"
+etc/templates/de/messages.txt:96:startwazuh="Möchten Sie Wazuh nach der Installation starten?"
+etc/templates/de/messages.txt:97:nowazuhstart="Wazuh startet nicht am Ende der Installation."
+etc/templates/de/messages.txt:98:yeswazuhstart="Wazuh wird am Ende der Installation starten."
+etc/templates/de/messages/0x101-initial.txt:2: Um Wazuh zu installieren muss auf Ihrem System ein C-Compiler
+etc/templates/de/messages/0x103-thanksforusing.txt:2:    Vielen Dank für Wazuh benutzen.
+etc/templates/de/messages/0x105-noboot.txt:2: - Es wurde kein Startup Script erstellt. Um Wazuh beim booten
+etc/templates/de/messages/0x109-castore.txt:5:       das Wurzelzertifikat von Wazuh installiert.
+etc/templates/el/messages.txt:101:tostart="Για να ξεκινήσετε το Wazuh"
+etc/templates/el/messages.txt:102:tostop="Για να σταματήσετε το Wazuh"
+etc/templates/el/messages.txt:108:wanttoupdate="Βρέθηκε εγκατεστημένο Wazuh. Θέλετε να το ενημερώσετε;"
+etc/templates/el/messages.txt:13:starting="Εκκινώντας το Wazuh"
+etc/templates/el/messages.txt:15:modifiedinit="To init script τροποποιήθηκε προκειμένου να ξεκινάει Wazuh κατά την εκκίνηση του συστήματος."
+etc/templates/el/messages.txt:31:wheretoinstall="Επιλέξτε την τοποθεσία εγκατάστασης του Wazuh"
+etc/templates/el/messages.txt:46:serverip="Ποιά είναι η διεύθυνση IP του διακομιστή Wazuh;"
+etc/templates/el/messages.txt:47:serveraddr="Ποιά είναι η διεύθυνση IP/Host του διακομιστή Wazuh;"
+etc/templates/el/messages.txt:94:startwazuh="Θέλετε να ξεκινήσετε το Wazuh μετά την εγκατάσταση;"
+etc/templates/el/messages.txt:95:nowazuhstart="Το Wazuh δεν θα ξεκινήσει στο τέλος της εγκατάστασης."
+etc/templates/el/messages.txt:96:yeswazuhstart="Το Wazuh θα ξεκινήσει στο τέλος της εγκατάστασης."
+etc/templates/el/messages/0x101-initial.txt:2: Πρόκειται να ξεκινήσετε τη διαδικασία εγκατάστασης του Wazuh.
+etc/templates/el/messages/0x103-thanksforusing.txt:2:    Ευχαριστώ για τη χρήση Wazuh.
+etc/templates/el/messages/0x105-noboot.txt:2: - Δεν έγινε καμία ενέργεια για να ρυθμιστεί το Wazuh
+etc/templates/el/messages/0x109-castore.txt:5:       the root certificate by Wazuh is installed.
+etc/templates/en/messages/0x109-castore.txt:5:       the root certificate by Wazuh is installed.
+etc/templates/es/messages.txt:100:tostart="Para iniciar Wazuh"
+etc/templates/es/messages.txt:101:tostop="Para detener Wazuh"
+etc/templates/es/messages.txt:107:wanttoupdate="Wazuh ya ha sido instalado previamente. ¿Desea actualizarlo?"
+etc/templates/es/messages.txt:13:starting="Iniciando Wazuh"
+etc/templates/es/messages.txt:15:modifiedinit="Init script modificado para iniciar Wazuh durante el arranque."
+etc/templates/es/messages.txt:31:wheretoinstall="Elija dónde instalar Wazuh"
+etc/templates/es/messages.txt:46:serverip="¿Cuál es la dirección del servidor Wazuh?"
+etc/templates/es/messages.txt:47:serveraddr="¿Cuál es la dirección o nombre del servidor Wazuh?"
+etc/templates/es/messages.txt:93:startwazuh="¿Desea iniciar Wazuh al finalizar la instalación?"
+etc/templates/es/messages.txt:94:nowazuhstart="Wazuh no se inicializará al finalizar la instalación."
+etc/templates/es/messages.txt:95:yeswazuhstart="Wazuh se inicializará al finalizar la instalación."
+etc/templates/es/messages/0x101-initial.txt:2: Va a comenzar con el proceso de instalación de Wazuh.
+etc/templates/es/messages/0x103-thanksforusing.txt:2:   Gracias por utilizar Wazuh.
+etc/templates/es/messages/0x105-noboot.txt:2: - No se ha tomado acción para configurar la ejecución de Wazuh
+etc/templates/es/messages/0x109-castore.txt:5:       defecto, el certificado raíz de Wazuh está instalado.
+etc/templates/fr/messages.txt:101:tostart="Pour démarrer Wazuh"
+etc/templates/fr/messages.txt:102:tostop="Pour arrêter Wazuh"
+etc/templates/fr/messages.txt:108:wanttoupdate="Vous avez déjà installé Wazuh. Voulez-vous le mettre à jour ?"
+etc/templates/fr/messages.txt:13:modifiedinit="Script d'initialisation modifié pour démarrer Wazuh pendant le boot."
+etc/templates/fr/messages.txt:15:modifiedinit="Script d'initialisation modifié pour démarrer OSSEC Wazuh pendant le boot."
+etc/templates/fr/messages.txt:31:wheretoinstall="Choisissez votre répertoire d'installation de Wazuh"
+etc/templates/fr/messages.txt:46:serverip="Quelle est l'adresse IP de votre serveur Wazuh ?"
+etc/templates/fr/messages.txt:47:serveraddr="Quelle est l'adresse IP ou le nom d'hôte de votre serveur Wazuh ?"
+etc/templates/fr/messages.txt:94:startwazuh="Voulez-vous démarrer Wazuh après l'installation?"
+etc/templates/fr/messages.txt:95:nowazuhstart="Wazuh ne démarrera pas à la fin de l'installation."
+etc/templates/fr/messages.txt:96:yeswazuhstart="Wazuh démarrera pas à la fin de l'installation."
+etc/templates/fr/messages/0x101-initial.txt:2: Vous êtes sur le point d'installer Wazuh.
+etc/templates/fr/messages/0x103-thanksforusing.txt:2:    Merci d'avoir utilisé Wazuh.
+etc/templates/fr/messages/0x105-noboot.txt:2: - Aucune action n'a été faite pour configurer Wazuh pour
+etc/templates/fr/messages/0x109-castore.txt:5:       le certificat racine de Wazuh est installé.
+etc/templates/hu/messages.txt:101:tostart="Az Wazuh indítása"
+etc/templates/hu/messages.txt:102:tostop="Az Wazuh leállítása"
+etc/templates/hu/messages.txt:109:wanttoupdate="Az Wazuh már telepítve van. Szeretné frissíteni?"
+etc/templates/hu/messages.txt:13:starting="Wazuh Indítása"
+etc/templates/hu/messages.txt:15:modifiedinit="Init script módosítva, hogy bootoláskor automatikusan indítsa az Wazuh-et."
+etc/templates/hu/messages.txt:31:wheretoinstall="Válassza ki az Wazuh telepítési helyét"
+etc/templates/hu/messages.txt:46:serverip="Mi az IP címe az Wazuh szervernek?"
+etc/templates/hu/messages.txt:47:serveraddr="Mi az IP címe/hoszt neve az Wazuh szervernek?"
+etc/templates/hu/messages.txt:94:startwazuh="Szeretné elindítani a Wazuh-ot a telepítés után?"
+etc/templates/hu/messages.txt:95:nowazuhstart="A Wazuh nem indul el a telepítés végén."
+etc/templates/hu/messages.txt:96:yeswazuhstart="A Wazuh a telepítés végén kezdődik."
+etc/templates/hu/messages/0x101-initial.txt:2: Ön elindította az Wazuh telepítési folyamatát.
+etc/templates/hu/messages/0x103-thanksforusing.txt:2:    Köszönjük, hogy a Wazuh.
+etc/templates/hu/messages/0x105-noboot.txt:2: - Nem történt intézkedés az Wazuh bootoláskor
+etc/templates/hu/messages/0x109-castore.txt:5:       szerint a Wazuh gyökér-tanúsítványa telepítve van.
+etc/templates/it/messages.txt:100:tostart="Per avviare Wazuh"
+etc/templates/it/messages.txt:101:tostop="Per arrestare Wazuh"
+etc/templates/it/messages.txt:107:wanttoupdate="Wazuh è già stato installato. Vuoi aggiornarlo?"
+etc/templates/it/messages.txt:13:starting="Avvio Wazuh"
+etc/templates/it/messages.txt:15:modifiedinit="Script di Init modificato per eseguire Wazuh in fase di boot."
+etc/templates/it/messages.txt:31:wheretoinstall="Scegli dove installare Wazuh"
+etc/templates/it/messages.txt:46:serverip="Qual'è l'indirizzo IP del server Wazuh?"
+etc/templates/it/messages.txt:47:serveraddr="Qual'è l'indirizzo IP/host del server Wazuh?"
+etc/templates/it/messages.txt:93:startwazuh="Vuoi iniziare Wazuh dopo l'installazione?"
+etc/templates/it/messages.txt:94:nowazuhstart="Wazuh non inizierà alla fine dell'installazione."
+etc/templates/it/messages.txt:95:yeswazuhstart="Wazuh inizierà alla fine dell'installazione."
+etc/templates/it/messages/0x101-initial.txt:2: Stai per iniziare il processo di installazione di Wazuh.
+etc/templates/it/messages/0x103-thanksforusing.txt:2:    Grazie per aver utilizzato Wazuh.
+etc/templates/it/messages/0x105-noboot.txt:2: - Non è stata effettuata alcuna modifica per avviare Wazuh
+etc/templates/it/messages/0x109-castore.txt:5:       impostazione predefinita, viene installato il certificato principale di Wazuh.
+etc/templates/jp/messages.txt:100:nowazuhstart="Wazuhはインストールの最後に開始されません。"
+etc/templates/jp/messages.txt:101:yeswazuhstart="Wazuhはインストールの最後に始まります。"
+etc/templates/jp/messages.txt:107:tostart="Wazuh を開始させます"
+etc/templates/jp/messages.txt:108:tostop="Wazuh を停止させます"
+etc/templates/jp/messages.txt:114:wanttoupdate="既に Wazuh がインストールされています．アップデートしますか?"
+etc/templates/jp/messages.txt:14:starting="Wazuh を起動します"
+etc/templates/jp/messages.txt:16:modifiedinit="Init script modified to start Wazuh during boot."
+etc/templates/jp/messages.txt:17:modifiedinit="初期スクリプトはブート中に Wazuh を起動するよう修正しました．"
+etc/templates/jp/messages.txt:33:wheretoinstall="Choose where to install Wazuh"
+etc/templates/jp/messages.txt:34:wheretoinstall="Wazuh のインストール先を選択してください"
+etc/templates/jp/messages.txt:49:serverip="Wazuh サーバの IP アドレスは何ですか?"
+etc/templates/jp/messages.txt:50:serveraddr="Wazuh サーバの IP/hostname アドレスは何ですか?"
+etc/templates/jp/messages.txt:99:startwazuh="インストール後にWazuhを開始しますか？"
+etc/templates/jp/messages/0x101-initial.txt:2: Wazuh のインストール作業を始めます．
+etc/templates/jp/messages/0x103-thanksforusing.txt:1:		Wazuhを使用していただきありがとうございます。
+etc/templates/jp/messages/0x105-noboot.txt:2: - 起動中において，Wazuh を開始し設定する動作が行われませんでした．
+etc/templates/jp/messages/0x109-castore.txt:5:       デフォルトでは、Wazuhによるルート証明書がインストールされています。
+etc/templates/nl/messages.txt:101:tostart="Om Wazuh te starten"
+etc/templates/nl/messages.txt:102:tostop="Om Wazuh te stoppen"
+etc/templates/nl/messages.txt:108:wanttoupdate="U heeft Wazuh reeds geinstalleerd. Wilt u actualiseren?"
+etc/templates/nl/messages.txt:13:starting="Bezig met starten van Wazuh"
+etc/templates/nl/messages.txt:15:modifiedinit="Init script aangepast om Wazuh te laden tijdens opstarten."
+etc/templates/nl/messages.txt:31:wheretoinstall="Waar wilt u Wazuh installaren"
+etc/templates/nl/messages.txt:46:serverip="Wat is het IP adres van uw Wazuh host?"
+etc/templates/nl/messages.txt:47:serveraddr="Wat is het IP adres/host van uw Wazuh host?"
+etc/templates/nl/messages.txt:94:startwazuh="Wilt u na de installatie Wazuh starten?"
+etc/templates/nl/messages.txt:95:nowazuhstart="Wazuh start niet aan het einde van de installatie."
+etc/templates/nl/messages.txt:96:yeswazuhstart="Wazuh start aan het einde van de installatie."
+etc/templates/nl/messages/0x101-initial.txt:2: U staat op het punt om het installatie proces te starten van Wazuh.
+etc/templates/nl/messages/0x103-thanksforusing.txt:2:    Bedankt voor het gebruik Wazuh.
+etc/templates/nl/messages/0x105-noboot.txt:3:   Wazuh. U dient de volgede regel toe te voegen aan uw initscript:
+etc/templates/nl/messages/0x109-castore.txt:5:       Standaard is het root certificaat van Wazuh geïnstalleerd.
+etc/templates/pl/messages.txt:101:tostart="Aby wystartować Wazuh"
+etc/templates/pl/messages.txt:102:tostop="Aby zatrzymać Wazuh"
+etc/templates/pl/messages.txt:108:wanttoupdate="Masz już zainstalowany Wazuh. Czy chcesz dokonać aktualizacji?"
+etc/templates/pl/messages.txt:13:starting="Rozpoczynam Wazuh"
+etc/templates/pl/messages.txt:15:modifiedinit="Init skrypt zmodyfikowany do uruchomiania Wazuh podczas bootowania."
+etc/templates/pl/messages.txt:31:wheretoinstall="Wybierz katalog w którym zainstalować Wazuh"
+etc/templates/pl/messages.txt:32:installat="Wazuh zostanie zainstalowane w :"
+etc/templates/pl/messages.txt:46:serverip="Podaj adres IP serwera Wazuh."
+etc/templates/pl/messages.txt:47:serveraddr="Podaj adres IP (hostname) serwera Wazuh."
+etc/templates/pl/messages.txt:94:startwazuh="Chcete spustit aplikaci Wazuh po instalaci?"
+etc/templates/pl/messages.txt:95:nowazuhstart="Wazuh nezačne na konci instalace."
+etc/templates/pl/messages.txt:96:yeswazuhstart="Wazuh začne na konci instalace."
+etc/templates/pl/messages/0x101-initial.txt:2: Rozpoczynasz proces instalacji programu Wazuh.
+etc/templates/pl/messages/0x103-thanksforusing.txt:2:    Dziękujemy za korzystanie z Wazuh.
+etc/templates/pl/messages/0x105-noboot.txt:2: - Nie została podjęta żadna akcja aby skonfigurować Wazuh
+etc/templates/pl/messages/0x109-castore.txt:5:       zainstalowany certyfikat główny firmy Wazuh.
+etc/templates/ru/messages.txt:101:tostart="Запустить Wazuh"
+etc/templates/ru/messages.txt:102:tostop="Завершить работу Wazuh"
+etc/templates/ru/messages.txt:108:wanttoupdate="Wazuh уже установлен на этой машине. Хотите ли Вы обновить его?"
+etc/templates/ru/messages.txt:13:starting="Запуск Wazuh"
+etc/templates/ru/messages.txt:15:modifiedinit="Init скрипт модифицирован чтобы програма Wazuh запускалась при перезагрузке компьютера."
+etc/templates/ru/messages.txt:31:wheretoinstall="Укажите куда установить Wazuh"
+etc/templates/ru/messages.txt:46:serverip="Какой IP адрес у Вашего Wazuh сервера?"
+etc/templates/ru/messages.txt:47:serveraddr="Какой IP адрес (Hostname) у Вашего Wazuh сервера?"
+etc/templates/ru/messages.txt:94:startwazuh="Вы хотите запустить Wazuh после установки?"
+etc/templates/ru/messages.txt:95:nowazuhstart="Wazuh не запускается в конце установки."
+etc/templates/ru/messages.txt:96:yeswazuhstart="Wazuh начнется в конце установки."
+etc/templates/ru/messages/0x101-initial.txt:2:Вы готовы начать процесс установки Wazuh. Для следующего шага на Вашей
+etc/templates/ru/messages/0x103-thanksforusing.txt:2:    Благодарим Вас за использование Wazuh.
+etc/templates/ru/messages/0x105-noboot.txt:1: - Никаких изменений с целью запускать Wazuh при перезагрузке системы 
+etc/templates/ru/messages/0x109-castore.txt:5:       установлен корневой сертификат Wazuh.
+etc/templates/sr/messages.txt:101:tostart="Da se započne Wazuh"
+etc/templates/sr/messages.txt:102:tostop="Da se zaustavi Wazuh"
+etc/templates/sr/messages.txt:109:wanttoupdate="Već imaš instaliran Wazuh. Da li želiš da ga ažuriraš?"
+etc/templates/sr/messages.txt:13:starting="Zapocinje Wazuh"
+etc/templates/sr/messages.txt:15:modifiedinit="Init skript je modifikovan da započne Wazuh za vreme startovanja ."
+etc/templates/sr/messages.txt:31:wheretoinstall="Izaberi gde želiš da instaliraš Wazuh"
+etc/templates/sr/messages.txt:46:serverip="Koja je IP adresa Wazuh servera?"
+etc/templates/sr/messages.txt:47:serveraddr="Koja je IP adresa/host Wazuh servera?"
+etc/templates/sr/messages.txt:94:startwazuh="Želite li pokrenuti Wazuh nakon instalacije?"
+etc/templates/sr/messages.txt:95:nowazuhstart="Wazuh neće početi na kraju instalacije."
+etc/templates/sr/messages.txt:96:yeswazuhstart="Wazuh će započeti na kraju instalacije."
+etc/templates/sr/messages/0x101-initial.txt:2: Nalaziš se pred početkom instalacionog proces Wazuh.
+etc/templates/sr/messages/0x103-thanksforusing.txt:2:    Hvala što koristite Wazuh.
+etc/templates/sr/messages/0x105-noboot.txt:1:   Ništa nije preduzeto da konfiguriše Wazuh da startuje
+etc/templates/sr/messages/0x109-castore.txt:5:       postavkama instalira se korijenska potvrda tvrtke Wazuh.
+etc/templates/tr/messages.txt:101:tostart="Wazuh'i başlatmak için"
+etc/templates/tr/messages.txt:102:tostop="Wazuh'i durdurmak için"
+etc/templates/tr/messages.txt:108:wanttoupdate="Bir Wazuh kurulumu mevcut. Güncellemek ister misiniz?"
+etc/templates/tr/messages.txt:13:starting="Wazuh başlatılıyor"
+etc/templates/tr/messages.txt:15:modifiedinit="Wazuh'i önyüklemede başlatmak için başlangıç betiği değiştirildi."
+etc/templates/tr/messages.txt:31:wheretoinstall="Wazuh kurulacak yeri seçin"
+etc/templates/tr/messages.txt:46:serverip="Wazuh sunucusunun IP adresi nedir?"
+etc/templates/tr/messages.txt:47:serveraddr="Wazuh sunucusunun IP adresi veya ismi nedir?"
+etc/templates/tr/messages.txt:94:startwazuh="Kurulumdan sonra Wazuh'u başlatmak istiyor musunuz?"
+etc/templates/tr/messages.txt:95:nowazuhstart="Wazuh kurulumun sonunda başlamaz."
+etc/templates/tr/messages.txt:96:yeswazuhstart="Wazuh kurulumun sonunda başlayacak."
+etc/templates/tr/messages/0x101-initial.txt:2: Wazuh kurulum sürecini başlatmak üzeresiniz.
+etc/templates/tr/messages/0x103-thanksforusing.txt:2:    Wazuh'u kullandığınız için teşekkür ederiz.
+etc/templates/tr/messages/0x105-noboot.txt:2: - Önyükleme sırasında Wazuh'i başlatmak için hiç birşey yapılmadı.
+etc/templates/tr/messages/0x109-castore.txt:5:       sertifikası Wazuh tarafından yüklenir.
+install.sh:122:    # If update, stop Wazuh
+install.sh:124:        echo "Stopping Wazuh..."
+install.sh:133:    # Install Wazuh ruleset updater
+install.sh:138:    # Calling the init script to start Wazuh during boot
+install.sh:142:    # If update, start Wazuh
+install.sh:145:        # Update versions previous to Wazuh 1.2
+install.sh:147:        echo "Starting Wazuh..."
+install.sh:154:        echo "Starting Wazuh..."
+install.sh:2:# Copyright (C) 2015, Wazuh Inc.
+install.sh:3:# Installation script for Wazuh
+install.sh:625:                echo "      Stopping Wazuh..."
+packages/debs/SPECS/wazuh-agent/debian/control:4:Maintainer: Wazuh <info@wazuh.com>
+packages/debs/SPECS/wazuh-agent/debian/postinst:126:    # Register and configure agent if Wazuh environment variables are defined
+packages/debs/SPECS/wazuh-agent/debian/postinst:3:# Wazuh, Inc 2015
+packages/debs/SPECS/wazuh-manager/debian/control:4:Maintainer: Wazuh <info@wazuh.com>
+packages/debs/SPECS/wazuh-manager/debian/postinst:2:# postinst script for Wazuh
+packages/debs/SPECS/wazuh-manager/debian/postinst:3:# Wazuh, Inc 2015
+packages/rpms/SPECS/wazuh-agent.spec:20:Vendor:      Wazuh <info@wazuh.com>
+packages/rpms/SPECS/wazuh-agent.spec:21:Packager:    Wazuh <info@wazuh.com>
+packages/rpms/SPECS/wazuh-agent.spec:288:  # Register and configure agent if Wazuh environment variables are defined
+packages/rpms/SPECS/wazuh-agent.spec:39:Wazuh helps you to gain security visibility into your infrastructure by monitoring
+packages/rpms/SPECS/wazuh-manager.spec:16:Vendor:      Wazuh <info@wazuh.com>
+packages/rpms/SPECS/wazuh-manager.spec:17:Packager:    Wazuh <info@wazuh.com>
+packages/rpms/SPECS/wazuh-manager.spec:301:  # Delete 3.X Wazuh API service
+packages/rpms/SPECS/wazuh-manager.spec:60:# Build Wazuh sources
+ruleset/rules/0010-rules_config.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0010-rules_config.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0015-ossec_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0015-ossec_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0016-wazuh_rules.xml:2:  -  Wazuh rules
+ruleset/rules/0016-wazuh_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0016-wazuh_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0017-wazuh-api_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0017-wazuh-api_rules.xml:6:  Wazuh API rules ID: 400 - 428
+ruleset/rules/0020-syslog_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0020-syslog_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0025-sendmail_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0025-sendmail_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0030-postfix_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0030-postfix_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0035-spamd_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0035-spamd_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0040-imapd_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0040-imapd_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0045-mailscanner_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0045-mailscanner_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0050-ms-exchange_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0050-ms-exchange_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0055-courier_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0055-courier_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0065-pix_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0065-pix_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0070-netscreenfw_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0070-netscreenfw_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0075-cisco-ios_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0075-cisco-ios_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0080-sonicwall_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0080-sonicwall_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0085-pam_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0085-pam_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0090-telnetd_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0090-telnetd_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0095-sshd_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0100-solaris_bsm_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0100-solaris_bsm_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0105-asterisk_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0105-asterisk_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0110-ms_dhcp_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0110-ms_dhcp_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0115-arpwatch_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0115-arpwatch_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0120-symantec-av_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0120-symantec-av_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0125-symantec-ws_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0125-symantec-ws_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0130-trend-osce_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0130-trend-osce_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0135-hordeimp_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0135-hordeimp_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0140-roundcube_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0140-roundcube_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0145-wordpress_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0145-wordpress_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0150-cimserver_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0150-cimserver_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0155-dovecot_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0155-dovecot_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0160-vmpop3d_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0160-vmpop3d_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0165-vpopmail_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0165-vpopmail_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0170-ftpd_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0170-ftpd_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0175-proftpd_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0180-pure-ftpd_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0180-pure-ftpd_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0185-vsftpd_rules.xml:6:  -  Updated by Wazuh, Inc.
+ruleset/rules/0185-vsftpd_rules.xml:7:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0190-ms_ftpd_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0190-ms_ftpd_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0195-named_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0195-named_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0200-smbd_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0200-smbd_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0205-racoon_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0205-racoon_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0210-vpn_concentrator_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0210-vpn_concentrator_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0215-policy_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0215-policy_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0220-msauth_rules.xml:1198:  Updated by Wazuh
+ruleset/rules/0220-msauth_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0220-msauth_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0225-mcafee_av_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0225-mcafee_av_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0230-ms-se_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0230-ms-se_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0235-vmware_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0240-ids_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0240-ids_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0245-web_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0245-web_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0250-apache_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0255-zeus_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0255-zeus_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0260-nginx_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0260-nginx_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0265-php_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0270-web_appsec_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0270-web_appsec_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0275-squid_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0275-squid_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0280-attack_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0280-attack_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0285-systemd_rules.xml:5:  -  Updated by Wazuh, Inc.
+ruleset/rules/0285-systemd_rules.xml:6:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0290-firewalld_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0290-firewalld_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0295-mysql_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0295-mysql_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0300-postgresql_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0300-postgresql_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0305-dropbear_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0305-dropbear_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0310-openbsd_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0310-openbsd_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0315-apparmor_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0315-apparmor_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0320-clam_av_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0320-clam_av_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0325-opensmtpd_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0325-opensmtpd_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0330-sysmon_rules.xml:122:    -  Updated by Wazuh, Inc. <support@wazuh.com>.
+ruleset/rules/0330-sysmon_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0330-sysmon_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0335-unbound_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0335-unbound_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0340-puppet_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0340-puppet_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0345-netscaler_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0345-netscaler_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0350-amazon_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0360-serv-u_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0360-serv-u_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0365-auditd_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0375-usb_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0375-usb_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0380-redis_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0380-redis_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0385-oscap_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0385-oscap_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0390-fortiddos_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0391-fortigate_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0392-fortimail_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0393-fortiauth_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0395-hp_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0395-hp_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0400-openvpn_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0400-openvpn_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0405-rsa-auth-manager_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0405-rsa-auth-manager_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0410-imperva_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0410-imperva_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0415-sophos_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0415-sophos_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0420-freeipa_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0420-freeipa_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0425-cisco-estreamer_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0425-cisco-estreamer_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0430-ms_wdefender_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0430-ms_wdefender_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0435-ms_logs_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0440-ms_sqlserver_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0440-ms_sqlserver_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0445-identity_guard_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0445-identity_guard_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0450-mongodb_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0450-mongodb_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0455-docker_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0455-docker_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0460-jenkins_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0460-jenkins_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0470-vshell_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0470-vshell_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0475-suricata_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0475-suricata_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0480-qualysguard_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0480-qualysguard_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0485-cylance_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0485-cylance_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0490-virustotal_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0490-virustotal_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0495-proxmox-ve_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0495-proxmox-ve_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0500-owncloud_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0500-owncloud_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0505-vuls_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0505-vuls_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0510-ciscat_rules.xml:15:    Wazuh v3.1 CIS-CAT events. Field: 'cis-data'
+ruleset/rules/0510-ciscat_rules.xml:16:    Wazuh v3.2 CIS-CAT events. Field: 'cis' -->
+ruleset/rules/0510-ciscat_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0510-ciscat_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0510-ciscat_rules.xml:54:  <!-- Rule to support CIS-CAT rules of Wazuh 3.1 -->
+ruleset/rules/0515-exim_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0520-vulnerability-detector_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0520-vulnerability-detector_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0525-openvas_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0525-openvas_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0530-mysql_audit_rules.xml:2:  -  Wazuh rules
+ruleset/rules/0530-mysql_audit_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0530-mysql_audit_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0535-mariadb_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0535-mariadb_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0540-pfsense_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0540-pfsense_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0545-osquery_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0545-osquery_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0550-kaspersky_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0550-kaspersky_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0555-azure_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0555-azure_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0560-docker_integration_rules.xml:3:    -  Created by Wazuh, Inc.
+ruleset/rules/0560-docker_integration_rules.xml:4:    -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0565-ms_ipsec_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0565-ms_ipsec_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0570-sca_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0570-sca_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0575-win-base_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0580-win-security_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0580-win-security_rules.xml:4:  -  Copyright (C) 2015-2021, Wazuh Inc.
+ruleset/rules/0585-win-application_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0590-win-system_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0590-win-system_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0595-win-sysmon_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0595-win-sysmon_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0600-win-wdefender_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0600-win-wdefender_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0601-win-vipre_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0601-win-vipre_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0602-win-wfirewall_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0602-win-wfirewall_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0605-win-mcafee_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0610-win-ms_logs_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0610-win-ms_logs_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0615-win-ms-se_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0620-win-generic_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0620-win-generic_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0625-cisco-asa_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0625-cisco-asa_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0625-mcafee_epo_rules.xml:3:  -  Updated by Wazuh, Inc.
+ruleset/rules/0625-mcafee_epo_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0630-nextcloud_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0635-owlh-zeek_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0635-owlh-zeek_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0640-junos_rules.xml:3:  - Created by Wazuh, Inc.
+ruleset/rules/0640-junos_rules.xml:4:  - Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0675-panda-paps_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0675-panda-paps_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0680-checkpoint-smart1_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0680-checkpoint-smart1_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0690-gcp_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0695-f5_bigip_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0700-paloalto_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0705-sophos_fw_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0705-sophos_fw_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0715-freepbx_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0715-freepbx_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0750-github_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0750-github_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0755-office365_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0755-office365_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0770-gitlab_rules.xml:2:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0775-arbor_rules.xml:3:  -  Created by Wazuh, Inc. <support@wazuh.com>.
+ruleset/rules/0775-arbor_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0780-fireeye_rules.xml:3:  -  Created by Wazuh, Inc. <support@wazuh.com>.
+ruleset/rules/0780-fireeye_rules.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0785-huawei-usg_rules.xml:4:  -  Wazuh, Inc. <support@wazuh.com>.
+ruleset/rules/0785-huawei-usg_rules.xml:5:  -  Copyright (C)  2015, Wazuh Inc.
+ruleset/rules/0800-sysmon_id_1.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0810-sysmon_id_3.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0820-sysmon_id_7.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0830-sysmon_id_11.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0840-win_event_channel.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0850-audit_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0860-sysmon_id_13.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0870-sysmon_id_8.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0900-firewall_rules.xml:4:  -  Updated by Wazuh, Inc.
+ruleset/rules/0900-firewall_rules.xml:5:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0905-cisco-ftd_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0910-ms-exchange-proxylogon_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0915-win-powershell_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0920-oracledb_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0925-eset-remote_rules.xml:2:  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0935-cloudflare-waf_rules.xml:2:    Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0945-sysmon_id_10.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0945-sysmon_id_10.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0950-sysmon_id_20.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0950-sysmon_id_20.xml:4:  -  Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0955-WEF-baseline_rules.xml:2:    Copyright (C) 2015, Wazuh Inc.
+ruleset/rules/0990-amazon-security-lake_rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0990-amazon-security-lake_rules.xml:4:  -  Copyright (C) 2023, Wazuh Inc.
+ruleset/rules/0998-aws-security-hub-rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0998-aws-security-hub-rules.xml:4:  -  Copyright (C) 2024, Wazuh Inc.
+ruleset/rules/0999-malicious-ioc-rules.xml:3:  -  Created by Wazuh, Inc.
+ruleset/rules/0999-malicious-ioc-rules.xml:4:  -  Copyright (C) 2025, Wazuh Inc.
+src/init/pkg_installer.sh:2:# Copyright (C) 2015, Wazuh Inc.
+src/init/wazuh-client.sh:14:VERSION="1.0.0-dev (based on Wazuh 4.14.8)"
+src/init/wazuh-client.sh:19:AUTHOR="Wazuh Inc."
+src/init/wazuh-client.sh:3:# Copyright (C) 2015, Wazuh Inc.
+src/init/wazuh-local.sh:16:VERSION="1.0.0-dev (based on Wazuh 4.14.8)"
+src/init/wazuh-local.sh:28:AUTHOR="Wazuh Inc."
+src/init/wazuh-local.sh:3:# Copyright (C) 2015, Wazuh Inc.
+src/init/wazuh-server.sh:16:VERSION="1.0.0-dev (based on Wazuh 4.14.8)"
+src/init/wazuh-server.sh:28:AUTHOR="Wazuh Inc."
+src/init/wazuh-server.sh:3:# Copyright (C) 2015, Wazuh Inc.
+src/win32/version.rc:2: * Copyright (C) 2015, Wazuh Inc.
+src/win32/version.rc:46:		VALUE "CompanyName",        "Wazuh Inc."
+src/win32/version.rc:49:		VALUE "LegalCopyright",     "Copyright (C) Wazuh, Inc."

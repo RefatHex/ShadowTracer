@@ -99,7 +99,7 @@ def check(result):
 
 def get_master_health(env_mode):
     os.system("/var/ossec/bin/agent_control -ls > /tmp_volume/output.txt")
-    os.system("/var/ossec/bin/wazuh-control status > /tmp_volume/daemons.txt")
+    os.system("/var/ossec/bin/shadowtracer-control status > /tmp_volume/daemons.txt")
 
     check0 = check(os.system("diff -q /tmp_volume/output.txt /tmp_volume/healthcheck/agent_control_check.txt"))
 
@@ -118,7 +118,7 @@ def get_master_health(env_mode):
 
 
 def get_worker_health():
-    os.system("/var/ossec/bin/wazuh-control status > /tmp_volume/daemons.txt")
+    os.system("/var/ossec/bin/shadowtracer-control status > /tmp_volume/daemons.txt")
     return check(os.system("diff -q /tmp_volume/daemons.txt /tmp_volume/healthcheck/daemons_check.txt"))
 
 

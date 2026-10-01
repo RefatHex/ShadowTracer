@@ -503,7 +503,7 @@ class Wazuh:
         return common.find_wazuh_path()
 
     def get_info(field: str) -> str:
-        """Get Wazuh information from wazuh-control.
+        """Get Wazuh information from shadowtracer-control.
 
         Parameters
         ----------
@@ -515,7 +515,7 @@ class Wazuh:
         str
             Field value.
         """
-        wazuh_control = os.path.join(Wazuh.get_install_path(), "bin", "wazuh-control")
+        wazuh_control = os.path.join(Wazuh.get_install_path(), "bin", "shadowtracer-control")
         wazuh_env_vars = dict()
         try:
             proc = subprocess.Popen([wazuh_control, "info"], stdout=subprocess.PIPE)

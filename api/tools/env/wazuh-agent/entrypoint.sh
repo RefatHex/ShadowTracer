@@ -8,7 +8,7 @@ sleep 1
 if [ $2  \< "4.2.0" ]; then
   /var/ossec/bin/ossec-control start
 else
-  /var/ossec/bin/wazuh-control start
+  /var/ossec/bin/shadowtracer-control start
 fi
 
 # Keep the container running

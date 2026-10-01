@@ -1,0 +1,46 @@
+# Paths allowed to still contain the literal strings "wazuh-control",
+# "wazuh-manager.service", or "wazuh-agent.service" after Phase 2 Pass B
+# renamed the control binary and both systemd units. Every other
+# occurrence is a real leftover reference that check-project.sh will fail
+# on - Pass B itself found and fixed several bugs this way (wodles/utils.py,
+# framework/scripts/wazuh_logtest.py, two cgroup-path lookups, an API spec
+# example). One path pattern per line; blank lines and lines starting with
+# # are ignored. Glob patterns are supported (shell case-style).
+
+# Attribution / historical record - never rewritten
+CHANGELOG.md
+BUGS
+INSTALL
+UPSTREAM.md
+
+# This checker's own implementation - it has to name the strings it's
+# checking for
+check-project.sh
+
+# Our own project docs - explain the rename itself or record history,
+# not leftover references
+shadowtracer/docs/*
+
+# Inert CI manifests/templates - not read by ci.yml (verified: ci.yml only
+# runs check-project.sh, a shell syntax sweep, and the agent build)
+.github/ISSUE_TEMPLATE/*
+.github/actions/check_files/*
+
+# Platforms with no available build/test environment (HP-UX, Solaris,
+# macOS) - edited for the control-binary/package work that could be
+# verified, not touched here; see Pass B's open items in REBRAND_PLAN.md
+packages/hp-ux/*
+packages/macos/*
+packages/solaris/*
+
+# Test code and QA fixtures - out of scope per the standing decision in
+# REBRAND_PLAN.md (tests are a consequence of a rename, not a rename
+# target); none of these run in ci.yml. "*" matches across "/" in shell
+# case patterns, so src/*/tests/* also covers deeper paths like
+# src/wazuh_modules/syscollector/tests/....
+framework/scripts/tests/*
+ruleset/testing/*
+tests/*
+src/*/tests/*
+src/*/qa/test_data/*
+src/shared_modules/dbsync/integrationTests/*

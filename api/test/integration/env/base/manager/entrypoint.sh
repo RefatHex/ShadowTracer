@@ -59,7 +59,7 @@ if [ "$4" != "standalone" ] && [ "$3" != "master" ]; then
 fi
 
 echo "" > /var/ossec/logs/api.log
-/var/ossec/bin/wazuh-control start
+/var/ossec/bin/shadowtracer-control start
 
 # Master-only configuration
 if [ "$3" == "master" ]; then

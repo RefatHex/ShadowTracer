@@ -39,3 +39,51 @@
   it only re-evaluates the server list on its next connection loss. Any
   load-rebalancing design must account for this (manual or forced
   reconnect, not automatic rebalancing).
+
+## Phase 2 Pass C decision: daemon names and the system user are kept
+
+**Decision:** do not rename the `wazuh-*` daemons or the `wazuh`/`wazuh`
+system user and group. Everything else in the rebrand (text, systemd
+units, the control binary, packages, deployment env vars - Pass A/B)
+proceeds as already done.
+
+**Reasons** (full data in `shadowtracer/docs/REBRAND_PLAN.md`'s Pass C
+section):
+- 166 inherited files touched, a much wider blast radius than Pass B's 45.
+- Conflicts with cleanly applying upstream security patches - daemon
+  names and the system user are exactly the kind of low-level identifier
+  upstream patches are least likely to rename but most likely to
+  reference by exact string (log parsing, privilege-drop code, cluster
+  health checks), so keeping them matching upstream keeps `git
+  cherry-pick`ing security fixes simple.
+- A proven, not hypothetical, decoder dependency:
+  `ruleset/decoders/0200-ossec_decoders.xml` pattern-matches the literal
+  string `wazuh-logcollector` to recognize Wazuh's own internal log
+  format, and already carries a legacy `ossec-logcollector` alternative
+  from the original OSSEC->Wazuh rename - this exact class of breakage
+  has happened before.
+- Privilege-drop risk: the system user is a C macro
+  (`src/headers/defs.h`'s `USER`/`GROUPGLOBAL`) used by ~15 daemons to
+  drop root after binding privileged ports/files, and drives `chown`
+  ownership of the entire `/var/ossec` tree at install time - renaming it
+  is a filesystem migration with real failure modes, not a text edit.
+
+**Revisit condition:** only before GA, and only if customers actually ask
+for it - not proactively.
+
+**If revisited, it will not be done by hand.** It will be a scripted,
+repeatable rename applied to a pristine upstream checkout (not to
+whatever hand-edited state the tree happens to be in), re-run after every
+upstream update rather than maintained as a one-time diff, so it never
+drifts out of sync with new daemons/files upstream adds. The script must
+include, at minimum:
+- Updating `ruleset/decoders/0200-ossec_decoders.xml`'s `prematch` to
+  accept both the `wazuh-` and `shadowtracer-` daemon-name forms (the
+  same dual-accept pattern the file already uses for the legacy
+  `ossec-` names), not replace one with the other.
+- Tests proving the ruleset's self-monitoring rules (anything matching
+  on a daemon's own log output) still fire correctly post-rename.
+- A clean-install test specifically for the renamed system user -
+  confirming privilege drop, file ownership, and queue socket
+  permissions all still work end to end, not just that the daemons
+  start.

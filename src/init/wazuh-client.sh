@@ -152,7 +152,7 @@ is_systemd() {
 add_to_cgroup()
 {
     AGENTD_PID=$(head -n 1 ${DIR}/var/run/wazuh-agentd-*.pid 2>/dev/null)
-    CGROUP_PATH="/sys/fs/cgroup/systemd/system.slice/wazuh-agent.service/cgroup.procs"
+    CGROUP_PATH="/sys/fs/cgroup/systemd/system.slice/shadowtracer-agent.service/cgroup.procs"
 
     # Check if cgroup path exists
     if [ ! -f "$CGROUP_PATH" ]; then

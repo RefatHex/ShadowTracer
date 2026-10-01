@@ -44,7 +44,7 @@ def find_wazuh_path() -> str:
 
 def call_wazuh_control(option: str) -> str:
     """
-    Execute the wazuh-control script with the parameters specified.
+    Execute the shadowtracer-control script with the parameters specified.
 
     Parameters
     ----------
@@ -54,9 +54,9 @@ def call_wazuh_control(option: str) -> str:
     Returns
     -------
     str
-        The output of the call to wazuh-control.
+        The output of the call to shadowtracer-control.
     """
-    wazuh_control = os.path.join(find_wazuh_path(), "bin", "wazuh-control")
+    wazuh_control = os.path.join(find_wazuh_path(), "bin", "shadowtracer-control")
     try:
         proc = subprocess.Popen([wazuh_control, option], stdout=subprocess.PIPE)
         (stdout, stderr) = proc.communicate()
@@ -68,7 +68,7 @@ def call_wazuh_control(option: str) -> str:
 
 def get_wazuh_info(field: str) -> str:
     """
-    Execute the wazuh-control script with the 'info' argument, filtering by field if specified.
+    Execute the shadowtracer-control script with the 'info' argument, filtering by field if specified.
 
     Parameters
     ----------
@@ -79,7 +79,7 @@ def get_wazuh_info(field: str) -> str:
     Returns
     -------
     str
-        The output of the wazuh-control script.
+        The output of the shadowtracer-control script.
     """
     wazuh_info = call_wazuh_control("info")
     if not wazuh_info:

@@ -25,6 +25,6 @@ for sh_file in /tmp_volume/configuration_files/*.sh; do
   . $sh_file
 done
 
-/var/ossec/bin/wazuh-control start || /var/ossec/bin/ossec-control start
+/var/ossec/bin/shadowtracer-control start || /var/ossec/bin/ossec-control start
 
 tail -f /var/ossec/logs/ossec.log

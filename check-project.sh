@@ -43,6 +43,36 @@ if git rev-parse v4.14.8^{commit} >/dev/null 2>&1; then
     [ -z "$missing" ] || die "inherited path(s) changed but not covered by any category in UPSTREAM.md:$missing"
 fi
 
+# No "wazuh-control", "wazuh-manager.service" or "wazuh-agent.service"
+# outside the allowlist - Phase 2 Pass B renamed these; any other hit is a
+# real leftover reference, not a style nit (this is how Pass B itself
+# found wodles/utils.py, wazuh_logtest.py, two cgroup-path lookups, and a
+# stale API spec example still pointing at the old names).
+control_name_patterns=$(grep -vE '^\s*#|^\s*$' shadowtracer/docs/ALLOWLIST_CONTROL_NAMES.txt 2>/dev/null)
+control_name_hits=$(git grep -lE 'wazuh-control|wazuh-manager\.service|wazuh-agent\.service' -- . ':!.git' 2>/dev/null)
+missing=""
+while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    matched=0
+    while IFS= read -r pat; do
+        [ -z "$pat" ] && continue
+        case "$path" in $pat) matched=1; break ;; esac
+    done <<<"$control_name_patterns"
+    [ "$matched" -eq 1 ] || missing="$missing $path"
+done <<<"$control_name_hits"
+[ -z "$missing" ] || die "wazuh-control/wazuh-*.service found outside shadowtracer/docs/ALLOWLIST_CONTROL_NAMES.txt:$missing"
+
+# User-visible "Wazuh" text scan: fail only on a NEW occurrence (one not
+# already in the committed snapshot) in the Pass A/B text surface - a
+# line disappearing (fixed) is fine, a new one appearing is not.
+if [ -f shadowtracer/docs/ALLOWLIST_WAZUH_TEXT.txt ]; then
+    current_wazuh_text=$(shadowtracer/scripts/gen-wazuh-text-allowlist.sh 2>/dev/null)
+    new_wazuh_text=$(comm -23 <(echo "$current_wazuh_text") <(sort shadowtracer/docs/ALLOWLIST_WAZUH_TEXT.txt))
+    [ -z "$new_wazuh_text" ] || die "new user-visible 'Wazuh' text not in shadowtracer/docs/ALLOWLIST_WAZUH_TEXT.txt (rerun shadowtracer/scripts/gen-wazuh-text-allowlist.sh and review/commit if intentional):$(echo "$new_wazuh_text" | tr '\n' ';')"
+else
+    die "shadowtracer/docs/ALLOWLIST_WAZUH_TEXT.txt is missing"
+fi
+
 # http-request submodule must be present and populated
 [ -d src/shared_modules/http-request ] || die "src/shared_modules/http-request is missing"
 [ -n "$(ls -A src/shared_modules/http-request 2>/dev/null)" ] || die "src/shared_modules/http-request submodule is empty (not initialized)"
