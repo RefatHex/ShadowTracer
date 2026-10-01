@@ -13,7 +13,7 @@ DIR=`dirname $PWD`;
 PLIST=${DIR}/bin/.process_list;
 
 # Installation info
-VERSION="v4.14.8"
+VERSION="1.0.0-dev (based on Wazuh 4.14.8)"
 REVISION="rc2"
 TYPE="local"
 
@@ -217,7 +217,7 @@ testconfig()
 
 start_service()
 {
-    echo "Starting Wazuh $VERSION..."
+    echo "Starting ShadowTracer $VERSION..."
     TEST=$(${DIR}/bin/wazuh-logtest-legacy -t  2>&1)
     echo $TEST
 
@@ -283,7 +283,7 @@ pstatus()
         for pid in `cat ${DIR}/var/run/${pfile}-*.pid 2>/dev/null`; do
             ps -p ${pid} > /dev/null 2>&1
             if [ ! $? = 0 ]; then
-                echo "${pfile}: Process ${pid} not used by Wazuh, removing..."
+                echo "${pfile}: Process ${pid} not used by ShadowTracer, removing..."
                 rm -f ${DIR}/var/run/${pfile}-${pid}.pid
                 continue;
             fi
@@ -353,7 +353,7 @@ stop_service()
         echo "Stopping sub agent directory (for hybrid mode)"
         ${DIR}/ossec-agent/bin/wazuh-control stop
     fi
-    echo "Wazuh $VERSION Stopped"
+    echo "ShadowTracer $VERSION Stopped"
 }
 
 info()

@@ -1,15 +1,15 @@
 openapi: '3.0.0'
 info:
   description: |
-    The Wazuh API is an open-source RESTful API that allows for interaction with the Wazuh manager from a web browser,
-    command line tools like cURL or any script or program that can make web requests. The Wazuh WUI relies on this
-    heavily and Wazuh’s goal is to accommodate complete remote management of the Wazuh infrastructure via the Wazuh WUI.
-    Use the Wazuh API to easily perform everyday actions like adding an agent, restarting the manager(s) or agent(s)
+    The ShadowTracer API is an open-source RESTful API that allows for interaction with the ShadowTracer manager from a web browser,
+    command line tools like cURL or any script or program that can make web requests. The ShadowTracer WUI relies on this
+    heavily and ShadowTracer’s goal is to accommodate complete remote management of the ShadowTracer infrastructure via the ShadowTracer WUI.
+    Use the ShadowTracer API to easily perform everyday actions like adding an agent, restarting the manager(s) or agent(s)
     or looking up syscheck details.
 
     # Authentication
 
-    Wazuh API endpoints require authentication to be used. Therefore, all calls must include a JSON Web Token.
+    ShadowTracer API endpoints require authentication to be used. Therefore, all calls must include a JSON Web Token.
     JWT is an open standard (RFC 7519) that defines a compact and self-contained way for securely transmitting
     information between parties as a JSON object. Perform a call with `basicAuth` to `POST /security/user/authenticate`
     and obtain a JWT token to run any endpoint.
@@ -42,7 +42,7 @@ info:
 
   version: '4.14.8'
   x-revision: 'rc2'
-  title: 'Wazuh API REST'
+  title: 'ShadowTracer API REST'
   license:
     name: 'GPL 2.0'
     url: 'https://github.com/wazuh/wazuh/blob/v4.14.8/LICENSE'
@@ -217,7 +217,7 @@ x-rbac-catalog:
         resources: ['agent:id:001', 'agent:id:003', 'agent:group:default']
         effect: "deny"
     'cluster:read':
-      description: "Read Wazuh's cluster nodes configuration"
+      description: "Read ShadowTracer's cluster nodes configuration"
       resources:
         - $ref: '#/x-rbac-catalog/resources/node:id'
       example:
@@ -225,7 +225,7 @@ x-rbac-catalog:
         resources: ['node:id:worker1', 'node:id:worker3']
         effect: "deny"
     'cluster:update_config':
-      description: "Change the Wazuh's cluster node configuration"
+      description: "Change the ShadowTracer's cluster node configuration"
       resources:
         - $ref: '#/x-rbac-catalog/resources/node:id'
       example:
@@ -233,7 +233,7 @@ x-rbac-catalog:
         resources: ['node:id:worker1']
         effect: "allow"
     'cluster:read_api_config':
-      description: "Check Wazuh's cluster nodes API configuration"
+      description: "Check ShadowTracer's cluster nodes API configuration"
       resources:
         - $ref: '#/x-rbac-catalog/resources/*:*'
       example:
@@ -241,7 +241,7 @@ x-rbac-catalog:
         resources: ['node:id:worker1', 'node:id:worker3']
         effect: "allow"
     'cluster:restart':
-      description: "Restart Wazuh's cluster nodes"
+      description: "Restart ShadowTracer's cluster nodes"
       resources:
         - $ref: '#/x-rbac-catalog/resources/node:id'
       example:
@@ -249,7 +249,7 @@ x-rbac-catalog:
         resources: ['node:id:worker1']
         effect: "allow"
     'cluster:status':
-      description: "Check Wazuh's cluster general status"
+      description: "Check ShadowTracer's cluster general status"
       resources:
         - $ref: '#/x-rbac-catalog/resources/*:*'
       example:
@@ -257,7 +257,7 @@ x-rbac-catalog:
         resources: ['*:*:*']
         effect: "allow"
     'manager:read':
-      description: "Read Wazuh manager configuration"
+      description: "Read ShadowTracer manager configuration"
       resources:
         - $ref: '#/x-rbac-catalog/resources/*:*'
       example:
@@ -265,7 +265,7 @@ x-rbac-catalog:
         resources: ['*:*:*']
         effect: "allow"
     'manager:update_config':
-      description: "Update current Wazuh manager configuration"
+      description: "Update current ShadowTracer manager configuration"
       resources:
         - $ref: '#/x-rbac-catalog/resources/*:*'
       example:
@@ -273,7 +273,7 @@ x-rbac-catalog:
         resources: [ '*:*:*' ]
         effect: "allow"
     'manager:read_api_config':
-      description: "Read Wazuh manager API configuration"
+      description: "Read ShadowTracer manager API configuration"
       resources:
         - $ref: '#/x-rbac-catalog/resources/*:*'
       example:
@@ -281,7 +281,7 @@ x-rbac-catalog:
         resources: ['*:*:*']
         effect: "allow"
     'manager:restart':
-      description: "Restart Wazuh managers"
+      description: "Restart ShadowTracer managers"
       resources:
         - $ref: '#/x-rbac-catalog/resources/*:*'
       example:
@@ -614,7 +614,7 @@ components:
           schema:
             $ref: '#/components/schemas/RequestError'
           example:
-            title: "Wazuh Error"
+            title: "ShadowTracer Error"
             detail: "The body type is not the one specified in the content-type"
             error: 6002
 
@@ -635,7 +635,7 @@ components:
           schema:
             $ref: '#/components/schemas/RequestError'
           example:
-            title: "Wazuh Error"
+            title: "ShadowTracer Error"
             detail: "Maximum number of requests per minute reached"
             remediation: "This limit can be changed in api.yaml file. More information here:
             https://documentation.wazuh.com/4.14/user-manual/api/security/configuration.html"
@@ -1434,14 +1434,14 @@ components:
         relative_dirname:
           type: string
           format: paths
-          description: "Folder path where the file is located. This path is relative to the Wazuh installation path"
+          description: "Folder path where the file is located. This path is relative to the ShadowTracer installation path"
 
     RulesetStatus:
       type: object
       properties:
         status:
           type: string
-          description: "Whether the specified ruleset file is enabled or disabled in Wazuh manager configuration"
+          description: "Whether the specified ruleset file is enabled or disabled in ShadowTracer manager configuration"
           enum:
             - enabled
             - disabled
@@ -1475,7 +1475,7 @@ components:
       properties:
         version:
           type: string
-          description: "Wazuh version the agent has installed"
+          description: "ShadowTracer version the agent has installed"
         id:
           $ref: '#/components/schemas/AgentID'
         name:
@@ -1631,7 +1631,7 @@ components:
       - pending
       - never_connected
       - disconnected
-      description: "Agent status. It is calculated based on the last keepalive and the Wazuh version"
+      description: "Agent status. It is calculated based on the last keepalive and the ShadowTracer version"
 
     AgentsSummary:
       type: object
@@ -2128,7 +2128,7 @@ components:
         version:
           type: string
           format: \d+\.\d+\.\d+
-          description: "Wazuh version installed in the node"
+          description: "ShadowTracer version installed in the node"
         ip:
           type: string
           description: "IP the node is using to communicate with other nodes in the cluster"
@@ -2304,7 +2304,7 @@ components:
         data:
           properties:
             enabled:
-              description: "Whether the cluster is enabled in the Wazuh configuration"
+              description: "Whether the cluster is enabled in the ShadowTracer configuration"
               type: string
               enum:
               - "yes"
@@ -3896,13 +3896,13 @@ components:
         path:
           type: string
           format: paths
-          description: "Wazuh installation path"
+          description: "ShadowTracer installation path"
         version:
           type: string
-          description: "Wazuh version"
+          description: "ShadowTracer version"
         type:
           type: string
-          description: "Wazuh installation type"
+          description: "ShadowTracer installation type"
           enum:
           - server
           - local
@@ -4114,7 +4114,7 @@ components:
         events_processed:
           type: number
           format: float
-          description: "Total number of events processed (i.e. matched against Wazuh ruleset) in the last 5 seconds"
+          description: "Total number of events processed (i.e. matched against ShadowTracer ruleset) in the last 5 seconds"
         events_received:
           type: number
           format: float
@@ -4288,7 +4288,7 @@ components:
         tag:
           type: string
           format: alphanumeric
-          description: "Wazuh component that logged the event"
+          description: "ShadowTracer component that logged the event"
         timestamp:
           type: string
           format: date-time
@@ -4592,7 +4592,7 @@ components:
                   format: int32
         uuid:
           type: string
-          description: "Identifier of the Wazuh instance"
+          description: "Identifier of the ShadowTracer instance"
 
     # Rules models
     RuleFile:
@@ -5777,12 +5777,12 @@ components:
                 format: alphanumeric_symbols
         groups:
           type: array
-          description: "Recount of the number of Wazuh agents group by Wazuh groups"
+          description: "Recount of the number of ShadowTracer agents group by ShadowTracer groups"
           items:
             $ref: '#/components/schemas/AgentGroup'
         agent_os:
           type: array
-          description: "Recount of the number of Wazuh agents group by OS"
+          description: "Recount of the number of ShadowTracer agents group by OS"
           items:
             type: object
             properties:
@@ -5805,7 +5805,7 @@ components:
           $ref: '#/components/schemas/AgentsSummaryStatus'
         agent_version:
           type: array
-          description: "Recount of the number of Wazuh agents group by version"
+          description: "Recount of the number of ShadowTracer agents group by version"
           items:
             type: object
             properties:
@@ -6985,7 +6985,7 @@ components:
     tag:
       in: query
       name: tag
-      description: "Wazuh component that logged the event"
+      description: "ShadowTracer component that logged the event"
       schema:
         type: string
         format: alphanumeric
@@ -7570,7 +7570,7 @@ components:
     upgrade_version:
       in: query
       name: upgrade_version
-      description: "Wazuh version to upgrade to"
+      description: "ShadowTracer version to upgrade to"
       schema:
         type: string
         format: wazuh_version
@@ -7600,7 +7600,7 @@ components:
     file_path:
       in: query
       name: file_path
-      description: "Full path to the WPK file. The file must be on a folder on the Wazuh's installation directory
+      description: "Full path to the WPK file. The file must be on a folder on the ShadowTracer's installation directory
       (by default, <code>/var/ossec</code>)"
       required: True
       schema:
@@ -7666,7 +7666,7 @@ components:
 
 tags:
   - name: API Info
-    description: "Wazuh API information"
+    description: "ShadowTracer API information"
   - name: Active-response
     description: "Agents Active Response"
   - name: Agents
@@ -7674,7 +7674,7 @@ tags:
   - name: Ciscat
     description: "Retrieve information from CIS-CAT scans"
   - name: Cluster
-    description: "Wazuh cluster and nodes management"
+    description: "ShadowTracer cluster and nodes management"
   - name: Decoders
     description: "Decoders management"
   - name: Events
@@ -7688,11 +7688,11 @@ tags:
   - name: Logtest
     description: "Logtest: testing and verification tool for rules and decoders"
   - name: Manager
-    description: "Wazuh manager management"
+    description: "ShadowTracer manager management"
   - name: MITRE
     description: "Technique information from MITRE database"
   - name: Overview
-    description: "Overview of Wazuh"
+    description: "Overview of ShadowTracer"
   - name: Rootcheck
     description: "Rootcheck management"
   - name: Rules
@@ -7732,7 +7732,7 @@ paths:
                   data:
                     $ref: '#/components/schemas/BasicInfo'
               example:
-                title: "Wazuh API"
+                title: "ShadowTracer API"
                 api_version: "v4.5.0"
                 revision: 'beta1'
                 license_name: "GPL 2.0"
@@ -8378,8 +8378,8 @@ paths:
     get:
       tags:
         - Agents
-      summary: "Get Wazuh daemon stats from an agent"
-      description: "Return Wazuh statistical information from specified daemons in a specified agent"
+      summary: "Get ShadowTracer daemon stats from an agent"
+      description: "Return ShadowTracer statistical information from specified daemons in a specified agent"
       operationId: api.controllers.agent_controller.get_daemon_stats
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/agent:read'
@@ -8390,7 +8390,7 @@ paths:
         - $ref: '#/components/parameters/daemons_list_agents'
       responses:
         '200':
-          description: "Wazuh daemon stats"
+          description: "ShadowTracer daemon stats"
           content:
             application/json:
               schema:
@@ -8489,7 +8489,7 @@ paths:
       tags:
         - Agents
       summary: "Get agent's component stats"
-      description: "Return Wazuh's {component} statistical information from agent {agent_id}"
+      description: "Return ShadowTracer's {component} statistical information from agent {agent_id}"
       operationId: api.controllers.agent_controller.get_component_stats
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/agent:read'
@@ -10738,7 +10738,7 @@ paths:
       tags:
         - Cluster
       summary: "Get node status"
-      description: "Return the status of all Wazuh daemons in node node_id"
+      description: "Return the status of all ShadowTracer daemons in node node_id"
       operationId: api.controllers.cluster_controller.get_status_node
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/cluster:read'
@@ -11155,8 +11155,8 @@ paths:
     get:
       tags:
         - Cluster
-      summary: "Get Wazuh daemon stats from a cluster node"
-      description: "Return Wazuh statistical information from specified daemons in a specified cluster node"
+      summary: "Get ShadowTracer daemon stats from a cluster node"
+      description: "Return ShadowTracer statistical information from specified daemons in a specified cluster node"
       operationId: api.controllers.cluster_controller.get_daemon_stats_node
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/cluster:read'
@@ -11167,7 +11167,7 @@ paths:
         - $ref: '#/components/parameters/daemons_list'
       responses:
         '200':
-          description: "Wazuh daemon stats"
+          description: "ShadowTracer daemon stats"
           content:
             application/json:
               schema:
@@ -11233,7 +11233,7 @@ paths:
       tags:
         - Cluster
       summary: "Get node stats"
-      description: "Return Wazuh statistical information in node {node_id} for the current or specified date"
+      description: "Return ShadowTracer statistical information in node {node_id} for the current or specified date"
       operationId: api.controllers.cluster_controller.get_stats_node
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/cluster:read'
@@ -11244,7 +11244,7 @@ paths:
         - $ref: '#/components/parameters/date'
       responses:
         '200':
-          description: "Wazuh node stats"
+          description: "ShadowTracer node stats"
           content:
             application/json:
               schema:
@@ -11317,7 +11317,7 @@ paths:
       tags:
         - Cluster
       summary: "Get node stats hour"
-      description: "Return Wazuh statistical information in node {node_id} per hour. Each number in the averages field
+      description: "Return ShadowTracer statistical information in node {node_id} per hour. Each number in the averages field
       represents the average of alerts per hour"
       operationId: api.controllers.cluster_controller.get_stats_hourly_node
       x-rbac-actions:
@@ -11328,7 +11328,7 @@ paths:
         - $ref: '#/components/parameters/node_id'
       responses:
         '200':
-          description: "Wazuh node hourly stats"
+          description: "ShadowTracer node hourly stats"
           content:
             application/json:
               schema:
@@ -11388,7 +11388,7 @@ paths:
       tags:
         - Cluster
       summary: "Get node stats week"
-      description: "Return Wazuh statistical information in node {node_id} per week. Each number in the averages field
+      description: "Return ShadowTracer statistical information in node {node_id} per week. Each number in the averages field
       represents the average of alerts per hour for that specific day"
       operationId: api.controllers.cluster_controller.get_stats_weekly_node
       x-rbac-actions:
@@ -11399,7 +11399,7 @@ paths:
         - $ref: '#/components/parameters/node_id'
       responses:
         '200':
-          description: "Wazuh node weekly stats"
+          description: "ShadowTracer node weekly stats"
           content:
             application/json:
               schema:
@@ -11623,7 +11623,7 @@ paths:
         - Cluster
       deprecated: true
       summary: "Get node stats analysisd"
-      description: "Return Wazuh analysisd statistical information in node {node_id}"
+      description: "Return ShadowTracer analysisd statistical information in node {node_id}"
       operationId: api.controllers.cluster_controller.get_stats_analysisd_node
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/cluster:read'
@@ -11633,7 +11633,7 @@ paths:
         - $ref: '#/components/parameters/node_id'
       responses:
         '200':
-          description: "Wazuh node analysisd stats"
+          description: "ShadowTracer node analysisd stats"
           content:
             application/json:
               schema:
@@ -11710,7 +11710,7 @@ paths:
         - Cluster
       deprecated: true
       summary: "Get node stats remoted"
-      description: "Return Wazuh remoted statistical information in node {node_id}"
+      description: "Return ShadowTracer remoted statistical information in node {node_id}"
       operationId: api.controllers.cluster_controller.get_stats_remoted_node
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/cluster:read'
@@ -11720,7 +11720,7 @@ paths:
         - $ref: '#/components/parameters/node_id'
       responses:
         '200':
-          description: "Wazuh node remoted stats"
+          description: "ShadowTracer node remoted stats"
           content:
             application/json:
               schema:
@@ -11782,7 +11782,7 @@ paths:
         - $ref: '#/components/parameters/distinct'
       responses:
         '200':
-          description: "Wazuh node logs"
+          description: "ShadowTracer node logs"
           content:
             application/json:
               schema:
@@ -11839,7 +11839,7 @@ paths:
         - $ref: '#/components/parameters/node_id'
       responses:
         '200':
-          description: "Wazuh node logs summary"
+          description: "ShadowTracer node logs summary"
           content:
             application/json:
               schema:
@@ -12004,7 +12004,7 @@ paths:
       tags:
         - Cluster
       summary: "Check nodes config"
-      description: "Return whether the Wazuh configuration is correct or not in all cluster nodes or a list of them"
+      description: "Return whether the ShadowTracer configuration is correct or not in all cluster nodes or a list of them"
       operationId: api.controllers.cluster_controller.get_conf_validation
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/cluster:read'
@@ -12499,7 +12499,7 @@ paths:
       tags:
         - Manager
       summary: "Get status"
-      description: "Return the status of all Wazuh daemons"
+      description: "Return the status of all ShadowTracer daemons"
       operationId: api.controllers.manager_controller.get_status
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/manager:read'
@@ -12508,7 +12508,7 @@ paths:
         - $ref: '#/components/parameters/wait_for_complete'
       responses:
         '200':
-          description: "Wazuh manager daemons statuses"
+          description: "ShadowTracer manager daemons statuses"
           content:
             application/json:
               schema:
@@ -12622,7 +12622,7 @@ paths:
         - $ref: '#/components/parameters/distinct'
       responses:
         '200':
-          description: "Wazuh configuration"
+          description: "ShadowTracer configuration"
           content:
             application/json:
               schema:
@@ -12695,8 +12695,8 @@ paths:
     put:
       tags:
         - Manager
-      summary: "Update Wazuh configuration"
-      description: "Replace Wazuh configuration with the data contained in the API request"
+      summary: "Update ShadowTracer configuration"
+      description: "Replace ShadowTracer configuration with the data contained in the API request"
       operationId: api.controllers.manager_controller.update_configuration
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/manager:update_config'
@@ -12744,8 +12744,8 @@ paths:
     get:
       tags:
         - Manager
-      summary: "Get Wazuh daemon stats"
-      description: "Return Wazuh statistical information from specified daemons"
+      summary: "Get ShadowTracer daemon stats"
+      description: "Return ShadowTracer statistical information from specified daemons"
       operationId: api.controllers.manager_controller.get_daemon_stats
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/manager:read'
@@ -12755,7 +12755,7 @@ paths:
         - $ref: '#/components/parameters/daemons_list'
       responses:
         '200':
-          description: "Wazuh daemon stats"
+          description: "ShadowTracer daemon stats"
           content:
             application/json:
               schema:
@@ -12820,7 +12820,7 @@ paths:
       tags:
         - Manager
       summary: "Get stats"
-      description: "Return Wazuh statistical information for the current or specified date"
+      description: "Return ShadowTracer statistical information for the current or specified date"
       operationId: api.controllers.manager_controller.get_stats
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/manager:read'
@@ -12830,7 +12830,7 @@ paths:
         - $ref: '#/components/parameters/date'
       responses:
         '200':
-          description: "Wazuh stats"
+          description: "ShadowTracer stats"
           content:
             application/json:
               schema:
@@ -12888,7 +12888,7 @@ paths:
       tags:
         - Manager
       summary: "Get stats hour"
-      description: "Return Wazuh statistical information per hour. Each number in the averages field represents the
+      description: "Return ShadowTracer statistical information per hour. Each number in the averages field represents the
       average of alerts per hour"
       operationId: api.controllers.manager_controller.get_stats_hourly
       x-rbac-actions:
@@ -12898,7 +12898,7 @@ paths:
         - $ref: '#/components/parameters/wait_for_complete'
       responses:
         '200':
-          description: "Wazuh hourly stats"
+          description: "ShadowTracer hourly stats"
           content:
             application/json:
               schema:
@@ -12956,7 +12956,7 @@ paths:
       tags:
         - Manager
       summary: "Get stats week"
-      description: "Return Wazuh statistical information per week. Each number in the averages field represents the
+      description: "Return ShadowTracer statistical information per week. Each number in the averages field represents the
       average of alerts per hour for that specific day"
       operationId: api.controllers.manager_controller.get_stats_weekly
       x-rbac-actions:
@@ -12966,7 +12966,7 @@ paths:
         - $ref: '#/components/parameters/wait_for_complete'
       responses:
         '200':
-          description: "Wazuh weekly stats"
+          description: "ShadowTracer weekly stats"
           content:
             application/json:
               schema:
@@ -13188,7 +13188,7 @@ paths:
         - Manager
       deprecated: true
       summary: "Get stats analysisd"
-      description: "Return Wazuh analysisd statistical information"
+      description: "Return ShadowTracer analysisd statistical information"
       operationId: api.controllers.manager_controller.get_stats_analysisd
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/manager:read'
@@ -13197,7 +13197,7 @@ paths:
         - $ref: '#/components/parameters/wait_for_complete'
       responses:
         '200':
-          description: "Wazuh analysisd stats"
+          description: "ShadowTracer analysisd stats"
           content:
             application/json:
               schema:
@@ -13272,7 +13272,7 @@ paths:
         - Manager
       deprecated: true
       summary: "Get stats remoted"
-      description: "Return Wazuh remoted statistical information"
+      description: "Return ShadowTracer remoted statistical information"
       operationId: api.controllers.manager_controller.get_stats_remoted
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/manager:read'
@@ -13281,7 +13281,7 @@ paths:
         - $ref: '#/components/parameters/wait_for_complete'
       responses:
         '200':
-          description: "Wazuh remoted stats"
+          description: "ShadowTracer remoted stats"
           content:
             application/json:
               schema:
@@ -13340,7 +13340,7 @@ paths:
         - $ref: '#/components/parameters/distinct'
       responses:
         '200':
-          description: "Wazuh logs"
+          description: "ShadowTracer logs"
           content:
             application/json:
               schema:
@@ -13395,7 +13395,7 @@ paths:
         - $ref: '#/components/parameters/wait_for_complete'
       responses:
         '200':
-          description: "Wazuh logs summary"
+          description: "ShadowTracer logs summary"
           content:
             application/json:
               schema:
@@ -13637,7 +13637,7 @@ paths:
       tags:
         - Manager
       summary: "Check config"
-      description: "Return whether the Wazuh configuration is correct"
+      description: "Return whether the ShadowTracer configuration is correct"
       operationId: api.controllers.manager_controller.get_conf_validation
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/manager:read'
@@ -13753,7 +13753,7 @@ paths:
                   last_available_major:
                     tag: v5.0.0
                     description: ""
-                    title: Wazuh 5.0.0
+                    title: ShadowTracer 5.0.0
                     published_date: '2023-10-05T12:48:00Z'
                     semver:
                       major: 5
@@ -13762,7 +13762,7 @@ paths:
                   last_available_minor:
                     tag: v4.9.1
                     description: ""
-                    title: Wazuh 4.9.1
+                    title: ShadowTracer 4.9.1
                     published_date: '2023-10-05T12:47:00Z'
                     semver:
                       major: 4
@@ -13771,7 +13771,7 @@ paths:
                   last_available_patch:
                     tag: v4.8.2
                     description: ""
-                    title: Wazuh 4.8.2
+                    title: ShadowTracer 4.8.2
                     published_date: '2023-10-05T12:46:00Z'
                     semver:
                       major: 4
@@ -14647,7 +14647,7 @@ paths:
       tags:
         - Rules
       summary: "Get requirements"
-      description: "Return all specified requirement names defined in the Wazuh ruleset"
+      description: "Return all specified requirement names defined in the ShadowTracer ruleset"
       operationId: api.controllers.rule_controller.get_rules_requirement
       x-rbac-actions:
         - $ref: '#/x-rbac-catalog/actions/rules:read'
@@ -15486,7 +15486,7 @@ paths:
       tags:
         - Decoders
       summary: "Get files"
-      description: "Return information about all decoders files used in Wazuh. This information include decoder's file,
+      description: "Return information about all decoders files used in ShadowTracer. This information include decoder's file,
       decoder's route and decoder's status among others"
       operationId: api.controllers.decoder_controller.get_decoders_files
       x-rbac-actions:
@@ -20058,5 +20058,5 @@ paths:
                 error: 0
 
 externalDocs:
-  description: "Learn more about the Wazuh API"
+  description: "Learn more about the ShadowTracer API"
   url: 'https://documentation.wazuh.com/4.14/user-manual/api/index.html'

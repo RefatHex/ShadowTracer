@@ -8,7 +8,7 @@
 <group name="wazuh,">
   <rule id="200" level="0">
     <decoded_as>wazuh</decoded_as>
-    <description>Grouping of wazuh rules.</description>
+    <description>Grouping of ShadowTracer rules.</description>
   </rule>
 
   <!-- Agent buffer rules -->

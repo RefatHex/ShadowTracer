@@ -11,35 +11,35 @@
   <rule id="500" level="0">
     <category>ossec</category>
     <decoded_as>ossec</decoded_as>
-    <description>Grouping of wazuh rules.</description>
+    <description>Grouping of ShadowTracer rules.</description>
   </rule>
 
   <rule id="501" level="3">
     <if_sid>500</if_sid>
     <if_fts />
     <match>Agent started</match>
-    <description>New wazuh agent connected.</description>
+    <description>New ShadowTracer agent connected.</description>
     <group>pci_dss_10.6.1,gpg13_10.1,gdpr_IV_35.7.d,hipaa_164.312.b,nist_800_53_AU.6,tsc_CC7.2,tsc_CC7.3,</group>
   </rule>
 
   <rule id="502" level="3">
     <if_sid>500</if_sid>
     <match>Manager started</match>
-    <description>Wazuh server started.</description>
+    <description>ShadowTracer server started.</description>
     <group>pci_dss_10.6.1,gpg13_10.1,gdpr_IV_35.7.d,hipaa_164.312.b,nist_800_53_AU.6,tsc_CC7.2,tsc_CC7.3,</group>
   </rule>
 
   <rule id="503" level="3">
     <if_sid>500</if_sid>
     <match>Agent started</match>
-    <description>Wazuh agent started.</description>
+    <description>ShadowTracer agent started.</description>
     <group>pci_dss_10.6.1,pci_dss_10.2.6,gpg13_10.1,gdpr_IV_35.7.d,hipaa_164.312.b,nist_800_53_AU.6,nist_800_53_AU.14,nist_800_53_AU.5,tsc_CC7.2,tsc_CC7.3,tsc_CC6.8,</group>
   </rule>
 
   <rule id="504" level="3">
     <if_sid>500</if_sid>
     <match>Agent disconnected</match>
-    <description>Wazuh agent disconnected.</description>
+    <description>ShadowTracer agent disconnected.</description>
     <mitre>
       <id>T1562.001</id>
     </mitre>
@@ -49,7 +49,7 @@
   <rule id="505" level="3">
     <if_sid>500</if_sid>
     <match>Agent removed</match>
-    <description>Wazuh agent removed.</description>
+    <description>ShadowTracer agent removed.</description>
     <mitre>
       <id>T1562.001</id>
     </mitre>
@@ -59,7 +59,7 @@
   <rule id="506" level="3">
     <if_sid>500</if_sid>
     <match>Agent stopped</match>
-    <description>Wazuh agent stopped.</description>
+    <description>ShadowTracer agent stopped.</description>
     <mitre>
       <id>T1562.001</id>
     </mitre>
@@ -179,7 +179,7 @@
   <rule id="530" level="0">
     <if_sid>500</if_sid>
     <match>^ossec: output: </match>
-    <description>Wazuh process monitoring rules.</description>
+    <description>ShadowTracer process monitoring rules.</description>
     <group>process_monitor,</group>
   </rule>
 

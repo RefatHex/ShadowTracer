@@ -1,5 +1,5 @@
 
-   Thanks for using Wazuh.
+   Thanks for using ShadowTracer.
    Please don't hesitate to contact us if you need help or find
    any bugs.
 

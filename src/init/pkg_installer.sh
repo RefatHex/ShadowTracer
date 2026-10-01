@@ -96,10 +96,10 @@ RESULT=$?
 echo "$(date +"%Y/%m/%d %H:%M:%S") - Installation result = ${RESULT}" >> ./logs/upgrade.log
 
 # Restart Agent
-echo "$(date +"%Y/%m/%d %H:%M:%S") - Checking for Wazuh Agent control script." >> ./logs/upgrade.log
+echo "$(date +"%Y/%m/%d %H:%M:%S") - Checking for ShadowTracer Agent control script." >> ./logs/upgrade.log
 
 if [ -f "./bin/wazuh-control" ]; then
-    echo "$(date +"%Y/%m/%d %H:%M:%S") - Restarting Wazuh Agent." >> ./logs/upgrade.log
+    echo "$(date +"%Y/%m/%d %H:%M:%S") - Restarting ShadowTracer Agent." >> ./logs/upgrade.log
     ./bin/wazuh-control restart >> ./logs/upgrade.log 2>&1
 elif [ -f "./bin/ossec-control" ]; then
     echo "$(date +"%Y/%m/%d %H:%M:%S") - Upgrade failed: wazuh-control not found. Attempting to restart using ossec-control." >> ./logs/upgrade.log

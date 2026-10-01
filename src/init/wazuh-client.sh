@@ -11,7 +11,7 @@ PWD=`pwd`
 DIR=`dirname $PWD`;
 
 # Installation info
-VERSION="v4.14.8"
+VERSION="1.0.0-dev (based on Wazuh 4.14.8)"
 REVISION="rc2"
 TYPE="agent"
 
@@ -175,7 +175,7 @@ add_to_cgroup()
 # Start function
 start_service()
 {
-    echo "Starting Wazuh $VERSION..."
+    echo "Starting ShadowTracer $VERSION..."
     checkpid;
 
     # Delete all files in temporary folder
@@ -252,7 +252,7 @@ pstatus()
         for pid in `cat ${DIR}/var/run/${pfile}-*.pid 2>/dev/null`; do
             ps -p ${pid} > /dev/null 2>&1
             if [ ! $? = 0 ]; then
-                echo "${pfile}: Process ${pid} not used by Wazuh, removing .."
+                echo "${pfile}: Process ${pid} not used by ShadowTracer, removing .."
                 rm -f ${DIR}/var/run/${pfile}-${pid}.pid
                 continue;
             fi
@@ -316,7 +316,7 @@ stop_service()
         rm -f ${DIR}/var/run/${i}-*.pid
     done
 
-    echo "Wazuh $VERSION Stopped"
+    echo "ShadowTracer $VERSION Stopped"
 }
 
 info()

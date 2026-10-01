@@ -13,7 +13,7 @@ DIR=`dirname $PWD`;
 PLIST=${DIR}/bin/.process_list;
 
 # Installation info
-VERSION="v4.14.8"
+VERSION="1.0.0-dev (based on Wazuh 4.14.8)"
 REVISION="rc2"
 TYPE="server"
 
@@ -288,7 +288,7 @@ start_service()
 {
 
     if [ $USE_JSON = false ]; then
-        echo "Starting Wazuh $VERSION..."
+        echo "Starting ShadowTracer $VERSION..."
     fi
 
     TEST=$(${DIR}/bin/wazuh-logtest-legacy -t  2>&1 | grep "ERROR")
@@ -479,7 +479,7 @@ pstatus()
             ps -p ${pid} > /dev/null 2>&1
             if [ ! $? = 0 ]; then
                 if [ $USE_JSON = false ]; then
-                    echo "${pfile}: Process ${pid} not used by Wazuh, removing..."
+                    echo "${pfile}: Process ${pid} not used by ShadowTracer, removing..."
                 fi
                 rm -f ${DIR}/var/run/${pfile}-${pid}.pid
                 continue;
@@ -575,7 +575,7 @@ stop_service()
     if [ $USE_JSON = true ]; then
         echo -n ']}'
     else
-        echo "Wazuh $VERSION Stopped"
+        echo "ShadowTracer $VERSION Stopped"
     fi
 }
 
