@@ -18,3 +18,11 @@ src/**/build/
 src/agent-auth
 src/agent_control
 deploy/lab/.env
+
+# Mounted at runtime via docker-compose volumes instead (PHASE1_FINDINGS.md
+# next-session rule 1) - keep these out of the build context so editing them
+# doesn't bust the COPY . . layer cache and force a full recompile.
+deploy/lab/entrypoint-*.sh
+deploy/lab/healthcheck-*.sh
+deploy/lab/docker-compose.yml
+deploy/lab/haproxy.cfg

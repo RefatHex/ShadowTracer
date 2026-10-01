@@ -13,7 +13,7 @@ RUN dnf install -y -q --allowerasing \
 
 WORKDIR /wazuh
 COPY . .
-RUN cd src && make deps && make TARGET=agent -j"$(nproc)"
+RUN cd src && make deps && make TARGET=agent -j4
 
 FROM rockylinux:9 AS runtime
 
@@ -40,9 +40,9 @@ RUN mkdir -p /run/sshd && ssh-keygen -A && \
     echo 'PermitRootLogin no' >> /etc/ssh/sshd_config && \
     echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
 
-COPY deploy/lab/entrypoint-agent.sh /entrypoint.sh
-COPY deploy/lab/healthcheck-agent.sh /healthcheck.sh
-RUN chmod +x /entrypoint.sh /healthcheck.sh
+# entrypoint.sh / healthcheck.sh are bind-mounted by docker-compose.yml, not
+# baked in here - see PHASE1_FINDINGS.md next-session rule 1. This image is
+# not meant to be run standalone outside the compose lab.
 
 HEALTHCHECK --interval=10s --timeout=10s --start-period=30s --retries=20 CMD /healthcheck.sh
 

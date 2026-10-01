@@ -24,15 +24,15 @@ RUN apt-get update -qq && \
 
 WORKDIR /wazuh
 COPY . .
-RUN cd src && make deps && make TARGET=server -j"$(nproc)"
+RUN cd src && make deps && make TARGET=server -j4
 
 COPY deploy/lab/preloaded-vars-server.conf /wazuh/etc/preloaded-vars.conf
 
 RUN cd /wazuh && sh install.sh
 
-COPY deploy/lab/entrypoint-manager.sh /entrypoint.sh
-COPY deploy/lab/healthcheck-manager.sh /healthcheck.sh
-RUN chmod +x /entrypoint.sh /healthcheck.sh
+# entrypoint.sh / healthcheck.sh are bind-mounted by docker-compose.yml, not
+# baked in here - see PHASE1_FINDINGS.md next-session rule 1. This image is
+# not meant to be run standalone outside the compose lab.
 
 EXPOSE 1514/tcp 1515/tcp 1516/tcp 55000/tcp
 

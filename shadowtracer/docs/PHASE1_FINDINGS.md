@@ -4,50 +4,47 @@ Lab: `deploy/lab/`. All images built from this fork's own source (no
 published `wazuh/*` images used). Host: WSL2 (Ubuntu 22.04, 12 vCPU, 7.4GiB
 RAM), Docker Desktop 4.91.0.
 
-## Session paused here — status and rules for the next session
+## Phase 1 complete
 
-**Done:** Step 0, Step 1, Step 2's cluster core, Step 3 items 1-13 (all
-with real evidence above; item 13's config still needs moving to a mounted
-file per rule 1 below — it was verified live but the fix wasn't baked into
-a rebuilt image before the pause). **Not started:** Step 3 item 14 (data
-volume), items 15-17 (failure behavior), Step 4 (smoke test script), Step 5
-(final resource-usage/surprises write-up).
+**Done:** Step 0, Step 1, Step 2, Step 3 items 1-17, Step 4 (smoke test
+script), Step 5 (below). Carried forward to Phase 3 as a known, documented
+limitation rather than an open bug: the agent/load-balancer issue (Step 2 -
+classic Wazuh TCP secure mode can't disambiguate multiple agents behind one
+shared-IP LB).
 
-This session lost a large amount of time to two compounding problems: (a)
-Docker Desktop's WSL integration repeatedly dropped and had to be manually
-restarted (many times), and (b) every config-only change (entrypoint
-scripts, `preloaded-vars*.conf`) required a full image rebuild because
-`COPY . .` in the Dockerfiles happens before the compile step, so editing
-anything under `deploy/lab/` invalidated the compile cache and forced a
-13+ minute recompile just to test a one-line shell script change. Rules
-for next session, to avoid repeating both:
+A prior session paused mid-Phase-1 after losing a large amount of time to
+two compounding problems: (a) Docker Desktop's WSL integration repeatedly
+dropping, and (b) every config-only change (entrypoint scripts,
+`preloaded-vars*.conf`) requiring a full image rebuild, because `COPY . .`
+in the Dockerfiles happened before the compile step, so editing anything
+under `deploy/lab/` invalidated the compile cache and forced a 13+ minute
+recompile just to test a one-line shell script change. This session applied
+the fixes that prior pause called for:
 
-1. Do not rebuild images for config changes. Mount `deploy/lab/` configs
-   (entrypoint scripts, `preloaded-vars*.conf`, `ar.conf`, `osquery.conf`,
-   etc.) as volumes in `docker-compose.yml` instead of `COPY`-ing them at
-   build time. Rebuild only when source or packages actually change.
-2. In the Dockerfiles, order the compile step *before* anything
-   config-related, so config-only edits (once no longer baked in per rule
-   1, this mostly matters for anything that must still be `COPY`'d) don't
-   bust the build cache.
-3. Build with `-j4`, not `-j$(nproc)` — this environment's `nproc` (12)
-   was oversubscribing and likely contributing to build flakiness.
-4. If a `docker build` fails twice for environment reasons (Docker Desktop
-   down, a build silently hanging at "exporting layers" for 30+ minutes,
-   etc.) rather than a real error in our code — STOP and report. Do not
-   retry in a loop.
-5. Item 13 (osquery): already verified WORKS with real evidence (see Step
-   3 table) — don't re-verify from scratch, just move the wodle-enable +
-   schedule config into a mounted file per rule 1.
-6. Item 14 (data volume): do a 15-minute `logall_json` capture, not the
-   full hour — report the `archives.json`-to-`alerts.json` size ratio.
-7. Then items 15-17 (failure behavior), then the smoke test script, then
-   the Step 5 findings report.
-8. The agent/load-balancer failure (Step 2 — classic Wazuh TCP secure
-   mode can't disambiguate multiple agents behind one shared-IP LB) is a
-   confirmed, documented limitation of this phase's design, not a bug to
-   keep chasing. Record it as an open item carried forward to Phase 3
-   rather than reopening the investigation.
+1. `deploy/lab/` entrypoint and healthcheck scripts are now bind-mounted by
+   `docker-compose.yml` instead of `COPY`-ed into the image at build time
+   (see each Dockerfile) - editing them takes effect without any rebuild.
+   `preloaded-vars*.conf` still has to be baked in (it's consumed by
+   `install.sh` *during* the image build, not at container runtime, so
+   there's nothing to mount), but it and the other iteration-heavy configs
+   (entrypoint/healthcheck/compose/haproxy files) are now excluded from the
+   Docker build context via `.dockerignore`, so editing any of them no
+   longer busts the `COPY . .` layer and forces a recompile.
+2. The compile step already ran before the remaining `COPY`-time config in
+   all three Dockerfiles; no further reordering was needed once (1) moved
+   the frequently-edited files out of the build context entirely.
+3. All three Dockerfiles now build with `-j4` instead of `-j$(nproc)`.
+4. No build failed twice for environment reasons this session - the one
+   image rebuild needed (to pick up rule 1-3 and the item-13 osquery fix)
+   completed cleanly in the background.
+
+**A caveat the mount approach surfaced, specific to this host's Docker
+Desktop + WSL2 setup:** editing a bind-mounted file while its container is
+already running does *not* take effect on that running container, and
+`docker restart` will outright fail rather than pick up the change - see
+the eighth finding under Step 4. Use `docker compose up -d
+--force-recreate <service>` after editing a mounted config; still seconds,
+not a 13-minute rebuild, so the fix still holds, just not via `restart`.
 
 ## Step 1 — images built from source
 
@@ -243,7 +240,11 @@ program. Reverted; the permission fix is the real one.)
 | 10 | Active response: `ar.conf` present, `disable-account` works end to end on throwaway user `sttest` | **WORKS**, needed two real fixes | `ar.conf` ships with only `restart-ossec`/`restart-wazuh` entries; `disable-account`'s `<command>` block already exists in `ossec.conf` by default. Triggering it via the API's `PUT /active-response` initially failed twice: (1) referencing it by an `ar.conf` name (even after adding one) hit `WazuhError 1652 "command not defined"` — the fix is the `!<script-name>` syntax (`"command":"!disable-account"`), which bypasses the `ar.conf`-name lookup entirely; (2) the script (`src/active-response/disable-account.c`) reads the target username *only* from `alert.data.dstuser` — passing it via `arguments`/`extra_args` (the intuitive-looking approach) silently no-ops with "Cannot read 'dstuser' from data". Correct payload: `{"command":"!disable-account","alert":{"data":{"dstuser":"sttest"}}}`. Confirmed locked (`passwd -S sttest` → `L`) immediately after. The API's `PUT /active-response` only triggers the "add" action — reversal normally fires automatically when `ar.conf`'s timeout field expires (ours was `0` = never); there's no documented "run delete now" call on this endpoint, so re-enable + delete were done directly (`usermod -U sttest`, `userdel -r sttest`) to finish the throwaway-user cleanup. |
 | 11 | VirusTotal integration | **SKIPPED** | `VT_API_KEY` in `deploy/lab/.env` is blank — per the task spec itself ("Leave blank to skip that test"), not attempted. Needs a real key from whoever runs this lab next. |
 | 12 | Vulnerability detection without an indexer | **Runs, produces nothing** | `<vulnerability-detection><enabled>yes</enabled>` ships on by default. `wazuh-modulesd:vulnerability-scanner` starts and runs `Initiating update feed process` on schedule — no crash, no fatal error. But every one of its outputs (vulnerabilities, package/system/process/port/hardware inventory — 15 distinct `wazuh-states-*` indices) is designed to land in the Wazuh **indexer**, not classic `alerts.json`. With no indexer running, `indexer-connector` logs `IndexerConnector initialization failed for index '...', retrying until successful` for all 15 indices, forever, and **zero** vulnerability alerts ever appear in `alerts.json`. This directly answers the open question in `DECISIONS.md`: **classic alerts.json is not a viable path for vulnerability data under our indexer-less design — a custom consumer would need to either stand up a compatible indexer/OpenSearch endpoint, or hook `indexer-connector`'s output some other way.** |
-| 13 | OSQuery on an agent: wodle runs, results arrive | **WORKS**, needed two real fixes | Two gaps, both in our own lab config, not upstream: (a) `<wodle name="osquery">` ships `<disabled>yes</disabled>` by default; (b) `/etc/osquery/osquery.conf` (the path our own entrypoint already pointed `osqueryd` at) never existed, so there was nothing to schedule. Fixed by flipping the wodle to enabled and writing a minimal schedule (`system_info`, `listening_ports`, 60s interval). Once fixed, a *third* issue surfaced: the wodle has `<run_daemon>yes</run_daemon>`, meaning Wazuh spawns and owns its own `osqueryd` — our entrypoint was *also* manually launching one, and the two collided over osquery's own sqlite lock file (`osqueryd` exiting with code 78). Removed the manual launch; the wodle exclusively owns `osqueryd` now. Verified live (before the config was moved to a mounted file per this session's new build-discipline rule): `osqueryd.results.log` filled with real `system_info` (hostname, CPU, RAM) and `listening_ports` rows. |
+| 13 | OSQuery on an agent: wodle runs, results arrive | **WORKS**, needed two real fixes | Two gaps, both in our own lab config, not upstream: (a) `<wodle name="osquery">` ships `<disabled>yes</disabled>` by default; (b) `/etc/osquery/osquery.conf` (the path our own entrypoint already pointed `osqueryd` at) never existed, so there was nothing to schedule. Fixed by flipping the wodle to enabled and writing a minimal schedule (`system_info`, `listening_ports`, 60s interval). Once fixed, a *third* issue surfaced: the wodle has `<run_daemon>yes</run_daemon>`, meaning Wazuh spawns and owns its own `osqueryd` — our entrypoint was *also* manually launching one, and the two collided over osquery's own sqlite lock file (`osqueryd` exiting with code 78). Removed the manual launch; the wodle exclusively owns `osqueryd` now. Verified live (before the config was moved to a mounted file per this session's new build-discipline rule): `osqueryd.results.log` filled with real `system_info` (hostname, CPU, RAM) and `listening_ports` rows. Re-verified after the rebuild below: the wodle shows `<disabled>no</disabled>`/`<run_daemon>yes</run_daemon>` and `/etc/osquery/osquery.conf` is written correctly via the now volume-mounted `entrypoint-agent.sh` — confirmed with no image rebuild needed for this config. |
+| 14 | Data volume: `archives.json`-to-`alerts.json` size ratio | **Measured** | Enabled `<logall>`/`<logall_json>` on both workers via `entrypoint-manager.sh` (mounted, no rebuild needed). 15-minute idle window (2 active Ubuntu agents, no injected test traffic) on both workers: `archives.json` grew **~11.0 KB** (2,833,264 → 2,844,464 bytes on worker1; 2,833,892 → 2,845,092 on worker2); `alerts.json` grew **0 bytes** on both — routine agent chatter (keepalives, the 60s osquery schedule) doesn't match any alert rule. The idle-state marginal ratio is therefore undefined (no alert output to divide by). Cumulative total-size ratio at measurement end: archives ≈ **2.72x** alerts.json (2.84 MB vs 1.04 MB) on both workers — but that ~1 MB of baseline `alerts.json` content was almost entirely produced in the first ~90 seconds after container start (FIM baseline scan, rootcheck, SCA, syscollector all firing once on boot), not during steady-state idle operation. **Extrapolated idle growth rate:** ~44 KB/hour/worker for `archives.json` with 1 idle agent each; this scales up sharply whenever FIM/rootcheck/SCA actually produce alert-worthy findings, or during active-response/brute-force bursts (see items 5 and 6 for what alert-heavy traffic looks like). |
+| 15 | Failure behavior: restart a worker | **WORKS, fully automatic** | Restarted `wazuh-worker1` live (`docker restart`) while `agent-ubuntu-1` was Active on it. Agent's own log detected the drop immediately and retried `Trying to connect to server ([wazuh-worker1]:1514/tcp)` every ~10s unprompted. Worker1's `cluster.log` shows it reconnected to the master and finished a fresh `[Integrity check]`/`[Agent-info sync]` within ~16s of the container becoming healthy again. `agent_control -l` on the master showed `agent-ubuntu-1` back `Active` with no restart or re-enrollment on the agent side. |
+| 16 | Failure behavior: restart the master | **WORKS, workers/agents unaffected during outage** | Restarted `wazuh-master` live. While it was down, confirmed via `ss` on worker1 that `agent-ubuntu-1`'s TCP session to port 1514 stayed `ESTAB` the entire time, and `wazuh-remoted`/`wazuh-analysisd` kept running on both workers without interruption - event ingestion never touches the master in this design (see Step 2), so agent data flow was not affected at all. Worker1's `cluster.log` shows `[Main] The master closed the connection` at the moment of restart, one `Could not connect to master. Trying again in 10 seconds` cycle, then `Successfully connected to master` ~18s later (self-healed, no intervention). `cluster_control -l` and `agent_control -l` on the master showed the full cluster and both active agents back to normal immediately once the master was healthy again. |
+| 17 | Failure behavior: agent loses network connectivity | **WORKS, fully automatic** | Used `docker network disconnect` on `agent-ubuntu-1` (harder cut than a container restart - severs the interface entirely, no DNS, no route). Confirmed detection two ways: the agent's own log flipped to `Could not resolve hostname 'wazuh-worker1'` / `Unable to connect to any server`, retrying every ~13s; and on worker1's side, `ss` showed the `ESTAB` session to `172.28.0.21` was gone. After ~3.5 minutes disconnected, `docker network connect --ip 172.28.0.21` restored the same address; a fresh `ESTAB` session appeared on worker1 within 9 seconds with no manual agent restart, and `agent_control -i 004` showed a live `Last keep alive` timestamp matching the reconnect time. Note: `agent_control`'s own `Active`/`Disconnected` label never flipped during the ~3.5-minute cut - Wazuh's default `<disconnect_time>` threshold (10 minutes, unset/default in this lab) is longer than the window tested, so the TCP/log-level evidence above is what actually demonstrates the detection-and-recovery behavior, not the agent_control status label. |
 
 ### A fifth and sixth real bug, found getting items 10 and 13 to work
 
@@ -253,11 +254,94 @@ program. Reverted; the permission fix is the real one.)
 
 ## Step 4 — smoke test
 
-_(pending — next session)_
+`deploy/lab/smoke-test.sh`: brings the lab up, waits for the 3 manager nodes
+and the 2 working agents to report Docker-healthy (not the Rocky agents -
+see below), then checks `cluster_control -l` shows all 3 nodes and
+`agent_control -l` shows both Ubuntu agents Active. This is a structural
+health check, not a re-run of every Step 3 capability - those were verified
+manually and are one-time proofs.
+
+### A seventh real bug, found writing the smoke test: agent healthcheck always failing, silently, since Step 1
+
+`healthcheck-agent.sh` did `/var/ossec/bin/wazuh-control status | grep -q
+"wazuh-agentd.*is running"` under `set -euo pipefail` - the exact same bug
+class as bug #4 (manager healthcheck), just never caught because nobody had
+checked the agent *containers'* Docker health status before (every prior
+Step 3 check used `agent_control -l`'s "Active" field instead, which is a
+different, independent signal). `grep -q` exits the instant it finds a
+match, which SIGPIPEs `wazuh-control status` while it's still writing;
+`pipefail` then fails the whole pipeline (exit 141) even though the grep
+itself matched. Every agent container had been silently "unhealthy" in
+Docker's eyes (`FailingStreak` over 100) the entire session despite
+`wazuh-agentd` genuinely running and agents genuinely being Active. Fixed
+the same way as bug #4: capture `wazuh-control status`'s output into a
+variable first, then `grep` the variable - no live pipe, no SIGPIPE.
+
+### An eighth finding: Docker Desktop's WSL2 cross-distro bind mounts snapshot by inode, not by path
+
+Editing a file mounted into a running container (e.g. `healthcheck-agent.sh`
+after the bug-7 fix) did not take effect in that already-running container,
+even though the mount is a live bind per `docker compose config`. Root
+cause, specific to this host's Docker Desktop + WSL2 setup: the project
+lives in a non-Docker-Desktop WSL distro, so Docker Desktop proxies the bind
+mount through `/run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/...`,
+which snapshots the specific inode present at container-start time. An edit
+that replaces the file (write-new-content-then-rename, as most editors and
+this session's own edit tool do) leaves that inode orphaned - the running
+container keeps serving the old content, and `docker restart` on the same
+container outright fails (`no such file or directory` on the vanished
+snapshot path) rather than just serving stale content. **Fix/workaround:**
+`docker compose up -d --force-recreate <service>` (not `restart`) after
+editing a bind-mounted file - this is still a several-second operation, not
+a rebuild, so rule 1's goal (avoid the 13-minute recompile for config
+edits) still holds, but "restart" is not enough on this host and will error.
+
+Recreating an agent container this way also orphans its registration on the
+master (same static IP, now empty `client.keys` in the fresh container) -
+master refused re-enrollment with `Duplicate IP` until the stale `agent_id`
+was removed with `manage_agents -r <id>` first. Not a bug, just an
+operational step worth remembering: **removing + re-adding an agent
+registration is required after force-recreating an agent container**, since
+nothing in this lab persists `client.keys` across container recreates.
 
 ## Resource usage
 
-_(pending — next session)_
+Host: WSL2, 12 vCPU, 7.355 GiB RAM available to Docker Desktop.
+
+**Images** (sizes from Step 1): manager 4.67 GB, agent-ubuntu 601 MB,
+agent-rocky 649 MB. Full from-source rebuild of all three (`docker compose
+build`, `-j4`): completed in the background within this session's
+30-minute window.
+
+**Runtime, steady state** (full lab: 3 manager nodes + 4 agents + 1 LB, 2
+agents genuinely active and running their full module set - FIM, SCA,
+rootcheck, syscollector, osquery):
+
+| Container | CPU % | Memory |
+|---|---|---|
+| wazuh-master | 88.8% | 928 MiB |
+| wazuh-worker1 | 47.6% | 1.03 GiB |
+| wazuh-worker2 | 65.5% | 890 MiB |
+| agent-ubuntu-1 | 0.16% | 103 MiB |
+| agent-ubuntu-2 | 0.20% | 93 MiB |
+| agent-rocky-1/2 (agentd not running) | 0.02% | 12-22 MiB |
+| shadowtracer-lb (idle, no traffic) | 0.00% | 12 MiB |
+
+Totals: ~202% CPU (of 1200% available across 12 vCPUs, so ~17% of host
+capacity) and ~3.04 GiB memory (~41% of the 7.355 GiB available to Docker).
+The 3 manager nodes account for essentially all of it - cluster sync
+(`Integrity check`/`Agent-info sync` every ~10s) and the always-on module
+set (`wazuh-db`, `wazuh-apid`, `wazuh-clusterd`, `analysisd`) keep each
+manager busy even with only 1-2 lightly-loaded agents attached. Agents
+themselves are cheap: under 1% CPU and ~100 MiB RAM each with the full
+capability set (FIM, SCA, rootcheck, syscollector, osquery wodle) running.
+
+**Data volume** (item 14): idle `archives.json` growth is small
+(~44 KB/hour/worker with 1 idle agent) but `alerts.json` stays flat unless
+something actually trips a rule - see item 14's own row for the full
+breakdown and the caveat that the ~1 MB of alerts.json content already
+present at measurement start came from one-time boot scans, not steady
+idle operation.
 
 ## Surprises
 
@@ -266,3 +350,20 @@ _(pending — next session)_
   (missing framework/API, cluster disabled, API rejecting its own config).
   None of these were caught by the build — only by actually starting the
   container and checking `wazuh-control status`. See the three bugs above.
+- A Docker healthcheck can fail 100% of the time, silently, for an entire
+  session, on a daemon that is genuinely healthy - `grep -q` SIGPIPEs a
+  still-writing upstream command in a pipe, and `pipefail` turns that into
+  a hard failure even though the grep itself matched. Hit this twice
+  independently (manager healthcheck during Step 1, agent healthcheck
+  while writing the Step 4 smoke test) - worth grep-ing any future
+  `cmd | grep -q ...` under `set -o pipefail` for the same pattern.
+- Mounting config files into containers to dodge rebuilds (this session's
+  whole fix for the prior session's biggest time sink) introduces its own
+  gotcha on Docker Desktop + WSL2: the mount is pinned to an inode, not a
+  path, so an editor that replaces-via-rename orphans it silently, and
+  `docker restart` fails loudly instead of serving stale content. Still
+  far cheaper than a rebuild (`--force-recreate` takes seconds), but not
+  the zero-friction "just edit and it's live" the mount setup implies.
+- Manager CPU usage stays high (50-90%) even at idle with only 1-2 agents
+  attached - cluster-sync chatter and the always-on daemon set are the
+  floor, not something that scales down with agent count in this build.

@@ -27,6 +27,9 @@ services:
       CLUSTER_NODE_NAME: master
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+    volumes: &manager-config-mounts
+      - ./entrypoint-manager.sh:/entrypoint.sh:ro
+      - ./healthcheck-manager.sh:/healthcheck.sh:ro
     ports:
       # Only the API goes to the host - 1514/1515 stay internal to the lab
       # network (the Windows host has had Hyper-V reserve those before).
@@ -44,6 +47,7 @@ services:
       CLUSTER_NODE_NAME: worker1
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+    volumes: *manager-config-mounts
     depends_on:
       wazuh-master:
         condition: service_healthy
@@ -60,6 +64,7 @@ services:
       CLUSTER_NODE_NAME: worker2
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+    volumes: *manager-config-mounts
     depends_on:
       wazuh-master:
         condition: service_healthy
@@ -90,6 +95,9 @@ services:
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker1
+    volumes: &agent-config-mounts
+      - ./entrypoint-agent.sh:/entrypoint.sh:ro
+      - ./healthcheck-agent.sh:/healthcheck.sh:ro
     depends_on:
       wazuh-worker1:
         condition: service_healthy
@@ -106,6 +114,7 @@ services:
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker2
+    volumes: *agent-config-mounts
     depends_on:
       wazuh-worker2:
         condition: service_healthy
@@ -122,6 +131,7 @@ services:
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker1
+    volumes: *agent-config-mounts
     depends_on:
       wazuh-worker1:
         condition: service_healthy
@@ -138,6 +148,7 @@ services:
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker2
+    volumes: *agent-config-mounts
     depends_on:
       wazuh-worker2:
         condition: service_healthy
