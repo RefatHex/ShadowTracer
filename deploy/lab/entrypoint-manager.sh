@@ -32,11 +32,10 @@ if grep -q "<node>NODE_IP</node>" "$OSSEC_CONF"; then
     chown root:wazuh /var/ossec/etc/authd.pass || true
 fi
 
-# Step 3 item 14: enable the raw event archive (off by default) so we can
-# measure the archives.json-to-alerts.json size ratio over a capture window.
-sed -i -e 's:<logall>no</logall>:<logall>yes</logall>:' \
-       -e 's:<logall_json>no</logall_json>:<logall_json>yes</logall_json>:' \
-       "$OSSEC_CONF"
+# Step 3 item 14 (data volume) temporarily flipped <logall>/<logall_json> on
+# here to measure the archives.json-to-alerts.json ratio under real agent
+# activity - that measurement is done (see PHASE1_FINDINGS.md) and the raw
+# event archive is back off by default, matching ossec.conf's shipped default.
 
 # API: bind all interfaces, raise the request rate limit for lab load-testing.
 API_YAML=/var/ossec/api/configuration/api.yaml

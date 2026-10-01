@@ -95,6 +95,7 @@ services:
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker1
+      AGENT_MANAGER_DATA_HOST_FALLBACK: wazuh-worker2
     volumes: &agent-config-mounts
       - ./entrypoint-agent.sh:/entrypoint.sh:ro
       - ./healthcheck-agent.sh:/healthcheck.sh:ro
@@ -114,6 +115,7 @@ services:
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker2
+      AGENT_MANAGER_DATA_HOST_FALLBACK: wazuh-worker1
     volumes: *agent-config-mounts
     depends_on:
       wazuh-worker2:

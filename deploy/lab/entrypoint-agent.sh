@@ -8,6 +8,7 @@ MANAGER_ENROLL_HOST="${MANAGER_ENROLL_HOST:?MANAGER_ENROLL_HOST is required}"
 ENROLL_PASSWORD="${ENROLL_PASSWORD:?ENROLL_PASSWORD is required}"
 AGENT_NAME="${AGENT_NAME:-$(hostname)}"
 AGENT_MANAGER_DATA_HOST="${AGENT_MANAGER_DATA_HOST:-$MANAGER_ENROLL_HOST}"
+AGENT_MANAGER_DATA_HOST_FALLBACK="${AGENT_MANAGER_DATA_HOST_FALLBACK:-}"
 AGENT_IP="$(hostname -i | awk '{print $1}')"
 
 OSSEC_CONF=/var/ossec/etc/ossec.conf
@@ -18,6 +19,13 @@ FIM_TEST_DIR=/var/ossec/lab-fim-test
 # baked-in USER_AGENT_SERVER_NAME - see docker-compose.yml's note on why
 # agent traffic can't go through the shared-IP load balancer in this build.
 sed -i "s|<address>.*</address>|<address>${AGENT_MANAGER_DATA_HOST}</address>|" "$OSSEC_CONF"
+
+# --- one-time runtime config: a second <server> block, so this agent fails
+# over to another worker if its primary goes down (Step 3 item 15) ---
+if [ -n "$AGENT_MANAGER_DATA_HOST_FALLBACK" ] && ! grep -q "<address>${AGENT_MANAGER_DATA_HOST_FALLBACK}</address>" "$OSSEC_CONF"; then
+    fallback_block="  <server><address>${AGENT_MANAGER_DATA_HOST_FALLBACK}</address><port>1514</port><protocol>tcp</protocol></server>"
+    sed -i "0,/<\/server>/s|</server>|</server>\n${fallback_block}|" "$OSSEC_CONF"
+fi
 
 # --- one-time runtime config: extra FIM-watched directory for step 3.6 ---
 if ! grep -q "$FIM_TEST_DIR" "$OSSEC_CONF"; then
