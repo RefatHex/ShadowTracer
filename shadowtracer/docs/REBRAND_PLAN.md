@@ -221,3 +221,118 @@ the protected `LegalCopyright` line (true, accurate attribution to the
 upstream company) rather than rewriting them - flagged here for a
 decision during Pass A rather than decided unilaterally in this
 inventory.
+
+## Pass C report — daemon names and system user (plan only, not executed)
+
+Per the task: this is analysis to decide from, not a change. Nothing below
+has been edited.
+
+### Scope: how many files
+
+| Dependency | Count | What |
+|---|---|---|
+| Files mentioning any of the 15 daemon names (`wazuh-agentd`, `wazuh-analysisd`, ... `wazuh-apid`) | **166** | Repo-wide, excluding vendored/tests/docs/shadowtracer (see breakdown below) |
+| ...of which in `src/` | 84 | Build system, daemon source, active-response, logging |
+| ...of which in `framework/` (Python) | 34 | Cluster code, status reporting |
+| ...of which in `api/` | 21 | Daemon status/stats endpoints |
+| ...of which in `packages/` | 5 | Service management in postinst/preinst/prerm (control-script calls only - Pass B already renamed the invoking binary) |
+| ARGV0 compile-time macro definitions in `src/Makefile` | 34 | One `-DARGV0="wazuh-X"` per compiled object per daemon |
+| Total daemon-name occurrences in `src/Makefile` | 68 | Includes `BUILD_SERVER+=`/`BUILD_AGENT+=` target lists and the make targets themselves (`wazuh-remoted: ${remoted_o}`) |
+| `ruleset/decoders/*.xml` or `ruleset/rules/*.xml` matching a daemon name | **2** | See "Rule/decoder risk" below - small in file count, but this is the category NEVER CHANGE warns about |
+| Files with real `chown`/`-o`/`-g` operations using the `wazuh` user/group | 16 | Install scripts + every platform's packaging postinst |
+| C source files calling `Privsep_GetUser(USER)`/`Privsep_GetGroup(GROUPGLOBAL)` | 15 | Every daemon's own privilege-drop-after-bind startup code |
+
+### What depends on these names
+
+- **Build system (`src/Makefile`)**: the daemon name isn't just a label -
+  it's the Make target name, the compiled binary's output filename, *and*
+  a compile-time `ARGV0` macro baked into the binary that the daemon uses
+  for its own log-line prefixes (`merror`/`minfo` etc. print `wazuh-X:
+  ...`). Renaming a daemon means renaming the Make target, the binary
+  filename, and recompiling with a new ARGV0 - not a text edit, a build
+  system change touching every one of that daemon's ~2-4 compile rules.
+- **Control script**: `src/init/wazuh-server.sh`/`wazuh-client.sh`/
+  `wazuh-local.sh`'s `DAEMONS=`/`OP_DAEMONS=` lists (already identified in
+  Pass B, left untouched there on purpose) name every daemon literally,
+  used to start/stop/check each one by exact binary name.
+- **Cluster code** (`framework/wazuh/core/cluster/`): 10 files reference
+  specific daemon names, for things like checking `wazuh-db` or
+  `wazuh-clusterd` process state as part of cluster health/sync logic.
+- **API status** (`api/api/`, `framework/wazuh/core/`): 27 files - the API
+  exposes per-daemon status and stats (`GET /manager/status` etc. return
+  `wazuh-analysisd: running` style fields), so renaming daemons changes
+  the API's own response field values, which is a breaking API change for
+  any client (including our own future console) parsing those names.
+- **Logs**: every daemon's own log lines are prefixed with its ARGV0 name
+  (`wazuh-remoted: INFO: ...`). This is what the smoke test and Phase 1's
+  own healthcheck scripts grep for today (`grep -q "^${d} is running"`) -
+  renaming daemons requires updating every such grep, ours included.
+- **System user/group (`wazuh`/`wazuh`)**: baked into C via
+  `src/headers/defs.h`'s `#define USER "wazuh"` / `#define GROUPGLOBAL
+  "wazuh"`, used by ~15 daemon source files to drop root privileges after
+  startup (bind to privileged ports / open root-only files, then
+  `setuid`/`setgid` to this user). Also used by install scripts to `chown`
+  essentially the entire install tree (binaries, configs, logs, queue
+  sockets) to `wazuh:wazuh` at install time, and by every platform's
+  packaging postinst to create the user/group in the first place
+  (`adduser.sh`).
+
+### Rule/decoder risk (the concrete finding, not a hypothetical)
+
+Per NEVER CHANGE's own instruction, `ruleset/` was grepped before writing
+this report, not after. It found a real hit:
+`ruleset/decoders/0200-ossec_decoders.xml` (the decoder for Wazuh's *own*
+internal daemon logs) line 19:
+
+```
+<prematch>^\d\d\d\d/\d\d/\d\d \d\d:\d\d:\d\d ossec-logcollector|^\d\d\d\d/\d\d/\d\d \d\d:\d\d:\d\d wazuh-logcollector</prematch>
+```
+
+This decoder literally pattern-matches the string `wazuh-logcollector` as
+part of recognizing that log line's format (note it already carries a
+legacy `ossec-logcollector` alternative from the OSSEC->Wazuh rename, so
+this isn't a hypothetical risk - it already happened once). Renaming
+`wazuh-logcollector` without updating this decoder (adding a third
+alternative, the same pattern already used for the OSSEC legacy name)
+would silently break recognition of that specific internal log line.
+Scope is small (1 real decoder file, this one `<prematch>`; the second
+file found, `0320-sudo_decoders.xml`, only has daemon names inside a
+comment, not matching logic) - but it proves the risk is real, not
+theoretical, and the safe pattern for doing it right already exists in
+this exact file (add an alternative, don't replace).
+
+### Risks, summarized
+
+1. **Build system change, not a text edit.** Every daemon's Makefile rules
+   (34 ARGV0 definitions, 68 total references) need updating together;
+   get one wrong and that daemon silently logs under the old name or fails
+   to build.
+2. **API is a breaking change for any consumer.** Per-daemon status/stats
+   field names in API responses change - any script, dashboard, or our
+   own future console parsing `wazuh-analysisd` as a literal API field
+   name breaks until updated.
+3. **System user/group rename means re-owning the install tree.** Not
+   just a C macro change - every file under `/var/ossec` is `chown
+   wazuh:wazuh` at install time. A rename needs either (a) a fresh install
+   always uses the new name (clean, but means a real migration path is
+   needed for upgrades from existing wazuh-user installs), or (b) upgrade
+   logic that re-chowns the entire tree and migrates the user/group,
+   which is real filesystem work with real failure modes (partial
+   re-chown, permission errors) if interrupted.
+4. **Decoder/rule risk is real, proven, and has a known-safe pattern.**
+   One decoder (`0200-ossec_decoders.xml`) needs a third `prematch`
+   alternative, following the exact precedent already in that file for
+   the OSSEC->Wazuh transition. Low file count, but gets the NEVER CHANGE
+   warning exactly right if missed.
+5. **Blast radius is 2-3x Pass B's.** Pass B (control binary, services,
+   packages, env vars) touched 45 files. This would touch at minimum the
+   166 files found above, likely more once the build-system and API
+   response-shape changes ripple into their own callers (tests aren't
+   counted here - they're out of scope per the standing decision in §7 of
+   this plan, but 6,670 occurrences live there and a daemon rename is the
+   one Pass A/B change category most likely to actually break running
+   tests, not just need cosmetic updates, since test fixtures assert on
+   real daemon names and status field values).
+
+No files touched in writing this report. Waiting on your decision before
+doing anything in Pass C.
