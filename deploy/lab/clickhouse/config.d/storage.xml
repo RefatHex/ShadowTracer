@@ -1,0 +1,25 @@
+<clickhouse>
+    <!-- "cold" is a local directory standing in for object storage in the
+         lab (see shadowtracer/docs/PHASE3_DATA_PLATFORM.md) - a real
+         deployment points this disk at S3/GCS/etc. instead. -->
+    <storage_configuration>
+        <disks>
+            <cold>
+                <type>local</type>
+                <path>/var/lib/clickhouse/cold/</path>
+            </cold>
+        </disks>
+        <policies>
+            <hot_cold>
+                <volumes>
+                    <hot>
+                        <disk>default</disk>
+                    </hot>
+                    <cold>
+                        <disk>cold</disk>
+                    </cold>
+                </volumes>
+            </hot_cold>
+        </policies>
+    </storage_configuration>
+</clickhouse>

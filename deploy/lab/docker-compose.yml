@@ -165,9 +165,126 @@ services:
       lab:
         ipv4_address: 172.28.0.24
 
+  # --- Phase 3 data platform ---------------------------------------------
+
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    mem_limit: 768m
+    environment:
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID:?set KAFKA_CLUSTER_ID in deploy/lab/.env, see .env.example}"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://127.0.0.1:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Lab: 1 broker, so replication/ISR must be 1. Production (3 brokers)
+      # uses the real defaults (3/2) - see shadowtracer/docs/DECISIONS.md.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms512m"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "127.0.0.1:9094:9094"
+    networks:
+      lab:
+        ipv4_address: 172.28.0.30
+
+  ch-keeper:
+    image: clickhouse/clickhouse-keeper:24.8
+    hostname: ch-keeper
+    mem_limit: 256m
+    volumes:
+      - ./clickhouse/keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - ch-keeper-data:/var/lib/clickhouse
+    networks:
+      lab:
+        ipv4_address: 172.28.0.31
+
+  ch-clickhouse-1:
+    image: clickhouse/clickhouse-server:24.8
+    hostname: ch-clickhouse-1
+    mem_limit: 768m
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+      CLICKHOUSE_DB: shadowtracer
+    volumes:
+      - ./clickhouse/config.d/zookeeper.xml:/etc/clickhouse-server/config.d/zookeeper.xml:ro
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/resources.xml:/etc/clickhouse-server/config.d/resources.xml:ro
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/macros-1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ch1-data:/var/lib/clickhouse
+    depends_on:
+      - ch-keeper
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    networks:
+      lab:
+        ipv4_address: 172.28.0.32
+
+  ch-clickhouse-2:
+    image: clickhouse/clickhouse-server:24.8
+    hostname: ch-clickhouse-2
+    mem_limit: 768m
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+      CLICKHOUSE_DB: shadowtracer
+    volumes:
+      - ./clickhouse/config.d/zookeeper.xml:/etc/clickhouse-server/config.d/zookeeper.xml:ro
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/resources.xml:/etc/clickhouse-server/config.d/resources.xml:ro
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/macros-2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ch2-data:/var/lib/clickhouse
+    depends_on:
+      - ch-keeper
+    ports:
+      - "127.0.0.1:8124:8123"
+      - "127.0.0.1:9001:9000"
+    networks:
+      lab:
+        ipv4_address: 172.28.0.33
+
+  postgres:
+    image: postgres:16-alpine
+    hostname: postgres
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in deploy/lab/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/lab/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      lab:
+        ipv4_address: 172.28.0.34
+
 networks:
   lab:
     driver: bridge
     ipam:
       config:
         - subnet: 172.28.0.0/24
+
+volumes:
+  kafka-data:
+  ch-keeper-data:
+  ch1-data:
+  ch2-data:
+  postgres-data:

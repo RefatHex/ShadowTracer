@@ -1,0 +1,8 @@
+<clickhouse>
+    <!-- Lab sizing only - ClickHouse's default cache sizing assumes a
+         dedicated host. Cap it so 2 replicas fit next to the rest of the
+         lab on a 7.355 GiB Docker memory budget. -->
+    <max_server_memory_usage>644245094</max_server_memory_usage> <!-- 600 MiB -->
+    <mark_cache_size>134217728</mark_cache_size> <!-- 128 MiB -->
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+</clickhouse>

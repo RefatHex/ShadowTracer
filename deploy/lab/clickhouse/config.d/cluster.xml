@@ -1,0 +1,17 @@
+<clickhouse>
+    <remote_servers>
+        <lab_cluster>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>ch-clickhouse-1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>ch-clickhouse-2</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </lab_cluster>
+    </remote_servers>
+</clickhouse>
