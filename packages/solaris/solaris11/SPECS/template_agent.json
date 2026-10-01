@@ -295,7 +295,7 @@
         "type": "file",
         "user": "root"
     },
-    "/var/ossec/bin/wazuh-control": {
+    "/var/ossec/bin/shadowtracer-control": {
         "class": "static",
         "group": "root",
         "mode": "0750",

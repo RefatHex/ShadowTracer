@@ -84,16 +84,16 @@ case "$1" in
     upgrade|deconfigure)
 
       # Stop the services before uninstalling the package
-      if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-agent > /dev/null 2>&1; then
-          systemctl stop wazuh-agent > /dev/null 2>&1
+      if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet shadowtracer-agent > /dev/null 2>&1; then
+          systemctl stop shadowtracer-agent > /dev/null 2>&1
           touch ${WAZUH_TMP_DIR}/wazuh.restart
-      elif command -v service > /dev/null 2>&1 && service wazuh-agent status 2>/dev/null | grep "running" > /dev/null 2>&1; then
-          service wazuh-agent stop > /dev/null 2>&1
+      elif command -v service > /dev/null 2>&1 && service shadowtracer-agent status 2>/dev/null | grep "running" > /dev/null 2>&1; then
+          service shadowtracer-agent stop > /dev/null 2>&1
           touch ${WAZUH_TMP_DIR}/wazuh.restart
       elif ${DIR}/bin/ossec-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
           touch ${WAZUH_TMP_DIR}/wazuh.restart
       fi
-      ${DIR}/bin/wazuh-control stop > /dev/null 2>&1
+      ${DIR}/bin/shadowtracer-control stop > /dev/null 2>&1
 
     ;;
 
@@ -106,13 +106,13 @@ case "$1" in
 
       # Stop the services before uninstalling the package
       # Check for systemd
-      if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-agent > /dev/null 2>&1; then
-          systemctl stop wazuh-agent > /dev/null 2>&1
+      if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet shadowtracer-agent > /dev/null 2>&1; then
+          systemctl stop shadowtracer-agent > /dev/null 2>&1
       # Check for SysV
-      elif command -v service > /dev/null 2>&1 && service wazuh-agent status 2>/dev/null | grep "running" > /dev/null 2>&1; then
-          service wazuh-agent stop > /dev/null 2>&1
+      elif command -v service > /dev/null 2>&1 && service shadowtracer-agent status 2>/dev/null | grep "running" > /dev/null 2>&1; then
+          service shadowtracer-agent stop > /dev/null 2>&1
       fi
-      ${DIR}/bin/wazuh-control stop > /dev/null 2>&1
+      ${DIR}/bin/shadowtracer-control stop > /dev/null 2>&1
 
       # Save the conffiles
       mkdir -p ${DIR}/tmp/conffiles
@@ -132,8 +132,8 @@ case "$1" in
     ;;
 
     failed-upgrade)
-      if [ -f ${DIR}/bin/wazuh-control ]; then
-        ${DIR}/bin/wazuh-control stop > /dev/null 2>&1
+      if [ -f ${DIR}/bin/shadowtracer-control ]; then
+        ${DIR}/bin/shadowtracer-control stop > /dev/null 2>&1
       fi
     ;;
 

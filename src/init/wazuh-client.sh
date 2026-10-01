@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Copyright (C) 2015, Wazuh Inc.
-# wazuh-control        This shell script takes care of starting
+# shadowtracer-control        This shell script takes care of starting
 #                      or stopping ossec-hids
 # Author: Daniel B. Cid <daniel.cid@gmail.com>
 

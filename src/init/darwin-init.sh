@@ -44,15 +44,15 @@ echo '
 
 StartService ()
 {
-        '${INSTALLATION_PATH}'/bin/wazuh-control start
+        '${INSTALLATION_PATH}'/bin/shadowtracer-control start
 }
 StopService ()
 {
-        '${INSTALLATION_PATH}'/bin/wazuh-control stop
+        '${INSTALLATION_PATH}'/bin/shadowtracer-control stop
 }
 RestartService ()
 {
-        '${INSTALLATION_PATH}'/bin/wazuh-control restart
+        '${INSTALLATION_PATH}'/bin/shadowtracer-control restart
 }
 RunService "$1"
 ' > $STARTUP_SCRIPT
@@ -93,12 +93,12 @@ chmod u=rw-,go=r-- $STARTUP
 echo '#!/bin/sh
 
 capture_sigterm() {
-    '${INSTALLATION_PATH}'/bin/wazuh-control stop
+    '${INSTALLATION_PATH}'/bin/shadowtracer-control stop
     exit $?
 }
 
-if ! '${INSTALLATION_PATH}'/bin/wazuh-control start; then
-    '${INSTALLATION_PATH}'/bin/wazuh-control stop
+if ! '${INSTALLATION_PATH}'/bin/shadowtracer-control start; then
+    '${INSTALLATION_PATH}'/bin/shadowtracer-control stop
 fi
 
 while : ; do

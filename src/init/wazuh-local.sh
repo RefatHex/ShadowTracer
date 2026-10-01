@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Copyright (C) 2015, Wazuh Inc.
-# wazuh-control        This shell script takes care of starting
+# shadowtracer-control        This shell script takes care of starting
 #                      or stopping ossec-hids
 # Author: Daniel B. Cid <daniel.cid@gmail.com>
 
@@ -263,7 +263,7 @@ start_service()
     if [ $? = 0 ]; then
         echo ""
         echo "Starting sub agent directory (for hybrid mode)"
-        ${DIR}/ossec-agent/bin/wazuh-control start
+        ${DIR}/ossec-agent/bin/shadowtracer-control start
     fi
 
     echo "Completed."
@@ -351,7 +351,7 @@ stop_service()
     if [ $? = 0 ]; then
         echo ""
         echo "Stopping sub agent directory (for hybrid mode)"
-        ${DIR}/ossec-agent/bin/wazuh-control stop
+        ${DIR}/ossec-agent/bin/shadowtracer-control stop
     fi
     echo "ShadowTracer $VERSION Stopped"
 }

@@ -103,7 +103,7 @@ if [ $1 = 2 ]; then
     /etc/rc.d/init.d/wazuh-agent stop > /dev/null 2>&1 || :
     touch %{_localstatedir}/tmp/wazuh.restart
   fi
-  %{_localstatedir}/bin/ossec-control stop > /dev/null 2>&1 || %{_localstatedir}/bin/wazuh-control stop > /dev/null 2>&1
+  %{_localstatedir}/bin/ossec-control stop > /dev/null 2>&1 || %{_localstatedir}/bin/shadowtracer-control stop > /dev/null 2>&1
 fi
 
 if [ $1 = 2 ]; then

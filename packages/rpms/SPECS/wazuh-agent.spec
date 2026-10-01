@@ -8,8 +8,8 @@
   %define _rpmfilename %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm
 %endif
 
-Summary:     Wazuh helps you to gain security visibility into your infrastructure by monitoring hosts at an operating system and application level. It provides the following capabilities: log analysis, file integrity monitoring, intrusions detection and policy and compliance monitoring
-Name:        wazuh-agent
+Summary:     ShadowTracer helps you to gain security visibility into your infrastructure by monitoring hosts at an operating system and application level. It provides the following capabilities: log analysis, file integrity monitoring, intrusions detection and policy and compliance monitoring
+Name:        shadowtracer-agent
 Version:     %{_version}
 Release:     %{_release}
 License:     GPL
@@ -21,7 +21,9 @@ Vendor:      Wazuh <info@wazuh.com>
 Packager:    Wazuh <info@wazuh.com>
 Requires(pre):    /usr/sbin/groupadd /usr/sbin/useradd
 Requires(postun): /usr/sbin/groupdel /usr/sbin/userdel
-Conflicts:   ossec-hids ossec-hids-agent wazuh-manager wazuh-local
+Conflicts:   ossec-hids ossec-hids-agent wazuh-manager shadowtracer-manager wazuh-agent wazuh-local
+Obsoletes: wazuh-agent
+Provides: wazuh-agent = %{version}-%{release}
 AutoReqProv: no
 
 Requires: coreutils
@@ -41,10 +43,10 @@ log analysis, file integrity monitoring, intrusions detection and policy and com
 %if 0%{?el} >= 6 || 0%{?rhel} >= 6
 # Build debuginfo package
 %ifnarch ppc64le
-%package -n wazuh-agent-debuginfo
-Requires: wazuh-agent = %{_version}-%{_release}
+%package -n shadowtracer-agent-debuginfo
+Requires: shadowtracer-agent = %{_version}-%{_release}
 Summary: Debug information for package %{name}.
-%description -n wazuh-agent-debuginfo
+%description -n shadowtracer-agent-debuginfo
 This package provides debug information for package %{name}.
 %endif
 %endif
@@ -108,9 +110,9 @@ mkdir -p ${RPM_BUILD_ROOT}%{_localstatedir}/.ssh
 cp -pr %{_localstatedir}/* ${RPM_BUILD_ROOT}%{_localstatedir}/
 mkdir -p ${RPM_BUILD_ROOT}/usr/lib/systemd/system/
 sed -i "s:WAZUH_HOME_TMP:%{_localstatedir}:g" src/init/templates/ossec-hids-rh.init
-install -m 0755 src/init/templates/ossec-hids-rh.init ${RPM_BUILD_ROOT}%{_initrddir}/wazuh-agent
-sed -i "s:WAZUH_HOME_TMP:%{_localstatedir}:g" src/init/templates/wazuh-agent.service
-install -m 0644 src/init/templates/wazuh-agent.service ${RPM_BUILD_ROOT}/usr/lib/systemd/system/
+install -m 0755 src/init/templates/ossec-hids-rh.init ${RPM_BUILD_ROOT}%{_initrddir}/shadowtracer-agent
+sed -i "s:WAZUH_HOME_TMP:%{_localstatedir}:g" src/init/templates/shadowtracer-agent.service
+install -m 0644 src/init/templates/shadowtracer-agent.service ${RPM_BUILD_ROOT}/usr/lib/systemd/system/
 
 # Clean the preinstalled configuration assesment files
 rm -f ${RPM_BUILD_ROOT}%{_localstatedir}/ruleset/sca/*
@@ -237,24 +239,24 @@ if [ $1 = 2 ]; then
     exit 1
   fi
 
-  if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-agent > /dev/null 2>&1; then
-    systemctl stop wazuh-agent.service > /dev/null 2>&1
+  if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet shadowtracer-agent > /dev/null 2>&1; then
+    systemctl stop shadowtracer-agent.service > /dev/null 2>&1
     touch %{_localstatedir}/tmp/wazuh.restart
   # Check for SysV
-  elif command -v service > /dev/null 2>&1 && service wazuh-agent status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
-    service wazuh-agent stop > /dev/null 2>&1
+  elif command -v service > /dev/null 2>&1 && service shadowtracer-agent status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
+    service shadowtracer-agent stop > /dev/null 2>&1
     touch %{_localstatedir}/tmp/wazuh.restart
-  elif %{_localstatedir}/bin/wazuh-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
+  elif %{_localstatedir}/bin/shadowtracer-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
     touch %{_localstatedir}/tmp/wazuh.restart
   elif %{_localstatedir}/bin/ossec-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
     touch %{_localstatedir}/tmp/wazuh.restart
   fi
-  %{_localstatedir}/bin/ossec-control stop > /dev/null 2>&1 || %{_localstatedir}/bin/wazuh-control stop > /dev/null 2>&1
+  %{_localstatedir}/bin/ossec-control stop > /dev/null 2>&1 || %{_localstatedir}/bin/shadowtracer-control stop > /dev/null 2>&1
 fi
 
 %post
 
-echo "VERSION=\"$(%{_localstatedir}/bin/wazuh-control info -v)\"" > /etc/ossec-init.conf
+echo "VERSION=\"$(%{_localstatedir}/bin/shadowtracer-control info -v)\"" > /etc/ossec-init.conf
 if [ $1 = 2 ]; then
   if [ -d %{_localstatedir}/logs/ossec ]; then
     rm -rf %{_localstatedir}/logs/wazuh
@@ -288,12 +290,12 @@ if [ $1 = 1 ]; then
 fi
 
 if [ -r /etc/SuSE-release ] && grep -q "VERSION = 11" /etc/SuSE-release 2>/dev/null; then
-    cp -p %{_localstatedir}/packages_files/agent_installation_scripts/src/init/ossec-hids-suse.init /etc/init.d/wazuh-agent
-    chmod 755 /etc/init.d/wazuh-agent
+    cp -p %{_localstatedir}/packages_files/agent_installation_scripts/src/init/ossec-hids-suse.init /etc/init.d/shadowtracer-agent
+    chmod 755 /etc/init.d/shadowtracer-agent
 fi
 
 if [[ -d /run/systemd/system ]]; then
-  rm -f %{_initrddir}/wazuh-agent
+  rm -f %{_initrddir}/shadowtracer-agent
 fi
 
 # Delete the installation files used to configure the agent
@@ -522,13 +524,13 @@ if [ $1 = 0 ]; then
 
   # Stop the services before uninstall the package
   # Check for systemd
-  if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-agent > /dev/null 2>&1; then
-    systemctl stop wazuh-agent.service > /dev/null 2>&1
+  if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet shadowtracer-agent > /dev/null 2>&1; then
+    systemctl stop shadowtracer-agent.service > /dev/null 2>&1
   # Check for SysV
-  elif command -v service > /dev/null 2>&1 && service wazuh-agent status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
-    service wazuh-agent stop > /dev/null 2>&1
+  elif command -v service > /dev/null 2>&1 && service shadowtracer-agent status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
+    service shadowtracer-agent stop > /dev/null 2>&1
   fi
-  %{_localstatedir}/bin/wazuh-control stop > /dev/null 2>&1
+  %{_localstatedir}/bin/shadowtracer-control stop > /dev/null 2>&1
 
   # Remove the SELinux policy
   if command -v getenforce > /dev/null 2>&1 && command -v semodule > /dev/null 2>&1; then
@@ -545,7 +547,7 @@ if [ $1 = 0 ]; then
     sles=$(grep "SUSE Linux Enterprise Server" /etc/SuSE-release)
   fi
   if [ ! -z "$sles" ]; then
-    rm -f /etc/init.d/wazuh-agent
+    rm -f /etc/init.d/shadowtracer-agent
   fi
 
   # Delete audisp wazuh plugin if exists
@@ -616,8 +618,8 @@ fi
 
 # posttrans code is the last thing executed in a install/upgrade
 %posttrans
-if [ -f %{_sysconfdir}/systemd/system/wazuh-agent.service ]; then
-  rm -rf %{_sysconfdir}/systemd/system/wazuh-agent.service
+if [ -f %{_sysconfdir}/systemd/system/shadowtracer-agent.service ]; then
+  rm -rf %{_sysconfdir}/systemd/system/shadowtracer-agent.service
   systemctl daemon-reload > /dev/null 2>&1
 fi
 
@@ -625,11 +627,11 @@ if [ -f %{_localstatedir}/tmp/wazuh.restart ]; then
   rm -f %{_localstatedir}/tmp/wazuh.restart
   if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 ; then
     systemctl daemon-reload > /dev/null 2>&1
-    systemctl restart wazuh-agent.service > /dev/null 2>&1
+    systemctl restart shadowtracer-agent.service > /dev/null 2>&1
   elif command -v service > /dev/null 2>&1; then
-    service wazuh-agent restart > /dev/null 2>&1
+    service shadowtracer-agent restart > /dev/null 2>&1
   else
-    %{_localstatedir}/bin/wazuh-control restart > /dev/null 2>&1
+    %{_localstatedir}/bin/shadowtracer-control restart > /dev/null 2>&1
   fi
 fi
 
@@ -651,9 +653,9 @@ rm -fr %{buildroot}
 
 %files
 %defattr(-,root,root)
-%config(missingok) %{_initrddir}/wazuh-agent
+%config(missingok) %{_initrddir}/shadowtracer-agent
 %attr(640, root, wazuh) %verify(not md5 size mtime) %ghost %{_sysconfdir}/ossec-init.conf
-/usr/lib/systemd/system/wazuh-agent.service
+/usr/lib/systemd/system/shadowtracer-agent.service
 %dir %attr(750, root, wazuh) %{_localstatedir}
 %attr(440, wazuh, wazuh) %{_localstatedir}/VERSION.json
 %attr(750, root, wazuh) %{_localstatedir}/agentless
@@ -802,7 +804,7 @@ rm -fr %{buildroot}
 
 %if 0%{?el} >= 6 || 0%{?rhel} >= 6
 %ifnarch ppc64le
-%files -n wazuh-agent-debuginfo -f debugfiles.list
+%files -n shadowtracer-agent-debuginfo -f debugfiles.list
 %endif
 %endif
 

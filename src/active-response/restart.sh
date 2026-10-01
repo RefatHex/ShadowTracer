@@ -75,7 +75,7 @@ if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && [ "$(ca
 
     systemctl $PARAM_ACTION wazuh-$TYPE
 else
-    ${PWD}/bin/wazuh-control $PARAM_ACTION
+    ${PWD}/bin/shadowtracer-control $PARAM_ACTION
 fi
 
 exit $?;

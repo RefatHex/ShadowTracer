@@ -46,7 +46,7 @@ rc_reset
 
 # Just to make sure wazuh is installed ...
 WAZUH_HOME=WAZUH_HOME_TMP
-WAZUH_CONTROL="$WAZUH_HOME/bin/wazuh-control"
+WAZUH_CONTROL="$WAZUH_HOME/bin/shadowtracer-control"
 
 test -x $WAZUH_CONTROL || { echo "$WAZUH_CONTROL not installed";
     if [ "$1" = "stop" ]; then exit 0;

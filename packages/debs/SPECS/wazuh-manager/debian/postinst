@@ -17,7 +17,7 @@ case "$1" in
     SCA_BASE_DIR="${SCRIPTS_DIR}/sca"
 
     if [ -d /run/systemd/system ]; then
-        rm -f /etc/init.d/wazuh-manager
+        rm -f /etc/init.d/shadowtracer-manager
     fi
 
     if [ ! -f ${OSMYSHELL} ]; then
@@ -94,7 +94,7 @@ case "$1" in
 
     # Generation auto-signed certificate if not exists
     if [ ! -f "${DIR}/etc/sslmanager.key" ] && [ ! -f "${DIR}/etc/sslmanager.cert" ]; then
-        ${DIR}/bin/wazuh-authd -C 365 -B 2048 -S "/C=US/ST=California/CN=Wazuh/" -K ${DIR}/etc/sslmanager.key -X ${DIR}/etc/sslmanager.cert 2>/dev/null
+        ${DIR}/bin/wazuh-authd -C 365 -B 2048 -S "/C=US/ST=California/CN=ShadowTracer/" -K ${DIR}/etc/sslmanager.key -X ${DIR}/etc/sslmanager.cert 2>/dev/null
     fi
 
     chmod 640 ${DIR}/etc/sslmanager.cert ${DIR}/etc/sslmanager.key > /dev/null 2>&1 || true
@@ -242,9 +242,9 @@ case "$1" in
     # Restoring file permissions
     ${SCRIPTS_DIR}/restore-permissions.sh > /dev/null 2>&1 || true
 
-    # Remove old service file /etc/systemd/system/wazuh-manager.service if present
-    if [ -f /etc/systemd/system/wazuh-manager.service ]; then
-        rm -f /etc/systemd/system/wazuh-manager.service
+    # Remove old service file /etc/systemd/system/shadowtracer-manager.service if present
+    if [ -f /etc/systemd/system/shadowtracer-manager.service ]; then
+        rm -f /etc/systemd/system/shadowtracer-manager.service
         if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1; then
             systemctl daemon-reload > /dev/null 2>&1
         fi
@@ -275,11 +275,11 @@ case "$1" in
         if [ -f ${WAZUH_TMP_DIR}/wazuh.restart ] ; then
             if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1; then
                 systemctl daemon-reload > /dev/null 2>&1
-                systemctl restart wazuh-manager.service > /dev/null 2>&1
+                systemctl restart shadowtracer-manager.service > /dev/null 2>&1
             elif command -v service > /dev/null 2>&1 ; then
-                service wazuh-manager restart > /dev/null 2>&1
+                service shadowtracer-manager restart > /dev/null 2>&1
             else
-                ${DIR}/bin/wazuh-control restart > /dev/null 2>&1
+                ${DIR}/bin/shadowtracer-control restart > /dev/null 2>&1
             fi
         fi
     fi

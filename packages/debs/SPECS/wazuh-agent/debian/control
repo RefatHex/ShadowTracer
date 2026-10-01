@@ -1,4 +1,4 @@
-Source: wazuh-agent
+Source: shadowtracer-agent
 Section: admin
 Priority: extra
 Maintainer: Wazuh <info@wazuh.com>
@@ -6,22 +6,23 @@ Build-Depends: debhelper (>= 7.0.50~), make, gcc, linux-libc-dev, gawk, libaudit
 Standards-Version: 3.8.4
 Homepage: https://www.wazuh.com
 
-Package: wazuh-agent
+Package: shadowtracer-agent
 Architecture: any
 Depends: ${shlibs:Depends}, libc6 (>= 2.7), lsb-release, debconf, adduser, procps
-Conflicts: ossec-hids-agent, wazuh-manager, ossec-hids, wazuh-api
+Conflicts: ossec-hids-agent, wazuh-manager, shadowtracer-manager, wazuh-agent, ossec-hids, wazuh-api
 Breaks: ossec-hids-agent, wazuh-manager, ossec-hids
-Description: Wazuh agent
- Wazuh helps you to gain security visibility into your infrastructure by
+Replaces: wazuh-agent
+Description: ShadowTracer agent
+ ShadowTracer helps you to gain security visibility into your infrastructure by
  monitoring hosts at an operating system and application level. It provides
  the following capabilities: log analysis, file integrity monitoring,
  intrusions detection and policy and compliance monitoring.
 
-Package: wazuh-agent-dbg
+Package: shadowtracer-agent-dbg
 Section: debug
 Priority: optional
 Architecture: any
-Conflicts: wazuh-agent (<< ${binary:Version}), wazuh-agent (>> ${binary:Version})
-Depends: wazuh-agent
-Description: Debug symbols for wazuh-agent.
-  This package contains files necessary for debugging the wazuh-agent with gdb.
+Conflicts: shadowtracer-agent (<< ${binary:Version}), shadowtracer-agent (>> ${binary:Version})
+Depends: shadowtracer-agent
+Description: Debug symbols for shadowtracer-agent.
+  This package contains files necessary for debugging the shadowtracer-agent with gdb.

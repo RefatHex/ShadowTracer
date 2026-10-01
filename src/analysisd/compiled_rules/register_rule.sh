@@ -39,7 +39,7 @@ elif [ "x$1" = "xsave" ]; then
     fi    
     WAZUH_HOME=${2}
 
-    eval $(${WAZUH_HOME}/bin/wazuh-control info 2>/dev/null)    
+    eval $(${WAZUH_HOME}/bin/shadowtracer-control info 2>/dev/null)    
     if [ "X$WAZUH_TYPE" = "X" ]; then
         echo "ERROR: Unable to save rules. You must have Wazuh installed to do so."
         exit 1;
@@ -79,7 +79,7 @@ elif [ "x$1" = "xrestore" ]; then
     fi    
     WAZUH_HOME=${2}
     
-    eval $(${WAZUH_HOME}/bin/wazuh-control info 2>/dev/null)    
+    eval $(${WAZUH_HOME}/bin/shadowtracer-control info 2>/dev/null)    
     if [ "X$WAZUH_TYPE" = "X" ]; then
         echo "ERROR: Unable to save rules. You must have Wazuh installed to do so."
         exit 1;

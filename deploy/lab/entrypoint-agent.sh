@@ -88,6 +88,6 @@ if [ ! -s "$CLIENT_KEYS" ]; then
     done
 fi
 
-/var/ossec/bin/wazuh-control start
+/var/ossec/bin/shadowtracer-control start
 
 exec tail -F /var/ossec/logs/ossec.log /var/ossec/logs/active-responses.log 2>/dev/null

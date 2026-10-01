@@ -43,6 +43,6 @@ if [ -f "$API_YAML" ] && ! grep -q "^host:" "$API_YAML"; then
     { echo "host: ['0.0.0.0']"; echo "access:"; echo "  max_request_per_minute: 99999"; } >> "$API_YAML"
 fi
 
-/var/ossec/bin/wazuh-control start
+/var/ossec/bin/shadowtracer-control start
 
 exec tail -F /var/ossec/logs/ossec.log /var/ossec/logs/cluster.log /var/ossec/logs/api.log 2>/dev/null

@@ -1,5 +1,5 @@
 #!/bin/sh
-# postinst script for wazuh-agent
+# postinst script for shadowtracer-agent
 # Wazuh, Inc 2015
 
 set -e
@@ -20,7 +20,7 @@ case "$1" in
     OSMYSHELL="/sbin/nologin"
 
     if [ -d /run/systemd/system ]; then
-        rm -f /etc/init.d/wazuh-agent
+        rm -f /etc/init.d/shadowtracer-agent
     fi
 
     if [ ! -f ${OSMYSHELL} ]; then
@@ -131,8 +131,8 @@ case "$1" in
     # Restoring file permissions
     ${SCRIPTS_DIR}/restore-permissions.sh > /dev/null 2>&1 || :
 
-    if [ -f /etc/systemd/system/wazuh-agent.service ]; then
-        rm -f /etc/systemd/system/wazuh-agent.service
+    if [ -f /etc/systemd/system/shadowtracer-agent.service ]; then
+        rm -f /etc/systemd/system/shadowtracer-agent.service
         if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1; then
             systemctl daemon-reload > /dev/null 2>&1
         fi
@@ -165,11 +165,11 @@ case "$1" in
         if [ -f ${WAZUH_TMP_DIR}/wazuh.restart ] ; then
             if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1; then
                 systemctl daemon-reload > /dev/null 2>&1
-                systemctl restart wazuh-agent.service > /dev/null 2>&1
+                systemctl restart shadowtracer-agent.service > /dev/null 2>&1
             elif command -v service > /dev/null 2>&1 ; then
-                service wazuh-agent restart > /dev/null 2>&1
+                service shadowtracer-agent restart > /dev/null 2>&1
             else
-                ${DIR}/bin/wazuh-control restart > /dev/null 2>&1
+                ${DIR}/bin/shadowtracer-control restart > /dev/null 2>&1
             fi
         fi
     fi

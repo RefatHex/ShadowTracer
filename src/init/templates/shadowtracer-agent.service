@@ -1,0 +1,17 @@
+[Unit]
+Description=ShadowTracer agent
+Wants=network-online.target
+After=network.target network-online.target
+
+[Service]
+Type=forking
+TimeoutSec=45
+
+ExecStart=/usr/bin/env WAZUH_HOME_TMP/bin/shadowtracer-control start
+ExecStop=/usr/bin/env WAZUH_HOME_TMP/bin/shadowtracer-control stop
+ExecReload=/usr/bin/env WAZUH_HOME_TMP/bin/shadowtracer-control reload
+
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

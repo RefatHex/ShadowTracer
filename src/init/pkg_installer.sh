@@ -98,17 +98,17 @@ echo "$(date +"%Y/%m/%d %H:%M:%S") - Installation result = ${RESULT}" >> ./logs/
 # Restart Agent
 echo "$(date +"%Y/%m/%d %H:%M:%S") - Checking for ShadowTracer Agent control script." >> ./logs/upgrade.log
 
-if [ -f "./bin/wazuh-control" ]; then
+if [ -f "./bin/shadowtracer-control" ]; then
     echo "$(date +"%Y/%m/%d %H:%M:%S") - Restarting ShadowTracer Agent." >> ./logs/upgrade.log
-    ./bin/wazuh-control restart >> ./logs/upgrade.log 2>&1
+    ./bin/shadowtracer-control restart >> ./logs/upgrade.log 2>&1
 elif [ -f "./bin/ossec-control" ]; then
-    echo "$(date +"%Y/%m/%d %H:%M:%S") - Upgrade failed: wazuh-control not found. Attempting to restart using ossec-control." >> ./logs/upgrade.log
+    echo "$(date +"%Y/%m/%d %H:%M:%S") - Upgrade failed: shadowtracer-control not found. Attempting to restart using ossec-control." >> ./logs/upgrade.log
     ./bin/ossec-control restart >> ./logs/upgrade.log 2>&1
     echo -ne "2" > ./var/upgrade/upgrade_result
     rm -f $LOCK
     exit 1
 else
-    echo "$(date +"%Y/%m/%d %H:%M:%S") - Upgrade failed: Neither wazuh-control nor ossec-control were found." >> ./logs/upgrade.log
+    echo "$(date +"%Y/%m/%d %H:%M:%S") - Upgrade failed: Neither shadowtracer-control nor ossec-control were found." >> ./logs/upgrade.log
     echo -ne "2" > ./var/upgrade/upgrade_result
     rm -f $LOCK
     exit 1

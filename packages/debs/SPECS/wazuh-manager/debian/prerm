@@ -1,5 +1,5 @@
 #!/bin/sh
-# prerm script for wazuh-manager
+# prerm script for shadowtracer-manager
 
 set -e
 DIR="/var/ossec"
@@ -12,13 +12,13 @@ case "$1" in
     remove)
       # Stop the services before uninstalling the package
       # Check for systemd
-      if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-manager > /dev/null 2>&1; then
-          systemctl stop wazuh-manager > /dev/null 2>&1
+      if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet shadowtracer-manager > /dev/null 2>&1; then
+          systemctl stop shadowtracer-manager > /dev/null 2>&1
       # Check for SysV
-      elif command -v service > /dev/null 2>&1 && service wazuh-manager status 2>/dev/null | grep "running" > /dev/null 2>&1; then
-          service wazuh-manager stop > /dev/null 2>&1
+      elif command -v service > /dev/null 2>&1 && service shadowtracer-manager status 2>/dev/null | grep "running" > /dev/null 2>&1; then
+          service shadowtracer-manager stop > /dev/null 2>&1
       fi
-      ${DIR}/bin/wazuh-control stop > /dev/null 2>&1
+      ${DIR}/bin/shadowtracer-control stop > /dev/null 2>&1
 
       # Purging files
       rm -rf ${DIR}/stats/*
@@ -62,8 +62,8 @@ case "$1" in
     ;;
 
     failed-upgrade)
-      if [ -f ${DIR}/bin/wazuh-control ]; then
-	       ${DIR}/bin/wazuh-control stop > /dev/null 2>&1
+      if [ -f ${DIR}/bin/shadowtracer-control ]; then
+	       ${DIR}/bin/shadowtracer-control stop > /dev/null 2>&1
       fi
     ;;
 

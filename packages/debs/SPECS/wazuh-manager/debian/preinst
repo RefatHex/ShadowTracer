@@ -21,18 +21,18 @@ case "$1" in
     install|upgrade)
 
         if [ "$1" = "upgrade" ]; then
-            if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-manager > /dev/null 2>&1; then
-                systemctl stop wazuh-manager.service > /dev/null 2>&1
+            if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet shadowtracer-manager > /dev/null 2>&1; then
+                systemctl stop shadowtracer-manager.service > /dev/null 2>&1
                 touch ${WAZUH_TMP_DIR}/wazuh.restart
-            elif command -v service > /dev/null 2>&1 && service wazuh-manager status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
-                service wazuh-manager stop > /dev/null 2>&1
+            elif command -v service > /dev/null 2>&1 && service shadowtracer-manager status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
+                service shadowtracer-manager stop > /dev/null 2>&1
                 touch ${WAZUH_TMP_DIR}/wazuh.restart
-            elif ${DIR}/bin/wazuh-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
+            elif ${DIR}/bin/shadowtracer-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
                 touch ${WAZUH_TMP_DIR}/wazuh.restart
             elif ${DIR}/bin/ossec-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
                 touch ${WAZUH_TMP_DIR}/wazuh.restart
             fi
-            ${DIR}/bin/ossec-control stop > /dev/null 2>&1 || ${DIR}/bin/wazuh-control stop > /dev/null 2>&1
+            ${DIR}/bin/ossec-control stop > /dev/null 2>&1 || ${DIR}/bin/shadowtracer-control stop > /dev/null 2>&1
             if pgrep -f ossec-authd > /dev/null 2>&1; then
                 kill -15 $(pgrep -f ossec-authd)
             fi
@@ -54,7 +54,7 @@ case "$1" in
             if [ -f /etc/ossec-init.conf ]; then
                 . /etc/ossec-init.conf
             else
-                VERSION=$(${DIR}/bin/wazuh-control info -v)
+                VERSION=$(${DIR}/bin/shadowtracer-control info -v)
             fi
 
             # Get the major and minor version

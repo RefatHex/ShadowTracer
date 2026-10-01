@@ -4,8 +4,8 @@
   %define _rpmfilename %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm
 %endif
 
-Summary:     Wazuh helps you to gain security visibility into your infrastructure by monitoring hosts at an operating system and application level. It provides the following capabilities: log analysis, file integrity monitoring, intrusions detection and policy and compliance monitoring
-Name:        wazuh-manager
+Summary:     ShadowTracer helps you to gain security visibility into your infrastructure by monitoring hosts at an operating system and application level. It provides the following capabilities: log analysis, file integrity monitoring, intrusions detection and policy and compliance monitoring
+Name:        shadowtracer-manager
 Version:     %{_version}
 Release:     %{_release}
 License:     GPL
@@ -17,8 +17,9 @@ Vendor:      Wazuh <info@wazuh.com>
 Packager:    Wazuh <info@wazuh.com>
 Requires(pre):    /usr/sbin/groupadd /usr/sbin/useradd
 Requires(postun): /usr/sbin/groupdel /usr/sbin/userdel
-Conflicts:   ossec-hids ossec-hids-agent wazuh-agent wazuh-local
-Obsoletes: wazuh-api < 4.0.0
+Conflicts:   ossec-hids ossec-hids-agent wazuh-agent wazuh-manager shadowtracer-agent wazuh-local
+Obsoletes: wazuh-api < 4.0.0, wazuh-manager
+Provides: wazuh-manager = %{version}-%{release}
 AutoReqProv: no
 
 Requires: coreutils
@@ -30,7 +31,7 @@ ExclusiveOS: linux
 %define _binary_payload w9.xzdio
 
 %description
-Wazuh helps you to gain security visibility into your infrastructure by monitoring
+ShadowTracer helps you to gain security visibility into your infrastructure by monitoring
 hosts at an operating system and application level. It provides the following capabilities:
 log analysis, file integrity monitoring, intrusions detection and policy and compliance monitoring
 
@@ -39,10 +40,10 @@ log analysis, file integrity monitoring, intrusions detection and policy and com
 %global _build_id_links none
 
 # Build debuginfo package
-%package -n wazuh-manager-debuginfo
-Requires: wazuh-manager = %{_version}-%{_release}
+%package -n shadowtracer-manager-debuginfo
+Requires: shadowtracer-manager = %{_version}-%{_release}
 Summary: Debug information for package %{name}.
-%description -n wazuh-manager-debuginfo
+%description -n shadowtracer-manager-debuginfo
 This package provides debug information for package %{name}.
 
 
@@ -97,10 +98,10 @@ mkdir -p ${RPM_BUILD_ROOT}%{_localstatedir}/.ssh
 # Copy the installed files into RPM_BUILD_ROOT directory
 cp -pr %{_localstatedir}/* ${RPM_BUILD_ROOT}%{_localstatedir}/
 sed -i "s:WAZUH_HOME_TMP:%{_localstatedir}:g" src/init/templates/ossec-hids-rh.init
-install -m 0755 src/init/templates/ossec-hids-rh.init ${RPM_BUILD_ROOT}%{_initrddir}/wazuh-manager
+install -m 0755 src/init/templates/ossec-hids-rh.init ${RPM_BUILD_ROOT}%{_initrddir}/shadowtracer-manager
 mkdir -p ${RPM_BUILD_ROOT}/usr/lib/systemd/system/
-sed -i "s:WAZUH_HOME_TMP:%{_localstatedir}:g" src/init/templates/wazuh-manager.service
-install -m 0644 src/init/templates/wazuh-manager.service ${RPM_BUILD_ROOT}/usr/lib/systemd/system/
+sed -i "s:WAZUH_HOME_TMP:%{_localstatedir}:g" src/init/templates/shadowtracer-manager.service
+install -m 0644 src/init/templates/shadowtracer-manager.service ${RPM_BUILD_ROOT}/usr/lib/systemd/system/
 
 # Clean the preinstalled configuration assesment files
 rm -f ${RPM_BUILD_ROOT}%{_localstatedir}/ruleset/sca/*
@@ -225,21 +226,21 @@ fi
 
 # Stop the services to upgrade the package
 if [ $1 = 2 ]; then
-  if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-manager > /dev/null 2>&1; then
-    systemctl stop wazuh-manager.service > /dev/null 2>&1
+  if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet shadowtracer-manager > /dev/null 2>&1; then
+    systemctl stop shadowtracer-manager.service > /dev/null 2>&1
     %{_localstatedir}/bin/ossec-control stop > /dev/null 2>&1
     touch %{_localstatedir}/tmp/wazuh.restart
   # Check for SysV
-  elif command -v service > /dev/null 2>&1 && service wazuh-manager status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
-    service wazuh-manager stop > /dev/null 2>&1
+  elif command -v service > /dev/null 2>&1 && service shadowtracer-manager status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
+    service shadowtracer-manager stop > /dev/null 2>&1
     %{_localstatedir}/bin/ossec-control stop > /dev/null 2>&1
     touch %{_localstatedir}/tmp/wazuh.restart
-  elif %{_localstatedir}/bin/wazuh-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
+  elif %{_localstatedir}/bin/shadowtracer-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
     touch %{_localstatedir}/tmp/wazuh.restart
   elif %{_localstatedir}/bin/ossec-control status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
     touch %{_localstatedir}/tmp/wazuh.restart
   fi
-  %{_localstatedir}/bin/ossec-control stop > /dev/null 2>&1 || %{_localstatedir}/bin/wazuh-control stop > /dev/null 2>&1
+  %{_localstatedir}/bin/ossec-control stop > /dev/null 2>&1 || %{_localstatedir}/bin/shadowtracer-control stop > /dev/null 2>&1
 fi
 if pgrep -f ossec-authd > /dev/null 2>&1; then
     kill -15 $(pgrep -f ossec-authd)
@@ -283,8 +284,8 @@ if [ $1 = 2 ]; then
     # Import the variables from ossec-init.conf file
     . %{_sysconfdir}/ossec-init.conf
   else
-    # Ask wazuh-control the version
-    VERSION=$(%{_localstatedir}/bin/wazuh-control info -v)
+    # Ask shadowtracer-control the version
+    VERSION=$(%{_localstatedir}/bin/shadowtracer-control info -v)
   fi
 
   # Get the major and minor version
@@ -314,7 +315,7 @@ fi
 
 %post
 
-echo "VERSION=\"$(%{_localstatedir}/bin/wazuh-control info -v)\"" > /etc/ossec-init.conf
+echo "VERSION=\"$(%{_localstatedir}/bin/shadowtracer-control info -v)\"" > /etc/ossec-init.conf
 
 # Upgrade install code block
 if [ $1 = 2 ]; then
@@ -359,12 +360,12 @@ if [ $1 = 1 ]; then
 fi
 
 if [[ -d /run/systemd/system ]]; then
-  rm -f %{_initrddir}/wazuh-manager
+  rm -f %{_initrddir}/shadowtracer-manager
 fi
 
 # Generation auto-signed certificate if not exists
 if [ ! -f "%{_localstatedir}/etc/sslmanager.key" ] && [ ! -f "%{_localstatedir}/etc/sslmanager.cert" ]; then
-  %{_localstatedir}/bin/wazuh-authd -C 365 -B 2048 -S "/C=US/ST=California/CN=Wazuh/" -K %{_localstatedir}/etc/sslmanager.key -X %{_localstatedir}/etc/sslmanager.cert 2>/dev/null
+  %{_localstatedir}/bin/wazuh-authd -C 365 -B 2048 -S "/C=US/ST=California/CN=ShadowTracer/" -K %{_localstatedir}/etc/sslmanager.key -X %{_localstatedir}/etc/sslmanager.cert 2>/dev/null
   chmod 640 %{_localstatedir}/etc/sslmanager.key
   chmod 640 %{_localstatedir}/etc/sslmanager.cert
 fi
@@ -528,13 +529,13 @@ if [ $1 = 0 ]; then
 
   # Stop the services before uninstall the package
   # Check for systemd
-  if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet wazuh-manager > /dev/null 2>&1; then
-    systemctl stop wazuh-manager.service > /dev/null 2>&1
+  if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 && systemctl is-active --quiet shadowtracer-manager > /dev/null 2>&1; then
+    systemctl stop shadowtracer-manager.service > /dev/null 2>&1
   # Check for SysV
-  elif command -v service > /dev/null 2>&1 && service wazuh-manager status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
-    service wazuh-manager stop > /dev/null 2>&1
+  elif command -v service > /dev/null 2>&1 && service shadowtracer-manager status 2>/dev/null | grep "is running" > /dev/null 2>&1; then
+    service shadowtracer-manager stop > /dev/null 2>&1
   fi
-  %{_localstatedir}/bin/wazuh-control stop > /dev/null 2>&1
+  %{_localstatedir}/bin/shadowtracer-control stop > /dev/null 2>&1
 
   # Remove the SELinux policy
   if command -v getenforce > /dev/null 2>&1 && command -v semodule > /dev/null 2>&1; then
@@ -601,8 +602,8 @@ fi
 
 # posttrans code is the last thing executed in a install/upgrade
 %posttrans
-if [ -f %{_sysconfdir}/systemd/system/wazuh-manager.service ]; then
-  rm -rf %{_sysconfdir}/systemd/system/wazuh-manager.service
+if [ -f %{_sysconfdir}/systemd/system/shadowtracer-manager.service ]; then
+  rm -rf %{_sysconfdir}/systemd/system/shadowtracer-manager.service
   systemctl daemon-reload > /dev/null 2>&1
 fi
 
@@ -610,11 +611,11 @@ if [ -f %{_localstatedir}/tmp/wazuh.restart ]; then
   rm -f %{_localstatedir}/tmp/wazuh.restart
   if command -v systemctl > /dev/null 2>&1 && systemctl > /dev/null 2>&1 ; then
     systemctl daemon-reload > /dev/null 2>&1
-    systemctl restart wazuh-manager.service > /dev/null 2>&1
+    systemctl restart shadowtracer-manager.service > /dev/null 2>&1
   elif command -v service > /dev/null 2>&1 ; then
-    service wazuh-manager restart > /dev/null 2>&1
+    service shadowtracer-manager restart > /dev/null 2>&1
   else
-    %{_localstatedir}/bin/wazuh-control restart > /dev/null 2>&1
+    %{_localstatedir}/bin/shadowtracer-control restart > /dev/null 2>&1
   fi
 fi
 
@@ -644,9 +645,9 @@ rm -fr %{buildroot}
 
 %files
 %defattr(-,root,wazuh)
-%config(missingok) %{_initrddir}/wazuh-manager
+%config(missingok) %{_initrddir}/shadowtracer-manager
 %attr(640, root, wazuh) %verify(not md5 size mtime) %ghost %{_sysconfdir}/ossec-init.conf
-/usr/lib/systemd/system/wazuh-manager.service
+/usr/lib/systemd/system/shadowtracer-manager.service
 %dir %attr(750, root, wazuh) %{_localstatedir}
 %attr(440, wazuh, wazuh) %{_localstatedir}/VERSION.json
 %attr(750, root, wazuh) %{_localstatedir}/agentless
@@ -674,7 +675,7 @@ rm -fr %{buildroot}
 %attr(750, root, root) %{_localstatedir}/bin/wazuh-agentlessd
 %attr(750, root, root) %{_localstatedir}/bin/wazuh-analysisd
 %attr(750, root, root) %{_localstatedir}/bin/wazuh-authd
-%attr(750, root, root) %{_localstatedir}/bin/wazuh-control
+%attr(750, root, root) %{_localstatedir}/bin/shadowtracer-control
 %attr(750, root, root) %{_localstatedir}/bin/wazuh-csyslogd
 %attr(750, root, root) %{_localstatedir}/bin/wazuh-execd
 %attr(750, root, root) %{_localstatedir}/bin/wazuh-integratord
@@ -969,7 +970,7 @@ rm -fr %{buildroot}
 %dir %attr(750, root, wazuh) %{_localstatedir}/wodles/gcloud
 %attr(750, root, wazuh) %{_localstatedir}/wodles/gcloud/*
 
-%files -n wazuh-manager-debuginfo -f debugfiles.list
+%files -n shadowtracer-manager-debuginfo -f debugfiles.list
 
 %changelog
 * Wed Sep 23 2026 support <info@wazuh.com> - 4.14.8

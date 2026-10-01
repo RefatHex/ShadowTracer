@@ -16,7 +16,7 @@ export LANG=C
 . /etc/init.d/functions
 
 WAZUH_HOME=WAZUH_HOME_TMP
-WAZUH_CONTROL="$WAZUH_HOME/bin/wazuh-control"
+WAZUH_CONTROL="$WAZUH_HOME/bin/shadowtracer-control"
 
 start() {
     echo -n "Starting Wazuh: "

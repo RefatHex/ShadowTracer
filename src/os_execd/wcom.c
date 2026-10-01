@@ -203,7 +203,7 @@ size_t wcom_restart(char ** output) {
             exec_cmd[1] = "manager";
 #endif
         } else {
-            exec_cmd[0] = "bin/wazuh-control";
+            exec_cmd[0] = "bin/shadowtracer-control";
             exec_cmd[1] = "restart";
         }
 
@@ -261,7 +261,7 @@ size_t wcom_reload(char ** output) {
 #endif
             exec_cmd[2] = "reload";
         } else {
-            exec_cmd[0] = "bin/wazuh-control";
+            exec_cmd[0] = "bin/shadowtracer-control";
             exec_cmd[1] = "reload";
         }
 
