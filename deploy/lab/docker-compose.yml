@@ -22,6 +22,7 @@ services:
     build: *manager-build
     image: shadowtracer-lab/manager:local
     hostname: wazuh-master
+    init: true
     environment:
       CLUSTER_NODE_TYPE: master
       CLUSTER_NODE_NAME: master
@@ -42,6 +43,7 @@ services:
     build: *manager-build
     image: shadowtracer-lab/manager:local
     hostname: wazuh-worker1
+    init: true
     environment:
       CLUSTER_NODE_TYPE: worker
       CLUSTER_NODE_NAME: worker1
@@ -59,6 +61,7 @@ services:
     build: *manager-build
     image: shadowtracer-lab/manager:local
     hostname: wazuh-worker2
+    init: true
     environment:
       CLUSTER_NODE_TYPE: worker
       CLUSTER_NODE_NAME: worker2
@@ -92,6 +95,7 @@ services:
       dockerfile: deploy/lab/agent-ubuntu.Dockerfile
     image: shadowtracer-lab/agent-ubuntu:local
     hostname: agent-ubuntu-1
+    init: true
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker1
@@ -112,6 +116,7 @@ services:
       dockerfile: deploy/lab/agent-ubuntu.Dockerfile
     image: shadowtracer-lab/agent-ubuntu:local
     hostname: agent-ubuntu-2
+    init: true
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker2
@@ -130,6 +135,7 @@ services:
       dockerfile: deploy/lab/agent-rocky.Dockerfile
     image: shadowtracer-lab/agent-rocky:local
     hostname: agent-rocky-1
+    init: true
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker1
@@ -147,6 +153,7 @@ services:
       dockerfile: deploy/lab/agent-rocky.Dockerfile
     image: shadowtracer-lab/agent-rocky:local
     hostname: agent-rocky-2
+    init: true
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: wazuh-worker2
