@@ -19,9 +19,11 @@ when necessary. Every such change is recorded in [UPSTREAM.md](../UPSTREAM.md).
 - `console/` — our own console (replaces Wazuh dashboard/indexer)
 - `common/` — shared code used across the above modules
 
-Modules are currently empty scaffolding (Phase 0). No product code yet.
+`ingest/` has real code as of Phase 3 (shipper, normaliser, writer - see
+its own docs below). Every other module is still empty scaffolding.
 
 ## Docs
 
 - [docs/DECISIONS.md](docs/DECISIONS.md) — architecture decisions
 - [docs/DEV_SETUP.md](docs/DEV_SETUP.md) — dev environment setup
+- [docs/PHASE3_DATA_PLATFORM.md](docs/PHASE3_DATA_PLATFORM.md) — Kafka/ClickHouse/PostgreSQL data platform (`ingest/`)
