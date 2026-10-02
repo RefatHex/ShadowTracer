@@ -6,8 +6,9 @@ from .. import auth as auth_logic
 from .. import security
 from ..deps import client_ip, get_db, get_settings
 from ..logging_redact import register_secret
+from ..rbac import mark_public
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"], dependencies=[Depends(mark_public)])
 
 REFRESH_COOKIE_NAME = "refresh_token"
 
