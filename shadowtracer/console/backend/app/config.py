@@ -65,14 +65,18 @@ class Settings:
 def load_settings() -> Settings:
     jwt_secret = validate_jwt_secret(_env_or_file("JWT_SECRET"))
 
-    pg_user = _env_or_file("POSTGRES_USER") or "shadowtracer"
-    pg_password = _env_or_file("POSTGRES_PASSWORD")
+    # The app (and this CLI) connect as shadowtracer_app, a restricted role
+    # created by the Phase 4 audit-log migration - NOT the table-owning
+    # POSTGRES_USER, which keeps full rights (including UPDATE/DELETE on
+    # audit_log) for migrations and operator/debugging access. See
+    # DECISIONS.md and shadowtracer/ingest/alembic/versions/..._phase_4_audit_log...
+    app_db_password = _env_or_file("APP_DB_PASSWORD")
     pg_host = os.environ.get("POSTGRES_HOST", "127.0.0.1")
     pg_port = os.environ.get("POSTGRES_PORT", "5432")
     pg_db = os.environ.get("POSTGRES_DB", "shadowtracer")
-    if not pg_password:
-        raise WeakSecretError("POSTGRES_PASSWORD (or POSTGRES_PASSWORD_FILE) is required and not set")
-    database_url = f"postgresql+psycopg2://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_db}"
+    if not app_db_password:
+        raise WeakSecretError("APP_DB_PASSWORD (or APP_DB_PASSWORD_FILE) is required and not set")
+    database_url = f"postgresql+psycopg2://shadowtracer_app:{app_db_password}@{pg_host}:{pg_port}/{pg_db}"
 
     ch_password = _env_or_file("CLICKHOUSE_PASSWORD")
     if not ch_password:

@@ -11,6 +11,7 @@ import sys
 from sqlalchemy import select
 
 from app import security
+from app.audit import append_entry, verify_chain
 from app.config import load_settings
 from app.db import make_session_factory
 from app.models import tenants, users
@@ -53,8 +54,27 @@ def create_admin(args) -> int:
         )
     )
     db.commit()
+    append_entry(db, actor="cli:create-admin", tenant_id=tenant_id, action="create_admin", target=args.email, outcome="success")
     print(f"created admin {args.email!r} in tenant {args.tenant!r}")
     return 0
+
+
+def verify_audit_chain(args) -> int:
+    settings = load_settings()
+    Session = make_session_factory(settings)
+    db = Session()
+
+    result = verify_chain(db)
+    if result.total_rows == 0:
+        print("audit_log is empty - nothing to verify")
+        return 0
+    if result.valid:
+        print(f"OK: {result.total_rows} rows, chain verified from genesis to the latest row")
+        return 0
+
+    print(f"BROKEN CHAIN: first bad row is id={result.first_broken_row_id}", file=sys.stderr)
+    print(f"reason: {result.reason}", file=sys.stderr)
+    return 1
 
 
 def main() -> int:
@@ -65,6 +85,9 @@ def main() -> int:
     create_admin_parser.add_argument("--tenant", required=True, help="tenant name (created if it doesn't exist)")
     create_admin_parser.add_argument("--email", required=True)
     create_admin_parser.set_defaults(func=create_admin)
+
+    verify_chain_parser = sub.add_parser("verify-audit-chain", help="verify the audit log's hash chain")
+    verify_chain_parser.set_defaults(func=verify_audit_chain)
 
     args = parser.parse_args()
     return args.func(args)

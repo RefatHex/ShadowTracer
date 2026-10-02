@@ -33,8 +33,7 @@ def _load_env() -> dict:
 # them here, at conftest module scope, which always loads first.
 _lab_env_for_import = _load_env()
 os.environ.setdefault("JWT_SECRET", "conftest-import-time-placeholder-" + "x" * 32)
-os.environ.setdefault("POSTGRES_USER", _lab_env_for_import.get("POSTGRES_USER", ""))
-os.environ.setdefault("POSTGRES_PASSWORD", _lab_env_for_import.get("POSTGRES_PASSWORD", ""))
+os.environ.setdefault("APP_DB_PASSWORD", _lab_env_for_import.get("APP_DB_PASSWORD", ""))
 os.environ.setdefault("POSTGRES_HOST", "127.0.0.1")
 os.environ.setdefault("POSTGRES_DB", _lab_env_for_import.get("POSTGRES_DB", "shadowtracer"))
 os.environ.setdefault("CLICKHOUSE_USER", _lab_env_for_import.get("CLICKHOUSE_USER", ""))
@@ -71,7 +70,7 @@ def db(engine):
     yield session
     session.rollback()
     session.execute(text(
-        "TRUNCATE TABLE refresh_tokens, login_attempts, users, tenants RESTART IDENTITY CASCADE"
+        "TRUNCATE TABLE audit_log, refresh_tokens, login_attempts, users, tenants RESTART IDENTITY CASCADE"
     ))
     session.commit()
     session.close()

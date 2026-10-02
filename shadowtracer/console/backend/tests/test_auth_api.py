@@ -14,8 +14,11 @@ from app.models import tenants, users
 def app_settings(lab_env):
     return Settings(
         jwt_secret="test-jwt-secret-" + "x" * 40,
+        # The restricted role, matching what the real app connects as -
+        # not the table owner. If this test suite passes, the API works
+        # under the same DB permissions production actually has.
         database_url=(
-            f"postgresql+psycopg2://{lab_env['POSTGRES_USER']}:{lab_env['POSTGRES_PASSWORD']}"
+            f"postgresql+psycopg2://shadowtracer_app:{lab_env['APP_DB_PASSWORD']}"
             f"@127.0.0.1:5432/{lab_env['POSTGRES_DB']}"
         ),
         clickhouse_host="127.0.0.1", clickhouse_port=8123,

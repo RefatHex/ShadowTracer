@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from .. import auth as auth_logic
 from .. import security
+from ..audit import append_entry
 from ..deps import client_ip, get_db, get_settings
 from ..logging_redact import register_secret
 from ..rbac import mark_public
@@ -58,6 +59,7 @@ def login(
     auth_logic.record_login_attempt(db, ip, body.email, success=user is not None)
 
     if user is None:
+        append_entry(db, actor=body.email, tenant_id=None, action="login", target=None, outcome="failure")
         raise HTTPException(status_code=401, detail="invalid credentials")
 
     access_token = security.create_access_token(
@@ -69,6 +71,7 @@ def login(
     refresh_token = auth_logic.issue_refresh_token(db, user.id, family_id, settings.refresh_token_ttl_seconds)
     _set_refresh_cookie(response, refresh_token, settings.refresh_token_ttl_seconds)
 
+    append_entry(db, actor=user.email, tenant_id=user.tenant_id, action="login", target=None, outcome="success")
     return TokenResponse(access_token=access_token, tenant_id=user.tenant_id, role=user.role)
 
 
@@ -86,6 +89,7 @@ def refresh(
         new_token, user = auth_logic.redeem_refresh_token(db, refresh_token, settings.refresh_token_ttl_seconds)
     except auth_logic.RefreshTokenReplayed:
         response.delete_cookie(REFRESH_COOKIE_NAME, path="/auth")
+        append_entry(db, actor="unknown", tenant_id=None, action="refresh_token_replay", target=None, outcome="failure")
         raise HTTPException(status_code=401, detail="refresh token reuse detected, session revoked")
     except auth_logic.RefreshTokenInvalid:
         response.delete_cookie(REFRESH_COOKIE_NAME, path="/auth")
