@@ -237,7 +237,19 @@ void *dispatch_buffer(__attribute__((unused)) void * arg) {
         os_wait();
 
         if (msg_output != NULL) {
-            send_msg(msg_output, -1);
+            /* A failed send used to free msg_output unconditionally here,
+             * silently dropping it - the root cause of Phase 1 item 15's
+             * 1-of-20 event loss during a worker failover (the window
+             * before os_wait()'s lock engages, where the connection is
+             * already dead but send_msg() hasn't failed loudly enough yet
+             * for the caller to notice without checking its return value).
+             * Requeue instead: buffer_append() copies the message, so it's
+             * always safe to free msg_output afterward either way. See
+             * UPSTREAM.md and shadowtracer/docs/DECISIONS.md for the
+             * duplicate-vs-loss trade-off this creates. */
+            if (send_msg(msg_output, -1) != 0) {
+                buffer_append(msg_output);
+            }
             os_free(msg_output);
             buffer[original_j_for_nulling] = NULL;
         }

@@ -129,6 +129,48 @@ Phase 2's daemon-rename decision, not patched here. Phase 1's workaround
 (static IPs per agent, direct-to-worker, LB carries no real agent traffic)
 stands as the documented resolution for this lab.
 
+## Phase 3 follow-up: agent send-failure fix (requeue, not drop)
+
+**Decision: patch `src/client-agent/buffer.c` to requeue a failed send
+instead of dropping it, accepting the duplicate-event risk this creates.**
+
+Root cause (see DECISIONS.md's Phase 3 Step 0 section above for the
+original diagnosis): `dispatch_buffer()` popped a message off the agent's
+ring buffer, called `send_msg()`, and freed the message **unconditionally**
+regardless of whether the send actually succeeded. A send that failed in
+the narrow window before `os_wait()`'s connection-loss lock engages was
+silently discarded - the direct cause of Phase 1 item 15's 1-of-20 event
+loss during a worker failover.
+
+**Fix:** on a failed send, call `buffer_append()` (already-existing,
+already-locked) to put the message back on the queue instead of freeing
+it outright. Minimal diff - one `if` around the existing `send_msg()`
+call, no change to buffer sizing, locking, or the dispatch loop's timing.
+
+**The trade-off, stated explicitly as asked:** requeuing a message whose
+send may have *actually* landed on the manager (e.g. the manager received
+it but the agent's read of the response/ack failed, or the send genuinely
+failed but a partial write reached a buffering layer) can produce a
+duplicate event on the manager, with a **new, different alert id** from
+`wazuh-analysisd` (ids are generated at analysis time, not by the agent,
+so a resend is indistinguishable from a brand-new event at the point of
+generation). Phase 3's dedup design identifies an alert by
+`(tenant_id, cluster_node, alert_id)` - a duplicate with a genuinely
+different `alert_id` is invisible to that dedup and lands as two real,
+distinct rows in ClickHouse. **Accepted anyway:** for a security product,
+a duplicate alert is a minor nuisance (noisier dashboards, one extra row);
+a silently lost alert is a missed detection. Re-run of Phase 1 item 15
+after this fix: **20 of 20** events delivered (previously 19 of 20) - see
+`shadowtracer/docs/PHASE3_DATA_PLATFORM.md` for the full re-test output.
+
+**Validation:** re-ran the exact Phase 1 item 15 scenario (20 deliberate
+events during a real worker outage, failover to the second manager) rather
+than adding new CMocka unit-test infrastructure for `send_msg()`/
+`dispatch_buffer()` (none exists today - would have grown the diff beyond
+"minimal" for a behavior that's fundamentally about real network timing,
+which a mocked unit test can't exercise anyway). See UPSTREAM.md for the
+change record and the drafted upstream issue/patch.
+
 ## Phase 2 Pass C decision: daemon names and the system user are kept
 
 **Decision:** do not rename the `wazuh-*` daemons or the `wazuh`/`wazuh`

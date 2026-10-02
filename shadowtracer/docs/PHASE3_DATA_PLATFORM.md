@@ -202,6 +202,50 @@ for scenario 6), against the real lab - not from the pytest suite, which
 covers the same properties with synthetic data and runs separately (13
 tests, `shadowtracer/ingest/tests/`).
 
+## Phase 3 follow-up: agent send-failure fix, re-running Phase 1 item 15
+
+See `DECISIONS.md`'s "Phase 3 follow-up: agent send-failure fix" section
+for the root cause and the duplicate-vs-loss trade-off. This section is
+just the re-test output.
+
+Exact repeat of Phase 1 item 15: `agent-ubuntu-1` (primary `wazuh-worker1`,
+fallback `wazuh-worker2`) with `wazuh-worker1` stopped for the duration,
+20 deliberate failed SSH logins (uniquely marked `sendfix3_1`..`sendfix3_20`)
+generated roughly every 15s throughout the outage.
+
+- `wazuh-worker1` stopped: 14:56:09 UTC.
+- First delivery (a buffered burst of 2) arrived at `wazuh-worker2`:
+  14:59:56 UTC - 3m47s later, consistent with Phase 1's original ~3m36s
+  figure and the same already-documented cause (a stopped container's
+  hostname fails DNS resolution slowly, consumed entirely retrying the
+  dead primary before the agent's connection logic ever tries the
+  fallback - unrelated to this fix, not re-investigated here).
+- Last event delivered: 15:00:55 UTC.
+- **Result: 20 of 20 events delivered, individually confirmed present
+  (`sendfix3_1` through `sendfix3_20`, no gaps), zero on `wazuh-worker1`
+  (never came back up during the window), all 20 on `wazuh-worker2`.**
+  Previous result (Phase 1, before this fix): 19 of 20.
+
+Two earlier attempts at this specific re-test were invalidated by an
+unrelated environmental issue before this result: recreating the agent
+containers left stale `Duplicate IP` registrations on the master (the
+exact failure mode Phase 1's own "eighth finding" already documented -
+`manage_agents -r <id>` is required after force-recreating an agent
+container, which we'd forgotten to do), so the agent spent both of those
+windows stuck in a password-less re-enrollment loop, never actually
+connected to anything. Caught by checking `client.keys` was empty rather
+than trusting `agent_control -l`'s `Active` status, which can lag a real
+disconnection. Re-enrolling cleanly (remove stale IDs, recreate, confirm
+`client.keys` populated and a real alert lands before starting the test)
+fixed it for the third, reported attempt.
+
+**Regression test:** none added to the CMocka suite - `send_msg()`/
+`dispatch_buffer()` have no existing test harness (no mock for
+`send_msg()`'s network behavior), and building one to exercise what is
+fundamentally a real-network-timing bug would have grown the "minimal
+change" well beyond the fix itself, largely testing the mock rather than
+the behavior. The live re-test above is the validation, as directed.
+
 ## Open items
 
 - The shipper's offset-file bookkeeping can lag behind what's actually

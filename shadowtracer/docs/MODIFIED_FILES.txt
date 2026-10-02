@@ -124,6 +124,7 @@ M	ruleset/rules/0545-osquery_rules.xml
 M	src/active-response/restart-wazuh.c
 M	src/active-response/restart.sh
 M	src/analysisd/compiled_rules/register_rule.sh
+M	src/client-agent/buffer.c
 M	src/init/darwin-init.sh
 M	src/init/init.sh
 M	src/init/inst-functions.sh
