@@ -143,6 +143,95 @@ def test_writer_restart_mid_ingest_no_loss_no_duplicates(
     ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in alert_ids)})")
 
 
+def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines):
+    """Phase 3 follow-up 1: reproduces the exact bug (replay inflating the
+    hourly rollup even though the base table's FINAL was already correct)
+    and proves both fixes - the per-partition insert_deduplication_token
+    (base table correct even WITHOUT FINAL) and the rollup's uniqExact
+    identity count (correct regardless of the token fix) - through the
+    real writer.run(), not manual SQL."""
+    import json
+    marker = uuid.uuid4().hex[:8]
+    lines = []
+    alert_ids = []
+    for i, line in enumerate(real_alert_lines):
+        alert = json.loads(line)
+        alert["id"] = f"{alert['id']}.{marker}.{i}"
+        alert_ids.append(alert["id"])
+        lines.append(json.dumps(alert))
+    n = len(lines)
+
+    group_id = f"test-replay-{marker}"
+
+    def run_once():
+        metrics = Metrics()
+        stop_flag = threading.Event()
+        started_flag = threading.Event()
+        thread = threading.Thread(
+            target=writer.run,
+            kwargs=dict(
+                bootstrap_servers=kafka_bootstrap, topic=kafka_topic, group_id=group_id,
+                clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
+                clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
+                clickhouse_database="shadowtracer", metrics=metrics, stop_flag=stop_flag, started_flag=started_flag,
+            ),
+            daemon=True,
+        )
+        thread.start()
+        started_flag.wait(timeout=10)
+        return stop_flag, thread
+
+    def raw_count():
+        placeholders = ",".join(f"'{a}'" for a in alert_ids)
+        return ch_client.query(f"SELECT count() FROM events WHERE alert_id IN ({placeholders})").result_rows[0][0]
+
+    def rollup_total():
+        # events_hourly_rollup groups by (tenant_id, hour, agent_id, rule_id,
+        # rule_level), not alert_id, so other tests sharing the fixture's
+        # agent/rule ids contribute to the same buckets - measure the DELTA
+        # this test causes, not an absolute value.
+        return ch_client.query("SELECT sum(c) FROM (SELECT uniqExactMerge(identity_state) AS c FROM events_hourly_rollup GROUP BY tenant_id, hour, agent_id, rule_id, rule_level)").result_rows[0][0] or 0
+
+    rollup_before = rollup_total()
+
+    _produce(kafka_bootstrap, kafka_topic, lines)
+    stop1, t1 = run_once()
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and raw_count() < n:
+        time.sleep(0.5)
+    stop1.set()
+    t1.join(timeout=5)
+    assert raw_count() == n, "initial consume should land exactly n rows"
+    rollup_after_first = rollup_total()
+    assert rollup_after_first - rollup_before == n, (
+        f"rollup should grow by exactly {n} after the initial consume, "
+        f"grew by {rollup_after_first - rollup_before}"
+    )
+
+    # Replay: same consumer group, reset to earliest.
+    import subprocess
+    subprocess.run(
+        ["docker", "exec", "shadowtracer-lab-kafka-1", "/opt/kafka/bin/kafka-consumer-groups.sh",
+         "--bootstrap-server", "localhost:9092", "--group", group_id, "--topic", kafka_topic,
+         "--reset-offsets", "--to-earliest", "--execute"],
+        check=True, capture_output=True,
+    )
+
+    stop2, t2 = run_once()
+    time.sleep(8)  # let the full replay drain
+    stop2.set()
+    t2.join(timeout=5)
+
+    assert raw_count() == n, f"base table WITHOUT FINAL must show exactly {n} after replay, not {n*2} (insert_deduplication_token)"
+    rollup_after_replay = rollup_total()
+    assert rollup_after_replay - rollup_before == n, (
+        f"rollup must still show exactly {n} after replay (uniqExact), "
+        f"grew by {rollup_after_replay - rollup_before} total"
+    )
+
+    ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in alert_ids)})")
+
+
 def test_failover_clickhouse_skips_a_dead_host():
     """Unit-level proof of _FailoverClickHouse's own logic: a bogus first
     host must not stop the insert from landing on the second, real one."""

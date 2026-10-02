@@ -20,10 +20,12 @@ alerts.json (per manager) --[shipper, one per manager]--> Kafka --[writer, consu
   with a counted warning, never crash the process.
 - **Writer** (`shadowtracer_ingest/writer.py`, run via `run_writer.py`): a
   Kafka consumer group that batch-inserts normalised rows into ClickHouse
-  (one `client.insert()` call per batch, never row by row) and commits
-  offsets only after that insert returns successfully. Fails over across
-  configured ClickHouse replicas per batch (`_FailoverClickHouse`) so
-  losing one replica doesn't stop ingestion.
+  (one `client.insert()` call per Kafka partition per batch, never row by
+  row - see "Phase 3 follow-up 1" below for why it's per-partition) and
+  commits offsets only after every insert in the batch returns
+  successfully. Fails over across configured ClickHouse replicas per
+  insert (`_FailoverClickHouse`) so losing one replica doesn't stop
+  ingestion.
 - **Normaliser** (`shadowtracer_ingest/normalizer.py`): parses the real
   4.14.8 alert shape into a ClickHouse row. See "Real shape, not assumed"
   below for what differs from the task's own description of that shape.
@@ -66,19 +68,61 @@ This is a real operational tradeoff: `FINAL` has a non-trivial cost, and a
 high-query-load production deployment should move exact counting to the
 hourly rollups rather than running `FINAL` on the raw table at scale.
 
-**The hourly rollup has a known gap the raw table doesn't:** a
-`MATERIALIZED VIEW` fires once per local `INSERT`, before merge-time dedup
-happens. If the writer ever inserts a genuine duplicate batch (the
-crash-between-insert-and-commit case the writer's own ordering is built to
-make rare, not impossible), the raw table dedups it under `FINAL` but the
-rollup's `SummingMergeTree` will have summed both copies - there is no
-retroactive correction once that sum has merged. This is an accepted,
-documented tradeoff for Phase 3's scope, not something papered over: exact
-counts live in the raw table under `FINAL`; the rollup is a fast
-approximation that assumes writer crashes-after-insert are rare. A
-production fix would periodically rebuild the rollup from `FINAL` data
-instead of trusting the realtime MV for exact figures - open item for a
-later phase.
+**The hourly rollup had a known gap the raw table doesn't - fixed, Phase 3
+follow-up 1.** A `MATERIALIZED VIEW` fires once per local `INSERT`, before
+merge-time dedup happens. The original rollup (`SummingMergeTree` +
+`count()`) summed every inserted block regardless of later merges -
+reproduced directly: 20 known events, consumer group reset to earliest and
+replayed once -> raw `events` 40 rows / `FINAL` 20 (correct) / rollup sum
+**40 (wrong)**. Fixed in two layers, per the follow-up task:
+
+1. **`events_hourly_rollup` now counts `uniqExactState(cluster_node,
+   alert_id)`** (an `AggregatingMergeTree`), not `count()`. A `uniqExact`
+   state can be fed the same identity from any number of separate insert
+   blocks and the merged result (`uniqExactMerge(identity_state)`) is still
+   the exact distinct count - this alone fixed the replay test (confirmed:
+   same 20-event replay afterward -> rollup **20**, raw table unchanged at
+   40 since this layer doesn't touch the base table). **Console rule: read
+   this rollup only via `uniqExactMerge(identity_state) ... GROUP BY ...`
+   - there is no plain `event_count` column any more, and summing
+   `identity_state` directly is meaningless (it's an opaque aggregate
+   state, not a number).**
+2. **The writer now inserts one batch per Kafka partition**, each with
+   `insert_deduplication_token` set to `f"{topic}:{partition}:{min_offset}-{max_offset}"`.
+   A retry/replay that reproduces the same committed offset range produces
+   the same token, and ClickHouse drops the duplicate `INSERT` at the block
+   level - confirmed empirically (not assumed from docs) that this also
+   protects `events_hourly_rollup_mv`, and that
+   `deduplicate_blocks_in_dependent_materialized_views` made no observable
+   difference either way in this setup (tested both `0`, the default, and
+   `1`): an insert rejected by its token is rejected wholesale, before it
+   or its dependent MV sees any data, regardless of that setting. That
+   setting appears to matter for a different case than ours (the
+   MV's own separately-hashed block, not an explicit caller-supplied
+   token) - not exercised here. With this layer, the base table recovered
+   too: replaying the same range now leaves `events` **unchanged even
+   without `FINAL`** - re-verified with the real writer in
+   `tests/test_writer.py::test_replay_does_not_inflate_base_table_or_rollup`.
+
+**Why both layers, not just the simpler one:** the token only protects a
+replay that reproduces the exact same per-partition offset grouping - true
+for a live writer restart/retry (always resumes from the last committed
+offset), not guaranteed for every conceivable replay (a different batch
+size, a manual partial-range replay, a future code change to the batching
+logic). `uniqExact` dedups by identity, not by batch shape, so it holds
+even when the token doesn't apply. `FINAL` (or `OPTIMIZE ... FINAL`) is
+still the right tool for ad hoc raw-table queries where identity-based
+dedup matters and the token didn't catch it - the token reduces how often
+that's needed, it doesn't replace `FINAL`/`uniqExact` as the source of
+truth.
+
+**Console rule, stated once for both tables:** never run `FINAL` over an
+unbounded time range on `events` - it forces a full merge of however much
+data matches, with no bound on cost. Queries over a bounded, indexed range
+(a dashboard's "last 24h", an investigation's specific window) can afford
+it; anything scanning "all time" should go through `events_hourly_rollup`
+(`uniqExactMerge`) instead, which is cheap regardless of the total
+underlying row count.
 
 ## OCSF naming
 
@@ -160,9 +204,16 @@ tests, `shadowtracer/ingest/tests/`).
   offset isn't always the tightest possible bound on "safely sent." Closing
   it fully would need per-message delivery tracking across batches instead
   of a single shared error list, which Phase 3's scope doesn't need yet.
-- The hourly rollup's crash-duplicate gap (above) - acceptable for Phase 3,
-  needs a periodic-rebuild-from-FINAL fix before it's load-bearing for
-  billing or alerting thresholds.
+- ~~The hourly rollup's crash-duplicate gap~~ - **fixed**, see "Phase 3
+  follow-up 1" above (`uniqExact` identity counting + per-partition
+  `insert_deduplication_token`).
+- The per-partition dedup token assumes a replay reproduces the same
+  offset grouping the original batch had - true for a writer
+  restart/retry, not guaranteed for an arbitrary manual replay (a
+  different batch size, a partial-range replay). The rollup's `uniqExact`
+  counting doesn't share that assumption and is the real backstop; the
+  token is a (confirmed working) optimization on top of it, not a
+  substitute.
 - The shipper/host permission shim (`chmod o+r` loop in
   `entrypoint-manager.sh`) is lab-only, needed because the shipper runs on
   the host while the manager's `wazuh` user is a different uid inside the

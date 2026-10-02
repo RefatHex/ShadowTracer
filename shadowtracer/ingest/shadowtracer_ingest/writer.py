@@ -12,9 +12,24 @@ Ordering that makes this safe:
 
 If the process dies between 3 and 4, the next consumer in the group
 re-reads the same offset range on restart and re-inserts it - that's a
-real duplicate at the ClickHouse layer, which is exactly what
-schema/001_events.sql's ReplicatingMergeTree dedup on (tenant_id,
-cluster_node, alert_id) is for. See shadowtracer/docs/PHASE3_DATA_PLATFORM.md.
+real duplicate at the ClickHouse layer. Two independent defenses against
+that, not one (see PHASE3_DATA_PLATFORM.md's "Phase 3 follow-up 1" section
+for the full writeup and the real, measured behavior of each):
+
+- Step 3 inserts each Kafka partition's messages as its own batch, with
+  `insert_deduplication_token` set from (topic, partition, min offset, max
+  offset). A retry that re-reads the same committed offset range produces
+  the same token, and ClickHouse drops the duplicate INSERT at the block
+  level - confirmed this also protects the dependent materialized view
+  (events_hourly_rollup_mv) even with deduplicate_blocks_in_dependent_materialized_views
+  at its default (0). This only works when the replay reproduces the same
+  partition/offset grouping, which a live retry does (resuming from the
+  last committed offset) but isn't guaranteed for every possible replay.
+- schema/001_events.sql's events table (ReplicatedReplacingMergeTree,
+  dedup on tenant_id/cluster_node/alert_id) and events_hourly_rollup
+  (uniqExact on cluster_node/alert_id) are the backstop for whatever the
+  token doesn't catch - they dedup by identity, not by batch shape, so
+  they hold even when the token-based defense above doesn't apply.
 """
 
 import logging
@@ -63,7 +78,7 @@ class _FailoverClickHouse:
         self._database = database
         self._preferred = 0
 
-    def insert(self, table: str, rows: list, column_names: list) -> int:
+    def insert(self, table: str, rows: list, column_names: list, settings: dict | None = None) -> int:
         last_exc = None
         order = [self._preferred] + [i for i in range(len(self._hosts)) if i != self._preferred]
         for i in order:
@@ -73,7 +88,7 @@ class _FailoverClickHouse:
                     host=host, port=port, username=self._user,
                     password=self._password, database=self._database,
                 )
-                client.insert(table, rows, column_names=column_names)
+                client.insert(table, rows, column_names=column_names, settings=settings)
                 client.close()
                 self._preferred = i
                 return i
@@ -124,28 +139,40 @@ def run(
             if not batch_msgs:
                 continue
 
-            rows = []
+            # Deterministic batches: one insert per (topic, partition), each
+            # with insert_deduplication_token derived from that partition's
+            # exact offset range in this batch - see the module docstring.
+            by_partition: dict[tuple[str, int], list] = {}
             for msg in batch_msgs:
-                tenant_id = None
-                for k, v in (msg.headers() or []):
-                    if k == "tenant_id":
-                        tenant_id = v.decode()
-                        break
-                try:
-                    ev = normalize_alert(msg.value().decode(), tenant_id or "")
-                except Exception:
-                    metrics.incr("messages_failed")
-                    continue
-                if ev.cluster_node_fell_back:
-                    logger.warning(
-                        "alert %s has no cluster.node, fell back to manager.name=%s",
-                        ev.alert_id, ev.cluster_node,
-                    )
-                    metrics.incr("cluster_node_fallback_count")
-                rows.append(_row(ev))
+                by_partition.setdefault((msg.topic(), msg.partition()), []).append(msg)
 
-            if rows:
-                ch.insert("events", rows, column_names=COLUMNS)
+            for (msg_topic, partition), msgs in sorted(by_partition.items()):
+                rows = []
+                for msg in msgs:
+                    tenant_id = None
+                    for k, v in (msg.headers() or []):
+                        if k == "tenant_id":
+                            tenant_id = v.decode()
+                            break
+                    try:
+                        ev = normalize_alert(msg.value().decode(), tenant_id or "")
+                    except Exception:
+                        metrics.incr("messages_failed")
+                        continue
+                    if ev.cluster_node_fell_back:
+                        logger.warning(
+                            "alert %s has no cluster.node, fell back to manager.name=%s",
+                            ev.alert_id, ev.cluster_node,
+                        )
+                        metrics.incr("cluster_node_fallback_count")
+                    rows.append(_row(ev))
+
+                if not rows:
+                    continue
+
+                offsets = [msg.offset() for msg in msgs]
+                token = f"{msg_topic}:{partition}:{min(offsets)}-{max(offsets)}"
+                ch.insert("events", rows, column_names=COLUMNS, settings={"insert_deduplication_token": token})
                 metrics.incr("messages_inserted", len(rows))
 
             consumer.commit(asynchronous=False)

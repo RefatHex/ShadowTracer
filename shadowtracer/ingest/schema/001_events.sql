@@ -71,11 +71,15 @@ TTL toDateTime(time) + INTERVAL 90 DAY TO VOLUME 'cold',
 SETTINGS storage_policy = 'hot_cold';
 
 -- Hourly rollups, replicated (so each replica's local rollup table also
--- survives losing the other replica) and duplicate-safe (see
--- PHASE3_DATA_PLATFORM.md): a standard MATERIALIZED VIEW only fires on
--- local INSERTs to its source table, not on rows arriving via replication,
--- so a row inserted once into one `events` replica contributes to the
--- rollup exactly once even though `events` itself is replicated.
+-- survives losing the other replica) and duplicate-safe against BOTH
+-- cross-replica replication (a standard MATERIALIZED VIEW only fires on
+-- local INSERTs, not on rows arriving via replication) AND a replayed
+-- Kafka range re-inserting the same alerts (see "the rollup double-counted
+-- on replay" in PHASE3_DATA_PLATFORM.md / schema/002_rollup_dedup_fix.sql
+-- for the bug this previously had and why uniqExact, not count(), is what
+-- makes it safe: a uniqExact state can be fed the same (cluster_node,
+-- alert_id) from any number of separate insert blocks and the merged
+-- result is still the exact distinct count).
 
 CREATE TABLE IF NOT EXISTS shadowtracer.events_hourly_rollup ON CLUSTER lab_cluster
 (
@@ -85,9 +89,9 @@ CREATE TABLE IF NOT EXISTS shadowtracer.events_hourly_rollup ON CLUSTER lab_clus
     agent_name   LowCardinality(String),
     rule_id      String,
     rule_level   UInt8,
-    event_count  UInt64
+    identity_state AggregateFunction(uniqExact, String, String)
 )
-ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/events_hourly_rollup', '{replica}', event_count)
+ENGINE = ReplicatedAggregatingMergeTree('/clickhouse/tables/{shard}/events_hourly_rollup_v2', '{replica}')
 PARTITION BY (tenant_id, toYYYYMM(hour))
 ORDER BY (tenant_id, hour, agent_id, rule_id, rule_level);
 
@@ -101,6 +105,11 @@ SELECT
     agent_name,
     rule_id,
     rule_level,
-    count() AS event_count
+    uniqExactState(cluster_node, alert_id) AS identity_state
 FROM shadowtracer.events
 GROUP BY tenant_id, hour, agent_id, agent_name, rule_id, rule_level;
+
+-- Console rule: always read this rollup as
+--   SELECT ..., uniqExactMerge(identity_state) AS event_count
+--   FROM shadowtracer.events_hourly_rollup GROUP BY ...
+-- never raw sum(event_count) - there is no such column any more.
