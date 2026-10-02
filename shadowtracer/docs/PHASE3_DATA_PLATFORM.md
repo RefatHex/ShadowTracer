@@ -382,6 +382,84 @@ machine (or VM) with `vsyscall=emulate` available, not this WSL2 setup -
 unchanged conclusion from Step 0 and Phase 2, re-confirmed, not re-litigated
 here.
 
+## Pre-Phase-4 check: the rollup's distinct-count layer, tested in isolation
+
+Follow-up 1's replay test (the writer re-consuming the same Kafka range)
+exercised the rollup together with the writer's `insert_deduplication_token`
+layer - which meant it never actually proved the rollup survives on its
+own, independent of that other defense. This check isolates it.
+
+**How `events_hourly_rollup` actually stores the count:**
+
+```sql
+SHOW CREATE TABLE events_hourly_rollup
+-- identity_state AggregateFunction(uniqExact, String, String)
+-- ENGINE = ReplicatedAggregatingMergeTree(...)
+```
+
+It's a genuine aggregate **state**, not a finished number - `identity_state`
+is an opaque, mergeable intermediate representation of `uniqExact`'s
+internal exact-distinct-count algorithm. There is no plain integer "count"
+column at all; every read goes through `uniqExactMerge(identity_state)` to
+finalize a state (or several, summed across GROUP BY rows) into an actual
+number. This is what makes it safe to feed from separate insert blocks -
+confirmed below, not just asserted.
+
+**Test: token disabled, same 20 events inserted twice in different batch
+shapes.** Inserted 20 synthetic events directly via `clickhouse-connect`
+(bypassing `writer.py` entirely, so no `insert_deduplication_token` was
+ever set on either insert) as one batch of 20, then "replayed" the exact
+same 20 identities as three separate batches of 3, 7, and 10 - a
+deliberately different grouping from the original, not just a repeat of
+the same batch boundaries.
+
+| Query | Result |
+|---|---|
+| `SELECT count() FROM events` (raw, no token used) | **40** - confirms the token really was disabled; nothing silently deduplicated the second insert at the block level |
+| `SELECT count() FROM events FINAL` | **20** - base table's identity dedup, as always |
+| `SELECT uniqExactMerge(identity_state) FROM events_hourly_rollup` | **20** - correct, across 4 separate insert blocks (1 + 3) with no token protection at all |
+
+The rollup held the correct count with zero help from the token layer,
+confirming the `uniqExact` design is sound on its own and doesn't
+secretly depend on the writer's batching behavior to stay correct. No
+schema change needed - this was a verification, not a fix.
+
+**Storage size relative to the base table.** Measured with two synthetic
+20,000-row datasets built from the real fixture alerts (not the tiny
+20-row correctness test above, which is too small to measure meaningfully):
+
+| Dataset | Rollup buckets | `events` compressed | `events_hourly_rollup` compressed | Ratio |
+|---|---|---|---|---|
+| High cardinality (hour spread over 14 days, mostly 1-2 rows/bucket) | 10,470 | 1.57 MiB | 351.41 KiB | 21.9% |
+| Realistic concentration (single day, ~20.8 rows/bucket average) | 960 | 1.41 MiB | 315.30 KiB | 21.8% |
+
+**The ratio barely moved even though bucket count dropped 11x (10,470 ->
+960).** That's the real finding, and it's worth understanding rather than
+just citing the percentage: `uniqExact` stores the *exact* hash of every
+distinct value it's seen, not a fixed-size probabilistic sketch (unlike
+`uniq`/`uniqCombined`, which trade exactness for O(1)-ish state size). Its
+total storage scales with the number of **distinct identities accumulated
+across the table**, not with the number of buckets they're grouped into -
+collapsing 20,000 events into fewer, fatter buckets doesn't shrink the
+rollup the way it would for a plain `count()`-based `SummingMergeTree`
+(which really is one integer per bucket, genuinely O(buckets)). The ~22%
+figure here is coming almost entirely from *not storing the big columns*
+(`message`, `raw_event`, the MITRE arrays) at all in the rollup, not from
+aggregation compression.
+
+**Consequence worth flagging for later, not fixed now:** at much higher
+sustained event volume, this rollup's storage will track total distinct
+event count, not query-relevant bucket count - a security product doing
+real volume (millions of events/day) would see this rollup grow roughly
+linearly with ingest rate, same as the base table, just with a smaller
+constant factor. If long-term storage cost (not correctness) becomes the
+binding constraint, a cheaper two-tier design is worth considering then: a
+plain `count()`/`SummingMergeTree` rollup for routine dashboards (accepting
+the rare writer-crash-duplicate inflation this phase's own testing found),
+falling back to this `uniqExact` rollup or `FINAL` only for the specific
+queries that need exactness. Out of scope for Phase 3 - noted so it isn't
+rediscovered cold later.
+
 ## Open items
 
 - The shipper's offset-file bookkeeping can lag behind what's actually
