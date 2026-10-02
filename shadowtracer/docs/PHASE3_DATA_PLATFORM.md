@@ -116,6 +116,15 @@ dedup matters and the token didn't catch it - the token reduces how often
 that's needed, it doesn't replace `FINAL`/`uniqExact` as the source of
 truth.
 
+**Which queries need `FINAL`, which need `argMax`, which need neither:**
+
+| Query shape | Use | Why |
+|---|---|---|
+| Row content for a specific alert or a small, time-bounded investigation (e.g. "show agent X's alerts in the last hour", "what are this alert's current field values") | `events ... FINAL`, scoped to a bounded `WHERE time BETWEEN ...` | Simplest correct option; over a small bounded range the merge cost `FINAL` adds is acceptable, and you want the actual columns, not just a count. |
+| The same, but `FINAL` is measurably too slow even bounded | `argMax(col, ingested_at)` per `(tenant_id, cluster_node, alert_id)`, same bounded `WHERE` | `argMax` is a streaming aggregation, not a merge-time reconciliation - cheaper than `FINAL` for the same bounded range when you only need specific columns, not the whole row. Still scans every matching row, so it still needs a bound; it's cheaper than `FINAL`, not free. |
+| Counts/aggregates over a large or unbounded time range (dashboards, "all time" totals, compliance reporting) | `events_hourly_rollup` with `uniqExactMerge(identity_state)` | Pre-aggregated hourly - cost is proportional to the number of rollup buckets touched, not the number of raw events underneath them. This is the only option of the three that's actually safe unbounded. |
+| A simple `count()` of distinct alerts, no column content needed, any range | `events` `GROUP BY (tenant_id, cluster_node, alert_id)` with `count()`, no `FINAL` | Grouping by the full identity already collapses duplicates for a bare count - `FINAL`'s extra merge work buys nothing here. Still bound the range for cost, same as any raw-table query. |
+
 **Console rule, stated once for both tables:** never run `FINAL` over an
 unbounded time range on `events` - it forces a full merge of however much
 data matches, with no bound on cost. Queries over a bounded, indexed range
