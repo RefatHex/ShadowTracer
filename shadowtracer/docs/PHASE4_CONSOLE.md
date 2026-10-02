@@ -97,6 +97,55 @@ the table owner, to catch this if it ever regresses.
   writer consumer-group lag (via Kafka's admin API), and last event time
   per tenant (ClickHouse).
 
+## Step 6 — walking skeleton
+
+- `GET /api/alerts` - recent alerts for the caller's tenant (taken only
+  from the validated token, never a query parameter), keyset-paginated on
+  `(time, alert_id)`. Deliberately never uses `FINAL` - keyset pagination
+  lets a caller scroll arbitrarily far back, making this an unbounded
+  range by construction, and the console rule from Phase 3 is never
+  `FINAL` over an unbounded range.
+- Security headers (CSP, HSTS, `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy`) on every response via
+  middleware; a catch-all exception handler logs the real exception
+  server-side but only ever returns a generic `{"detail": "internal
+  server error"}` - verified a route that genuinely raises never leaks
+  the exception type, message, or a traceback.
+- Explicit CORS allowlist (`CORS_ALLOW_ORIGINS`, comma-separated, no
+  wildcard) - empty until `deploy/lab/.env` sets it to the real origin.
+- Frontend (`shadowtracer/console/frontend/`): React + Vite + TypeScript +
+  Tailwind. One screen - login, then a polling (5s) live alert list.
+  Access token lives only in React state (never localStorage/
+  sessionStorage, which a successful XSS could read); the refresh token
+  never reaches JavaScript at all (httpOnly cookie).
+
+**Alert text is rendered as text only, never HTML** - every field
+(`message`/`full_log`, `rule_description`, `agent_name`, ...) goes through
+a plain `{value}` JSX text child in `AlertRow.tsx`, never
+`dangerouslySetInnerHTML` and never interpolated into an attribute.
+`AlertRow.test.tsx` renders an alert whose `message` contains a real
+`<script>` tag and an `<img onerror=...>` payload and asserts: no
+`<script>` element exists anywhere in the rendered DOM, no `<img>` element
+exists either (so `onerror` never gets a chance to fire), the injected
+JavaScript never actually executes (checked via a global flag the payload
+would have set), and the payload is still visible to the user as literal
+text (proving it was rendered, not silently dropped).
+
+**Honest limitation:** full interactive browser verification (per this
+project's "start the dev server and use the feature in a browser" rule)
+could not be completed in this sandboxed environment - Playwright's
+Chromium needs system shared libraries (`libnspr4`, etc.) that require
+`apt`/sudo to install, and this environment has no passwordless sudo
+(same class of blocker as Phase 3's pip issue, resolved there with a
+user-space tool; no equivalent exists for system shared libraries). What
+*was* verified for real: the production build (`tsc -b && vite build`)
+succeeds cleanly, the Vite dev server serves the app correctly, and the
+component tests run against a real DOM implementation (jsdom) exercising
+the actual React rendering and `document.querySelector` calls that matter
+for the XSS property specifically - not a mock of the DOM. A full
+visual/click-through check is still owed once a host with the right
+shared libraries (or `--with-deps` sudo access) is available.
+
 ## VERIFY
 
 ### Route-enumeration test fails when a role is removed, then passes
@@ -184,6 +233,22 @@ and confirmed with `curl` before restoring each:
 
 Full real JSON bodies for each step are in the commit this doc ships
 with.
+
+### The XSS render test passes
+
+```
+$ npx vitest run src/AlertRow.test.tsx
+
+ ✓ src/AlertRow.test.tsx (5 tests) 15ms
+   ✓ AlertRow renders attacker-controlled text safely > does not create a real <script> element anywhere in the rendered output
+   ✓ AlertRow renders attacker-controlled text safely > does not create a real <img> element (onerror never gets a chance to fire)
+   ✓ AlertRow renders attacker-controlled text safely > never actually executes the injected script/onerror payload
+   ✓ AlertRow renders attacker-controlled text safely > shows the payload as visible, literal text instead of silently dropping it
+   ✓ AlertRow renders attacker-controlled text safely > does not inject markup for attacker-controlled fields other than message either
+
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+```
 
 ## Open items
 
