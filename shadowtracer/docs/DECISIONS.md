@@ -269,3 +269,21 @@ include, at minimum:
   confirming privilege drop, file ownership, and queue socket
   permissions all still work end to end, not just that the daemons
   start.
+
+## Phase 4: platform core decisions
+
+- **Shared state (rate limits, lockouts, token families) lives in
+  PostgreSQL.** No Redis for now - the lab's load doesn't need a
+  dedicated cache/state store yet, and adding one now would be state
+  split across two systems for no present benefit. Revisit in Phase 9 if
+  load demands it.
+- **Console: FastAPI backend, React + Vite + TypeScript + Tailwind
+  frontend, served behind Caddy with TLS.** Caddy terminates TLS and
+  reverse-proxies to the backend (API) and the built frontend (static
+  files); 2 replicas of the backend behind Caddy in the lab prove the
+  console is stateless (no sticky sessions, no in-process state that
+  would break under round-robin).
+- **Every request is scoped to the tenant in the user's token.** No
+  query against ClickHouse or PostgreSQL runs without a `tenant_id`
+  filter - enforced by a single RBAC dependency every route goes
+  through (Step 3), not left to each route handler to remember.
