@@ -315,6 +315,73 @@ testing sessions, same Phase 1 "eighth finding" as before. Cleared with
 `client.keys` content and a real landed alert, not `agent_control -l`
 status alone, which can read `Active` from stale state.
 
+## Phase 3 follow-up 4: Rocky agents fixed - but not the way the task expected
+
+The task's hypothesis was "build on Rocky 9 itself instead of Ubuntu
+22.04." **`deploy/lab/agent-rocky.Dockerfile`'s builder stage was already
+`FROM rockylinux:9`** - not Ubuntu. Investigated the real cause instead of
+assuming the hypothesis was right, since the premise didn't match what was
+actually in the Dockerfile.
+
+**Real root cause, confirmed on a bare, unmodified `rockylinux:9`
+container with no Wazuh code involved at all:** Rocky 9's currently
+published `libgcc` package (`11.5.0-14.el9`, pulled in as a dependency the
+moment `gcc-c++` is installed) requires `GLIBC_2.35` - a symbol version
+that doesn't exist in Rocky 9's own glibc, which is frozen at the `2.34`
+ABI line for the life of the RHEL 9 major release. This is a genuine
+defect in Rocky/RHEL 9's own published repositories, not anything in our
+build, our Dockerfile, or Wazuh's `Makefile`. Reproduced identically on a
+stock `rockylinux:9` + `dnf install gcc-c++`, confirmed `dnf update`
+doesn't fix it (no older `libgcc` build is available in the repos to roll
+back to), and confirmed the *base* Docker image's pre-installed `libgcc`
+(`11.4.1-2.1.el9`, present before any dev-tool package pulls in the newer
+one) only needs up to `GLIBC_2.34` and works correctly.
+
+Wazuh's `Makefile` bundles whatever `g++ --print-file-name=libgcc_s.so.1`
+resolves to (in the builder stage, so the broken `11.5.0` one) into
+`/var/ossec/lib/libgcc_s.so.1`, and the Dockerfile's `COPY --from=builder`
+carries that broken copy into the final runtime image, **overwriting** the
+runtime stage's own correct system `libgcc_s.so.1` that was sitting right
+there the whole time. Fixed with one line in our own Dockerfile (no
+inherited Wazuh source touched - this never needed an `UPSTREAM.md` entry):
+
+```dockerfile
+RUN cp -f /usr/lib64/libgcc_s.so.1 /var/ossec/lib/libgcc_s.so.1
+```
+
+**A second, independent bug found getting a full capability test working:**
+Rocky 9's stock `rsyslog.conf` ships `imuxsock` with `SysSock.Use="off"`,
+deferring all local log collection to `systemd-journald` ("local messages
+are retrieved through imjournal now" - its own comment). There is no
+journald in this container (no systemd, no `/run/systemd/journal/`
+socket), so neither path ever delivered anything - confirmed via `logger`
+landing nowhere and `/dev/log` not existing at all. Fixed in
+`entrypoint-agent.sh` by flipping `SysSock.Use` back to `"on"` before
+starting rsyslog (guarded on the string being present, so it's a no-op on
+Debian/Ubuntu's different default). Also noted along the way: EL9's
+OpenSSH logs as `sshd-session[pid]`, not `sshd[pid]` - Wazuh's existing
+`sshd` decoder (`ruleset/decoders/0310-ssh_decoders.xml`) already matches
+on the prefix `^sshd`, so this needed no decoder change, just confirmed it
+wasn't a second blocker.
+
+**Result, with both fixes:** both `agent-rocky-1` and `agent-rocky-2`
+reach Docker-`healthy`, register `Active` behind the same load balancer
+with dynamic IP (same as the Ubuntu agents, follow-up 3), and send real,
+correctly-decoded alerts - confirmed with `wazuh-syscheckd` running
+without crashing (previously `/lib64/libc.so.6: version 'GLIBC_2.35' not
+found`), real FIM/SCA/osquery alert volume (199 and 168 alerts for
+rocky-1/rocky-2 respectively within the first 20s of being Active), and a
+deliberate SSH failure landing as a fully-decoded rule `5710` alert (MITRE
+T1110.001) end to end.
+
+**Production packaging remains open, as flagged in Step 0** - this follow-up
+only touches the lab's Docker-based agent, not the `.deb`/`.rpm` packaging
+path, which is still blocked on this host's lack of `vsyscall` support
+(needed by the `debian:7` packaging base image). Needs a real Linux build
+machine (or VM) with `vsyscall=emulate` available, not this WSL2 setup -
+unchanged conclusion from Step 0 and Phase 2, re-confirmed, not re-litigated
+here.
+
 ## Open items
 
 - The shipper's offset-file bookkeeping can lag behind what's actually

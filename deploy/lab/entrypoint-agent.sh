@@ -78,6 +78,19 @@ fi
 # osqueryd process. A second, independently-started osqueryd collides with
 # it over osquery's own sqlite lock file and osqueryd exits (code 78).
 mkdir -p /run/sshd
+
+# Phase 3 follow-up 4: Rocky 9's stock rsyslog.conf ships
+# imuxsock SysSock.Use="off", deferring local log collection entirely to
+# systemd-journald ("local messages are retrieved through imjournal now" -
+# its own comment) - there's no journald in this container, so neither
+# path ever delivered anything to /var/log/secure (confirmed: no /dev/log
+# socket, no journal). Re-enable the classic syslog socket so sshd's auth
+# log actually reaches a file Wazuh can monitor. No-op on Debian/Ubuntu,
+# which ships SysSock.Use="on" (or no such line) by default.
+if [ -f /etc/rsyslog.conf ] && grep -q 'SysSock.Use="off"' /etc/rsyslog.conf; then
+    sed -i 's/SysSock.Use="off"/SysSock.Use="on"/' /etc/rsyslog.conf
+fi
+
 service rsyslog start || rsyslogd || true
 /usr/sbin/sshd
 

@@ -33,6 +33,19 @@ COPY deploy/lab/preloaded-vars-agent.conf /wazuh/etc/preloaded-vars.conf
 
 RUN cd /wazuh && ./install.sh
 
+# Phase 3 follow-up 4: the builder stage's own `libgcc` package
+# (11.5.0-14.el9, pulled in because gcc-c++ depends on it) requires
+# GLIBC_2.35, which Rocky 9's own glibc doesn't provide (frozen at 2.34 -
+# a real upstream Rocky/RHEL 9 repo defect, not anything in our build or
+# Wazuh's: reproduced on a bare `rockylinux:9` + `dnf install gcc-c++`,
+# no Wazuh code involved). install.sh bundles whatever `g++
+# --print-file-name=libgcc_s.so.1` resolved to in the builder stage into
+# /var/ossec/lib, which is this broken one. This runtime stage's own
+# system libgcc (11.4.1-2.1.el9, installed before any dev-tool package
+# pulls in the newer one) only needs up to GLIBC_2.34 and works fine -
+# use it instead of the bundled copy.
+RUN cp -f /usr/lib64/libgcc_s.so.1 /var/ossec/lib/libgcc_s.so.1
+
 # Throwaway sshd, for step 3.5 (brute force) and step 3.10 (active response
 # disable-account test uses a throwaway user "sttest")
 RUN mkdir -p /run/sshd && ssh-keygen -A && \
