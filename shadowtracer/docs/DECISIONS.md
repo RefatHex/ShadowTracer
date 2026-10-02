@@ -171,6 +171,54 @@ than adding new CMocka unit-test infrastructure for `send_msg()`/
 which a mocked unit test can't exercise anyway). See UPSTREAM.md for the
 change record and the drafted upstream issue/patch.
 
+## Phase 3 follow-up: load-balancer NULL-pointer fix, static-IP workaround removed
+
+**Decision: patch `src/shared/validate_op.c`/`src/headers/validate_op.h`,
+and remove the static-IP-per-worker workaround now that the real bug is
+fixed and re-verified.**
+
+Root cause (first diagnosed in Phase 3 Step 0, not patched then pending
+sign-off; sign-off given for this follow-up): `OS_IsValidIP()`'s `"any"`
+branch allocated `final_ip->ipv6` but never set `final_ip->is_ipv6 = TRUE`
+to match, leaving it at its `memset(0)` default of `FALSE` while
+`final_ip->ipv4` was never allocated (stays `NULL`). `isSingleHost()`
+(`src/headers/validate_op.h`) then read the NULL `ipv4` pointer for every
+`"any"`-registered agent - undefined behavior that made
+`CreateSecMSG()`'s dynamic-ID prefix decision unreliable, which is why
+dynamic-IP agents behind a shared-IP load balancer could never be told
+apart (Phase 1 Step 2's original finding).
+
+**Fix:** set `final_ip->is_ipv6 = TRUE` in the `"any"` branch (the actual
+root cause), plus a defensive NULL check in `isSingleHost()` itself
+(`x->is_ipv6 || !x->ipv4`) as a second line of defense against the same
+class of mismatch anywhere else in the codebase.
+
+**No duplicate-vs-loss trade-off here** - unlike the send-failure fix
+above, this one has no new failure mode to accept. It makes a previously
+broken code path (dynamic-IP identification) work correctly; it doesn't
+change what happens when something fails.
+
+**Validation:** rebuilt the agent image with the fix, switched
+`deploy/lab/docker-compose.yml`'s agents from a static IP per worker to
+`AGENT_MANAGER_DATA_HOST: shadowtracer-lb` with dynamic (`"any"`)
+enrollment, and re-ran Phase 1 item 15 through the load balancer: 20 of 20
+events delivered, both agents reaching `Active` with `IP: any` behind the
+shared LB address for the first time. The `AGENT_MANAGER_DATA_HOST_FALLBACK`
+per-agent second `<server>` workaround is removed too - redundant now that
+HAProxy's own backend health check does the same job in front of the agent
+instead of behind it. See `shadowtracer/docs/PHASE3_DATA_PLATFORM.md` for
+the full re-test output, including an unexpected bonus: failover through
+the LB took 26 seconds instead of the original ~3m36s, because the agent's
+one configured address (the LB, always up) never hits the slow-DNS-resolution
+problem that a dead worker's own hostname did.
+
+A unit regression test was written
+(`src/unit_tests/shared/test_validate_op.c`) but could not be executed in
+this sandboxed environment (see the data-platform doc for the four
+distinct build failures hit trying) - the live re-test above is the
+primary validation. See UPSTREAM.md for the change record and the drafted
+upstream issue/patch.
+
 ## Phase 2 Pass C decision: daemon names and the system user are kept
 
 **Decision:** do not rename the `wazuh-*` daemons or the `wazuh`/`wazuh`

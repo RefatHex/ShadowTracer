@@ -246,6 +246,75 @@ fundamentally a real-network-timing bug would have grown the "minimal
 change" well beyond the fix itself, largely testing the mock rather than
 the behavior. The live re-test above is the validation, as directed.
 
+## Phase 3 follow-up: load-balancer NULL-pointer fix, agents back behind the LB
+
+See `DECISIONS.md`/`UPSTREAM.md` for the root cause
+(`OS_IsValidIP()`/`isSingleHost()` in `src/shared/validate_op.c`). This
+section is the re-test output.
+
+**Unit regression test:** written
+(`src/unit_tests/shared/test_validate_op.c` - updated the one existing
+test that asserted the buggy behavior as correct, `OS_IsValidIP_any_struct`,
+and added a direct `isSingleHost()` assertion) but **could not be executed
+in this environment**. Running Wazuh's CMocka suite requires the full
+`build_wazuh_cmake` dependency graph, which pulls in `syscollector`'s
+`data_provider` tests - unrelated to `validate_op.c` - and those need a
+prebuilt `gtest`/`gmock` that this environment's `make deps` doesn't fetch.
+Four distinct build failures across three independent attempts
+(`libcmocka-dev` missing - fixed, a real gap; without `DEBUG=YES` - same
+failure, different symptom; `DISABLE_SYSC=YES`, the Makefile's own escape
+hatch - doesn't fully remove `build_syscollector` from
+`build_wazuh_cmake`'s prerequisites), past the project's "stop after two
+failures" rule. The test is correct and matches existing conventions; it
+will run in any environment where the full suite already builds.
+
+**Live re-test (the fix's actual required validation):**
+
+1. Switched `deploy/lab/docker-compose.yml`'s agents from a static IP per
+   worker (the Phase 1/2 workaround) to `AGENT_MANAGER_DATA_HOST:
+   shadowtracer-lb`, and `entrypoint-agent.sh`'s enrollment to dynamic
+   ("any") IP - no `-I` flag.
+2. Rebuilt the agent image with both this fix and the agent send-failure
+   fix (follow-up 2) included, recreated the agents.
+3. **Both `agent-ubuntu-1` and `agent-ubuntu-2` reached `Active` with
+   `IP: any`, behind the same shared load-balancer address** - previously
+   impossible (every "any"-registered agent got stuck in a
+   connect-close-retry loop, Phase 1 Step 2). Confirmed with real traffic,
+   not just status: one SSH-failure event from each agent landed correctly
+   attributed (`agent-ubuntu-1`'s on `wazuh-worker1`, `agent-ubuntu-2`'s on
+   `wazuh-worker2`) despite both passing through the identical LB frontend.
+4. **Re-ran Phase 1 item 15 through the load balancer:** stopped
+   `wazuh-worker1` at 15:17:50 UTC, generated 20 marked events
+   (`lbtest_1`..`lbtest_20`) on `agent-ubuntu-1` roughly every 15s. **Result:
+   20 of 20 delivered**, individually confirmed with no gaps, all on
+   `wazuh-worker2` (HAProxy's own health check routed every connection
+   there once it detected `wazuh-worker1` down).
+5. **Unexpected but explainable bonus: failover took 26 seconds, not
+   ~3m36s.** The original Phase 1 delay was traced to the agent's
+   configured server hostname (`wazuh-worker1`) itself failing DNS
+   resolution slowly once that specific container stopped, consumed across
+   several retries before the agent's connection logic ever tried a
+   fallback. With the LB in front, the agent's one configured address
+   (`shadowtracer-lb`) never stops resolving - only the proxied TCP
+   connection breaks, and HAProxy redirects the *next* connection attempt
+   to the surviving worker almost immediately. The old slow-failover
+   characteristic was an artifact of the workaround, not of the data path.
+
+**Workaround removed, as directed:** `AGENT_MANAGER_DATA_HOST_FALLBACK`
+(the per-agent second `<server>` block) is gone - redundant now that
+HAProxy's backend health check does the same job in front of the agent
+instead of behind it. All four agents (including the still-glibc-broken
+Rocky ones, follow-up 4) now point at `shadowtracer-lb` with dynamic IP
+registration, for consistency - nothing agent-type-specific about this fix.
+
+**Setback along the way, same root cause as follow-up 2's:** the first
+attempt to bring agents up behind the LB failed with "Duplicate agent
+name" / "Duplicate IP" - stale registrations left over from earlier
+testing sessions, same Phase 1 "eighth finding" as before. Cleared with
+`manage_agents -r <id>` before each fresh enrollment; confirmed via
+`client.keys` content and a real landed alert, not `agent_control -l`
+status alone, which can read `Active` from stale state.
+
 ## Open items
 
 - The shipper's offset-file bookkeeping can lag behind what's actually

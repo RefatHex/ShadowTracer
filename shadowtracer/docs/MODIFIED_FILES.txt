@@ -125,6 +125,7 @@ M	src/active-response/restart-wazuh.c
 M	src/active-response/restart.sh
 M	src/analysisd/compiled_rules/register_rule.sh
 M	src/client-agent/buffer.c
+M	src/headers/validate_op.h
 M	src/init/darwin-init.sh
 M	src/init/init.sh
 M	src/init/inst-functions.sh
@@ -143,5 +144,7 @@ M	src/init/wazuh-client.sh
 M	src/init/wazuh-local.sh
 M	src/init/wazuh-server.sh
 M	src/os_execd/wcom.c
+M	src/shared/validate_op.c
+M	src/unit_tests/shared/test_validate_op.c
 M	src/win32/version.rc
 M	wodles/utils.py

@@ -551,6 +551,14 @@ int OS_IsValidIP(const char *ip_address, os_ip *final_ip)
             os_calloc(1, sizeof(os_ipv6), final_ip->ipv6);
             memset(final_ip->ipv6->ip_address, 0, sizeof(final_ip->ipv6->ip_address));
             memset(final_ip->ipv6->netmask, 0, sizeof(final_ip->ipv6->netmask));
+            /* final_ip->is_ipv6 must match which union member was actually
+             * allocated (ipv6, above) - it was left at its memset(0) default
+             * of false, so isSingleHost() (validate_op.h) read the NEVER-
+             * ALLOCATED final_ip->ipv4 instead, a NULL-pointer dereference
+             * for every "any"-registered agent. That's why dynamic-ID
+             * agents never got the "!<id>!" prefix needed to disambiguate
+             * them behind a shared-IP load balancer. See UPSTREAM.md. */
+            final_ip->is_ipv6 = TRUE;
         }
         ret = 2;
     }

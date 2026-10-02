@@ -4,15 +4,13 @@ x-manager-build: &manager-build
   context: ../..
   dockerfile: deploy/lab/manager.Dockerfile
 
-# Agents connect directly to their assigned worker (see PHASE1_FINDINGS.md:
-# classic Wazuh TCP secure mode identifies "any"-registered agents by the
-# !<id>! dynamic-ID prefix, which this build's wazuh-agentd doesn't send -
-# confirmed via packet capture - so remoted falls back to IP-based lookup,
-# which can never disambiguate multiple agents sharing one address. That
-# breaks agent traffic through a shared-IP load balancer. Agents are
-# registered with their own static IP instead of "any", split 2-and-2
-# directly across the two workers. shadowtracer-lb is kept running (Step 2
-# still asked for it) but no agent traffic actually flows through it.
+# Phase 3 follow-up 3: agents go through shadowtracer-lb, registered with
+# a dynamic ("any") IP. Previously (Phase 1/2, see PHASE1_FINDINGS.md)
+# classic Wazuh TCP secure mode failed to identify "any"-registered agents
+# behind a shared-IP load balancer - traced in Phase 3 to a real bug
+# (OS_IsValidIP()/isSingleHost() in src/shared/validate_op.c, see
+# UPSTREAM.md), now fixed and re-verified: Phase 1 item 15 (20 events
+# during a worker outage) re-run through the LB, 20/20 delivered.
 x-agent-env: &agent-env
   MANAGER_ENROLL_HOST: wazuh-master
   ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
@@ -106,14 +104,17 @@ services:
     init: true
     environment:
       <<: *agent-env
-      AGENT_MANAGER_DATA_HOST: wazuh-worker1
-      AGENT_MANAGER_DATA_HOST_FALLBACK: wazuh-worker2
+      # Phase 3 follow-up 3: through shadowtracer-lb now that the real bug
+      # (OS_IsValidIP()/isSingleHost()) is fixed - no per-agent fallback
+      # <server> needed any more, HAProxy's own health check routes around
+      # a dead worker without the agent having to do anything.
+      AGENT_MANAGER_DATA_HOST: shadowtracer-lb
     volumes: &agent-config-mounts
       - ./entrypoint-agent.sh:/entrypoint.sh:ro
       - ./healthcheck-agent.sh:/healthcheck.sh:ro
     depends_on:
-      wazuh-worker1:
-        condition: service_healthy
+      shadowtracer-lb:
+        condition: service_started
     networks:
       lab:
         ipv4_address: 172.28.0.21
@@ -127,12 +128,11 @@ services:
     init: true
     environment:
       <<: *agent-env
-      AGENT_MANAGER_DATA_HOST: wazuh-worker2
-      AGENT_MANAGER_DATA_HOST_FALLBACK: wazuh-worker1
+      AGENT_MANAGER_DATA_HOST: shadowtracer-lb
     volumes: *agent-config-mounts
     depends_on:
-      wazuh-worker2:
-        condition: service_healthy
+      shadowtracer-lb:
+        condition: service_started
     networks:
       lab:
         ipv4_address: 172.28.0.22
@@ -146,11 +146,11 @@ services:
     init: true
     environment:
       <<: *agent-env
-      AGENT_MANAGER_DATA_HOST: wazuh-worker1
+      AGENT_MANAGER_DATA_HOST: shadowtracer-lb
     volumes: *agent-config-mounts
     depends_on:
-      wazuh-worker1:
-        condition: service_healthy
+      shadowtracer-lb:
+        condition: service_started
     networks:
       lab:
         ipv4_address: 172.28.0.23
@@ -164,11 +164,11 @@ services:
     init: true
     environment:
       <<: *agent-env
-      AGENT_MANAGER_DATA_HOST: wazuh-worker2
+      AGENT_MANAGER_DATA_HOST: shadowtracer-lb
     volumes: *agent-config-mounts
     depends_on:
-      wazuh-worker2:
-        condition: service_healthy
+      shadowtracer-lb:
+        condition: service_started
     networks:
       lab:
         ipv4_address: 172.28.0.24

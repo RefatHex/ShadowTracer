@@ -9,15 +9,17 @@ ENROLL_PASSWORD="${ENROLL_PASSWORD:?ENROLL_PASSWORD is required}"
 AGENT_NAME="${AGENT_NAME:-$(hostname)}"
 AGENT_MANAGER_DATA_HOST="${AGENT_MANAGER_DATA_HOST:-$MANAGER_ENROLL_HOST}"
 AGENT_MANAGER_DATA_HOST_FALLBACK="${AGENT_MANAGER_DATA_HOST_FALLBACK:-}"
-AGENT_IP="$(hostname -i | awk '{print $1}')"
 
 OSSEC_CONF=/var/ossec/etc/ossec.conf
 CLIENT_KEYS=/var/ossec/etc/client.keys
 FIM_TEST_DIR=/var/ossec/lab-fim-test
 
-# Connect for event data directly to this agent's assigned worker, not the
-# baked-in USER_AGENT_SERVER_NAME - see docker-compose.yml's note on why
-# agent traffic can't go through the shared-IP load balancer in this build.
+# Phase 3 follow-up 3: event data now goes through shadowtracer-lb
+# (AGENT_MANAGER_DATA_HOST=shadowtracer-lb in docker-compose.yml), and
+# enrollment below registers with a dynamic ("any") IP, not a static one -
+# the static-IP-per-worker workaround from Phase 1/2 is removed now that
+# the real bug (OS_IsValidIP()/isSingleHost(), see UPSTREAM.md) is fixed
+# and re-verified through the LB.
 sed -i "s|<address>.*</address>|<address>${AGENT_MANAGER_DATA_HOST}</address>|" "$OSSEC_CONF"
 
 # --- one-time runtime config: a second <server> block, so this agent fails
@@ -80,9 +82,11 @@ service rsyslog start || rsyslogd || true
 /usr/sbin/sshd
 
 # --- enroll with the master if we don't already have keys ---
+# Dynamic IP ("any") - see the note above sed-ing <address> for why this
+# no longer needs -I <static-ip>.
 if [ ! -s "$CLIENT_KEYS" ]; then
     for i in $(seq 1 60); do
-        /var/ossec/bin/agent-auth -m "$MANAGER_ENROLL_HOST" -p 1515 -A "$AGENT_NAME" -P "$ENROLL_PASSWORD" -I "$AGENT_IP" -a && break
+        /var/ossec/bin/agent-auth -m "$MANAGER_ENROLL_HOST" -p 1515 -A "$AGENT_NAME" -P "$ENROLL_PASSWORD" -a && break
         echo "agent-auth: waiting for $MANAGER_ENROLL_HOST:1515 (attempt $i)"
         sleep 3
     done

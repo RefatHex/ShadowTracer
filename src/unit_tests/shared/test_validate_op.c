@@ -95,7 +95,15 @@ void OS_IsValidIP_any_struct(void **state)
 
     ret = OS_IsValidIP("any", ret_ip);
     assert_int_equal(ret, 2);
-    assert_int_equal(ret_ip->is_ipv6, FALSE);
+    /* Regression test (see UPSTREAM.md): this used to assert FALSE here,
+     * encoding the bug as expected behavior. "any" allocates ret_ip->ipv6
+     * (never ->ipv4, which stays NULL), so is_ipv6 must be TRUE to match -
+     * otherwise isSingleHost() (validate_op.h) reads the NULL ->ipv4 for
+     * every "any"-registered agent, a real NULL-pointer dereference that
+     * made CreateSecMSG() unable to tell dynamic-ID agents apart behind a
+     * shared-IP load balancer. */
+    assert_int_equal(ret_ip->is_ipv6, TRUE);
+    assert_false(isSingleHost(ret_ip));
 
     w_free_os_ip(ret_ip);
 }

@@ -184,8 +184,15 @@ long long w_validate_bytes(const char *content);
 
 /* Macros */
 
-/* Check if the IP is a single host, not a network with a netmask */
-#define isSingleHost(x) ((x->is_ipv6) ? false : (x->ipv4->netmask == 0xFFFFFFFF))
+/* Check if the IP is a single host, not a network with a netmask.
+ * Defensive NULL check on x->ipv4: an os_ip built for a wildcard/"any"
+ * address has no single-host IPv4 representation to check - treating that
+ * as "not a single host" (false) is the safe default for every caller
+ * (e.g. CreateSecMSG's dynamic-ID prefix decision), not a guess. See
+ * UPSTREAM.md - OS_IsValidIP() already sets is_ipv6 correctly for "any"
+ * as of this fix, so this is belt-and-suspenders against the same class
+ * of mismatch elsewhere, not the primary fix. */
+#define isSingleHost(x) ((x->is_ipv6 || !x->ipv4) ? false : (x->ipv4->netmask == 0xFFFFFFFF))
 
 
 #endif /* VALIDATE_H */
