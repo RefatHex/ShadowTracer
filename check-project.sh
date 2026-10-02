@@ -92,6 +92,19 @@ else
     die "v4.14.8 tag not found locally (git fetch upstream tag v4.14.8 first)"
 fi
 
+# Phase 3: a shipper/writer test suite that only proves normalize_alert()
+# or insert_batch() work when called directly would miss a main loop that
+# never actually starts draining - require a test that starts run() in a
+# thread/process and checks real output instead (see
+# test_{shipper,writer}_is_actually_running_and_draining_not_just_callable).
+for component in shipper writer; do
+    test_file="shadowtracer/ingest/tests/test_${component}.py"
+    if [ -f "$test_file" ]; then
+        grep -qE "^def test_.*${component}.*draining" "$test_file" \
+            || die "$test_file has no started-and-draining test (a test function matching test_.*${component}.*draining)"
+    fi
+done
+
 if [ "$fail" -eq 0 ]; then
     echo "check-project.sh: OK"
 else

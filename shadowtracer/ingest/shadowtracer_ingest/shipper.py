@@ -135,7 +135,17 @@ def run(
     if archives_path:
         sources["archives.json"] = TailSource(archives_path, offsets.get("archives.json", {}))
 
-    producer = Producer({"bootstrap.servers": bootstrap_servers, "acks": "all"})
+    producer = Producer({
+        "bootstrap.servers": bootstrap_servers,
+        "acks": "all",
+        # Default (5 min) is too close to a real broker outage to be safe -
+        # a message produced right before an outage could hit this timeout
+        # mid-outage and be reported as failed before Kafka ever comes
+        # back, even though it would have delivered fine. 20 min gives a
+        # real margin over the kind of broker restart/maintenance window
+        # this shipper needs to ride out.
+        "message.timeout.ms": 1200000,
+    })
     delivery_errors = []
 
     def on_delivery(err, msg):
@@ -176,9 +186,18 @@ def run(
                     on_delivery=on_delivery,
                 )
 
-            producer.flush(30)
+            still_pending = producer.flush(30)
 
-            if delivery_errors:
+            # flush()'s return value is the count of messages still
+            # outstanding after the timeout - during a broker outage,
+            # confluent_kafka won't invoke on_delivery with an error until
+            # message.timeout.ms elapses (default 5 minutes), so a 30s
+            # flush() timeout during a longer outage leaves delivery_errors
+            # empty even though nothing was actually acked. Checking only
+            # delivery_errors here would have advanced the offset past
+            # unacknowledged messages - exactly the loss this shipper
+            # exists to prevent. Found running the Step 6 Kafka-outage test.
+            if delivery_errors or still_pending:
                 # Don't advance the offset - we'll re-read and retry this
                 # batch next loop. Duplicates from a retried batch are
                 # handled at the ClickHouse layer (see schema/001_events.sql).

@@ -52,7 +52,10 @@ def _run_shipper_once(tmp_path, kafka_bootstrap, topic, alerts_path, offset_file
     return stop_flag, thread, metrics
 
 
-def test_shipper_sends_real_alerts_to_kafka(tmp_path, kafka_bootstrap, kafka_topic, real_alert_lines):
+def test_shipper_is_actually_running_and_draining_not_just_callable(tmp_path, kafka_bootstrap, kafka_topic, real_alert_lines):
+    """Proves the shipper's main loop is live: we only start shipper.run()
+    in a thread and write to the file it tails - never call its internal
+    functions directly - then confirm messages actually arrive in Kafka."""
     alerts_path = tmp_path / "alerts.json"
     alerts_path.write_text("\n".join(real_alert_lines) + "\n")
     offset_file = tmp_path / "offsets.json"
