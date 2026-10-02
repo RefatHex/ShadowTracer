@@ -49,7 +49,12 @@ services:
       CLUSTER_NODE_NAME: worker1
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
-    volumes: *manager-config-mounts
+    volumes:
+      - ./entrypoint-manager.sh:/entrypoint.sh:ro
+      - ./healthcheck-manager.sh:/healthcheck.sh:ro
+      # Phase 3: the shipper (shadowtracer/ingest) tails this from the host
+      # - one shipper process per manager node, per Step 3.
+      - ./alerts-worker1:/var/ossec/logs/alerts
     depends_on:
       wazuh-master:
         condition: service_healthy
@@ -67,7 +72,10 @@ services:
       CLUSTER_NODE_NAME: worker2
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
-    volumes: *manager-config-mounts
+    volumes:
+      - ./entrypoint-manager.sh:/entrypoint.sh:ro
+      - ./healthcheck-manager.sh:/healthcheck.sh:ro
+      - ./alerts-worker2:/var/ossec/logs/alerts
     depends_on:
       wazuh-master:
         condition: service_healthy
@@ -210,7 +218,7 @@ services:
   ch-clickhouse-1:
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-1
-    mem_limit: 768m
+    mem_limit: 2304m
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:
@@ -236,7 +244,7 @@ services:
   ch-clickhouse-2:
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-2
-    mem_limit: 768m
+    mem_limit: 2304m
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:

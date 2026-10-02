@@ -2,7 +2,13 @@
     <!-- Lab sizing only - ClickHouse's default cache sizing assumes a
          dedicated host. Cap it so 2 replicas fit next to the rest of the
          lab on a 7.355 GiB Docker memory budget. -->
-    <max_server_memory_usage>644245094</max_server_memory_usage> <!-- 600 MiB -->
+    <!-- The first pass at this (600 MiB, then ~858 MiB) undershot: that's
+         not query working-set, it's ClickHouse's own baseline footprint
+         (caches, replication queues, merge threads) for 2 replicas -
+         there was no room left for any query to actually run. 1800 MiB
+         still leaves the lab comfortably inside its 7.355 GiB Docker
+         budget even with both replicas, Keeper, Kafka and the managers up. -->
+    <max_server_memory_usage>1887436800</max_server_memory_usage> <!-- 1800 MiB -->
     <mark_cache_size>134217728</mark_cache_size> <!-- 128 MiB -->
     <uncompressed_cache_size>0</uncompressed_cache_size>
 </clickhouse>

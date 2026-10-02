@@ -28,8 +28,7 @@ def _start_writer(kafka_bootstrap, topic, ch_env):
             bootstrap_servers=kafka_bootstrap,
             topic=topic,
             group_id=f"test-writer-{uuid.uuid4().hex[:8]}",
-            clickhouse_host="127.0.0.1",
-            clickhouse_port=8123,
+            clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
             clickhouse_user=ch_env["CLICKHOUSE_USER"],
             clickhouse_password=ch_env["CLICKHOUSE_PASSWORD"],
             clickhouse_database="shadowtracer",
@@ -114,7 +113,7 @@ def test_writer_restart_mid_ingest_no_loss_no_duplicates(
             target=writer.run,
             kwargs=dict(
                 bootstrap_servers=kafka_bootstrap, topic=kafka_topic, group_id=gid,
-                clickhouse_host="127.0.0.1", clickhouse_port=8123,
+                clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
                 clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
                 clickhouse_database="shadowtracer", metrics=metrics2, stop_flag=stop2, started_flag=started2,
             ),
@@ -142,3 +141,24 @@ def test_writer_restart_mid_ingest_no_loss_no_duplicates(
 
     assert count == len(lines), f"expected {len(lines)} deduped rows after restart, got {count}"
     ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in alert_ids)})")
+
+
+def test_failover_clickhouse_skips_a_dead_host():
+    """Unit-level proof of _FailoverClickHouse's own logic: a bogus first
+    host must not stop the insert from landing on the second, real one."""
+    from shadowtracer_ingest.writer import _FailoverClickHouse
+    import os
+
+    env = {}
+    with open(os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "lab", ".env")) as f:
+        for line in f:
+            if "=" in line and not line.startswith("#"):
+                k, v = line.strip().split("=", 1)
+                env[k] = v
+
+    ch = _FailoverClickHouse(
+        hosts=[("127.0.0.1", 1), ("127.0.0.1", 8123)],  # port 1: nothing listens there
+        user=env["CLICKHOUSE_USER"], password=env["CLICKHOUSE_PASSWORD"], database="shadowtracer",
+    )
+    used = ch.insert("events", [], column_names=["tenant_id"])
+    assert used == 1  # fell through to the second (working) host

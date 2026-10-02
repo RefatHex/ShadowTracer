@@ -26,3 +26,8 @@ deploy/lab/entrypoint-*.sh
 deploy/lab/healthcheck-*.sh
 deploy/lab/docker-compose.yml
 deploy/lab/haproxy.cfg
+
+# Runtime-only: alerts.json bind mounts for Phase 3's shipper, created by
+# docker compose at container start, never part of the image.
+deploy/lab/alerts-worker1/
+deploy/lab/alerts-worker2/

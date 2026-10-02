@@ -55,6 +55,22 @@ if [ -f "$API_YAML" ] && ! grep -q "^host:" "$API_YAML"; then
     { echo "host: ['0.0.0.0']"; echo "access:"; echo "  max_request_per_minute: 99999"; } >> "$API_YAML"
 fi
 
+# Phase 3: /var/ossec/logs/alerts is bind-mounted from the host (see
+# docker-compose.yml) so shadowtracer/ingest's shipper can tail alerts.json
+# directly, one shipper process per manager node. Docker creates a fresh
+# bind-mount host directory as root:root, which wazuh-analysisd (running
+# as wazuh:wazuh) can't write into - chown it before starting daemons.
+if mountpoint -q /var/ossec/logs/alerts 2>/dev/null; then
+    chown wazuh:wazuh /var/ossec/logs/alerts
+    chmod 755 /var/ossec/logs/alerts
+    # The shipper runs on the host as a different uid than the wazuh user
+    # inside this container, so alerts.json itself also needs to stay
+    # world-readable for it - lab-only, a real deployment runs the shipper
+    # as a sidecar sharing the manager's uid/mount instead of across a
+    # host/container uid boundary.
+    (while true; do chmod o+r /var/ossec/logs/alerts/alerts.json 2>/dev/null || true; sleep 2; done) &
+fi
+
 /var/ossec/bin/shadowtracer-control start
 
 exec tail -F /var/ossec/logs/ossec.log /var/ossec/logs/cluster.log /var/ossec/logs/api.log 2>/dev/null

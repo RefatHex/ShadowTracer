@@ -47,12 +47,47 @@ def _row(ev) -> list:
     return [getattr(ev, col) for col in COLUMNS]
 
 
+class _FailoverClickHouse:
+    """Tries each (host, port) candidate in order on insert, so losing one
+    ClickHouse replica doesn't stop ingestion. Not a real load balancer -
+    no health checking between batches, no least-conns, nothing clever -
+    just "try the one we used last, then fall through the rest." Good
+    enough for 2 replicas in the lab; a real deployment would put the
+    writer behind the same thing its query layer uses.
+    """
+
+    def __init__(self, hosts: list[tuple[str, int]], user: str, password: str, database: str):
+        self._hosts = hosts
+        self._user = user
+        self._password = password
+        self._database = database
+        self._preferred = 0
+
+    def insert(self, table: str, rows: list, column_names: list) -> int:
+        last_exc = None
+        order = [self._preferred] + [i for i in range(len(self._hosts)) if i != self._preferred]
+        for i in order:
+            host, port = self._hosts[i]
+            try:
+                client = clickhouse_connect.get_client(
+                    host=host, port=port, username=self._user,
+                    password=self._password, database=self._database,
+                )
+                client.insert(table, rows, column_names=column_names)
+                client.close()
+                self._preferred = i
+                return i
+            except Exception as exc:  # noqa: BLE001 - genuinely any backend failure should fail over
+                last_exc = exc
+                continue
+        raise last_exc
+
+
 def run(
     bootstrap_servers: str,
     topic: str,
     group_id: str,
-    clickhouse_host: str,
-    clickhouse_port: int,
+    clickhouse_hosts: list[tuple[str, int]],
     clickhouse_user: str,
     clickhouse_password: str,
     clickhouse_database: str,
@@ -68,11 +103,7 @@ def run(
     })
     consumer.subscribe([topic])
 
-    ch = clickhouse_connect.get_client(
-        host=clickhouse_host, port=clickhouse_port,
-        username=clickhouse_user, password=clickhouse_password,
-        database=clickhouse_database,
-    )
+    ch = _FailoverClickHouse(clickhouse_hosts, clickhouse_user, clickhouse_password, clickhouse_database)
 
     if started_flag is not None:
         started_flag.set()
