@@ -101,7 +101,10 @@ Also updated the one existing unit test that asserted the buggy behavior
 as expected (`OS_IsValidIP_any_struct` in
 `src/unit_tests/shared/test_validate_op.c` previously asserted
 `is_ipv6 == FALSE` for `"any"`) and added a direct `isSingleHost()`
-assertion alongside it.
+assertion alongside it. **Note:** this CMocka test has not been executed
+in our environment (unrelated build dependencies in `syscollector`'s test
+suite) - we believe it's correct by inspection, but the end-to-end
+validation above is what we've actually run and observed pass.
 
 **Patch:** see the diff in this fork's `src/shared/validate_op.c` /
 `src/headers/validate_op.h` (search commit log for "Phase 3 follow-up") -

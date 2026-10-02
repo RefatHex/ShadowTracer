@@ -213,11 +213,14 @@ one configured address (the LB, always up) never hits the slow-DNS-resolution
 problem that a dead worker's own hostname did.
 
 A unit regression test was written
-(`src/unit_tests/shared/test_validate_op.c`) but could not be executed in
-this sandboxed environment (see the data-platform doc for the four
-distinct build failures hit trying) - the live re-test above is the
-primary validation. See UPSTREAM.md for the change record and the drafted
-upstream issue/patch.
+(`src/unit_tests/shared/test_validate_op.c`) but **has NOT YET RUN -
+status is not proven, not passing; it has produced no pass/fail result
+anywhere.** It could not be executed in this sandboxed environment (see
+the data-platform doc for the four distinct build failures hit trying) -
+the live re-test above is the only validation that has actually run. The
+CMocka test runs, and this note updates to its real result, once a Linux
+build host with the full suite is available. See UPSTREAM.md for the
+change record and the drafted upstream issue/patch.
 
 ## Phase 2 Pass C decision: daemon names and the system user are kept
 

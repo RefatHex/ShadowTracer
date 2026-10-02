@@ -252,6 +252,15 @@ See `DECISIONS.md`/`UPSTREAM.md` for the root cause
 (`OS_IsValidIP()`/`isSingleHost()` in `src/shared/validate_op.c`). This
 section is the re-test output.
 
+> **CMocka regression test status: NOT YET RUN.** The test exists in
+> `src/unit_tests/shared/test_validate_op.c` and is believed correct by
+> inspection, but it has never actually executed, anywhere, with a pass or
+> fail result. Do not cite it as proof this fix works - the live re-test
+> below (20/20 through a real load balancer) is the only validation that
+> has actually run. This status flips to RUN + result only once it's
+> executed on a host where the full CMocka suite builds (see the four
+> build failures described just below for what is blocking that here).
+
 **Unit regression test:** written
 (`src/unit_tests/shared/test_validate_op.c` - updated the one existing
 test that asserted the buggy behavior as correct, `OS_IsValidIP_any_struct`,
