@@ -110,8 +110,11 @@ property under test.
 ## Lab memory
 
 Measured with the full lab up (3 Wazuh managers, 4 agents, the LB, Kafka,
-2x ClickHouse, Keeper, Postgres) at idle: ~2.1 GiB of the 7.355 GiB Docker
-budget. ClickHouse's per-replica memory ceiling went through two upward
+2x ClickHouse, Keeper, Postgres) at idle, before any Phase 3 traffic:
+~2.1 GiB of the 7.355 GiB Docker budget. Re-measured after the full Step 6
+chaos-test run (every container's memory footprint had grown from real
+ingest/replication/replay activity): ~2.7 GiB - still comfortably under
+40% of budget. ClickHouse's per-replica memory ceiling went through two upward
 revisions during Step 6 testing (600 MiB, then ~858 MiB, then 1800 MiB) -
 the first two numbers were undershooting ClickHouse's own baseline
 footprint for a 2-replica setup (caches, replication queues, merge
