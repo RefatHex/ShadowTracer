@@ -4,6 +4,7 @@ from .config import load_settings
 from .db import make_session_factory
 from .logging_redact import register_secret, setup_logging
 from .routers import auth as auth_router
+from .routers import health as health_router
 
 
 def create_app() -> FastAPI:
@@ -16,6 +17,7 @@ def create_app() -> FastAPI:
     app.state.session_factory = make_session_factory(settings)
 
     app.include_router(auth_router.router)
+    app.include_router(health_router.router)
 
     return app
 

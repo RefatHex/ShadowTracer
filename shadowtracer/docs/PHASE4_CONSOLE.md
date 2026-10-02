@@ -1,0 +1,195 @@
+# Phase 4 — platform core and walking skeleton
+
+One real alert travels from an agent to a screen, behind real auth, with
+an audit trail. Backend: `shadowtracer/console/backend/` (FastAPI).
+Frontend: `shadowtracer/console/frontend/` (React + Vite + TS + Tailwind,
+Step 6). Lab: `deploy/lab/`.
+
+## Design
+
+- **Database roles, not just code, enforce the audit log's append-only
+  property.** The console connects as `shadowtracer_app`, a restricted
+  PostgreSQL role with SELECT/INSERT/UPDATE/DELETE on the ordinary tables
+  but only SELECT/INSERT on `audit_log` - no UPDATE/DELETE grant exists at
+  all. The table-owning role (`POSTGRES_USER`) keeps full rights, for
+  migrations and as the lab's stand-in for "superuser" access.
+- **RBAC is one dependency, not a per-route habit.** `RequireRole(*roles)`
+  decodes the access token, checks role membership, and is the only
+  sanctioned way a route handler learns the caller's `tenant_id` - every
+  downstream query is scoped by construction. A route with no requirement
+  (login, health liveness) must say so explicitly via `Depends(mark_public)`;
+  there is no third, silent way to be exempt, and an automated test
+  enumerates every route to prove it.
+- **Refresh tokens rotate and detect replay.** Each redemption issues a
+  new token in the same family and marks the old one used; presenting an
+  already-used token revokes the *entire* family, not just that token -
+  verified by confirming the next legitimate token is rejected too.
+
+## Step 1 — config and secrets
+
+Settings load from env vars or `*_FILE` paths (the `_FILE` variant always
+wins when both are set - the Docker secrets convention). Refuses to start
+(`WeakSecretError`) on a JWT secret that's missing, a known placeholder
+(`changeme`, `secret`, `password`, `dev`, ...), or under 32 characters -
+same check for the Postgres/ClickHouse passwords.
+
+Log redaction (`app/logging_redact.py`) has two layers: an explicit
+registry of known secret values (exact substring match, populated from
+config and every issued token) and a regex backstop for
+`password=`/`token=`/`Authorization: Bearer` patterns that were never
+explicitly registered. Verified with a known secret value never appearing
+in captured log output, plus the backstop patterns independently.
+
+## Step 2 — auth (PostgreSQL)
+
+Schema: `tenants`, `users` (role check constraint: `admin`/`analyst`/
+`viewer`), `refresh_tokens` (family-based rotation), `login_attempts`
+(the lockout source of truth - counted directly, never a separate
+drift-prone counter).
+
+- **argon2id is pinned explicitly** (`Type.ID` passed to `PasswordHasher`,
+  not relying on today's library default). `verify_password()` catches
+  every argon2 exception class and returns `False` uniformly - a
+  corrupted stored hash can never surface as a 500. `needs_rehash()` is
+  wired into `authenticate()` so a successful login against a
+  weaker-than-current-policy hash transparently upgrades it.
+- **Lockout checks both per-IP and per-account** recent failure counts
+  independently - either one blocks, regardless of which varies (same IP
+  hitting many accounts, or one account hit from many IPs).
+- **Refresh token** travels only in an httpOnly+Secure+SameSite=strict
+  cookie scoped to `/auth`, never in the JSON body.
+- **No default admin anywhere in the codebase.** `cli.py create-admin` is
+  the only way one gets created, and it always prompts for the password
+  interactively (`getpass`, never a CLI argument).
+
+## Step 3 — RBAC
+
+`RequireRole` returns a `CurrentUser(user_id, tenant_id, role)`. The
+required enumeration test (`test_rbac_enumeration.py`) walks every
+registered route via `app.routes` and fails if any route's dependency
+tree contains neither a `RequireRole` instance nor `mark_public`.
+
+## Step 4 — audit log
+
+See "Design" above for the grant structure. `app/audit.py`'s hash chain:
+each row's `row_hash` covers its own fields plus the previous row's
+`row_hash` (genesis = 64 zeros for the first row).
+
+**A real bug found building this:** appends originally serialized
+concurrent writers with `SELECT ... FOR UPDATE` on the last row - which
+turned out to require **UPDATE privilege** on the table in PostgreSQL,
+even just to take the row lock. Using it would have meant granting the
+app role UPDATE on `audit_log` just to make appends safe, defeating the
+entire point of the append-only grant. Fixed with a Postgres advisory
+lock (`pg_advisory_xact_lock`), which needs no table privilege at all.
+Added a regression test that connects as the actual restricted role, not
+the table owner, to catch this if it ever regresses.
+
+## Step 5 — health
+
+- `GET /health` - liveness only, no dependency checks, always 200 while
+  the process is up.
+- `GET /health/ready` - checks PostgreSQL, ClickHouse, and Kafka for
+  real; 200 only if all three are reachable, 503 with per-dependency
+  detail otherwise.
+- `GET /health/detail` - admin-only (`RequireRole("admin")`): shipper lag
+  per node (polls each shipper's own metrics HTTP endpoint from Phase 3),
+  writer consumer-group lag (via Kafka's admin API), and last event time
+  per tenant (ClickHouse).
+
+## VERIFY
+
+### Route-enumeration test fails when a role is removed, then passes
+
+Removed `dependencies=[Depends(mark_public)]` from the real `/auth`
+router (the literal file, not a copy) and ran the enumeration test:
+
+```
+FAILED tests/test_rbac_enumeration.py::test_every_route_has_a_role_assertion_or_an_explicit_public_marker
+AssertionError: these routes have neither a RequireRole dependency nor an
+explicit Depends(mark_public) marker: ['/auth/login', '/auth/refresh', '/auth/logout']
+```
+
+Restored it, ran again:
+
+```
+tests/test_rbac_enumeration.py::test_every_route_has_a_role_assertion_or_an_explicit_public_marker PASSED
+```
+
+### A viewer token gets 403 on an admin endpoint
+
+`tests/test_health_api.py::test_health_detail_viewer_gets_403` - a real
+viewer-role user logs in over HTTP, presents that access token to
+`/health/detail` (admin-only), gets 403. Passing in the suite below.
+
+### Refresh-token replay revokes the family
+
+`tests/test_auth_api.py::test_refresh_rotates_token_and_replay_revokes_family` -
+logs in, rotates once, replays the *first* (already-rotated-away) cookie
+(401), then confirms the *second*, legitimate, rotated-to token is
+rejected too (401) - the whole family was revoked, not just the replayed
+token.
+
+### Lockout triggers after repeated failures spread across several IPs
+
+`tests/test_auth.py::test_lockout_per_account_across_different_ips` -
+5 failed attempts against the same account from 5 different IPs trips
+account-based lockout; `test_lockout_per_ip_across_different_accounts`
+proves the IP-based side independently (5 different accounts, same IP).
+
+### The audit chain verifies, then catches a tampered row
+
+Real end-to-end run against the live server and real lab Postgres (not
+just the automated tests): logged in twice (one failed, one successful)
+plus one `create-admin` CLI run, producing 5 real chained rows.
+
+```
+$ python cli.py verify-audit-chain
+OK: 5 rows, chain verified from genesis to the latest row
+```
+
+Tampered with row 3 directly via `psql` as the table-owning role
+(bypassing the app and its restricted role entirely):
+
+```sql
+UPDATE audit_log SET target = 'root@evil.com' WHERE id = 3;
+```
+
+```
+$ python cli.py verify-audit-chain
+BROKEN CHAIN: first bad row is id=3
+reason: row 3: stored row_hash does not match its own content
+(expected a9e2b06a2eeb3e2b8a47e9a0d4d41fa7f796bb12a6e0276a6600a8fcc08086f9,
+ got 0165b892646451a4298e485d4ed140e7cac81cccf6c2372e39f4d3c5d0abe344)
+exit code: 1
+```
+
+Also proved directly, via `psql` connected *as* `shadowtracer_app`
+(the app's actual role, not the owner): `INSERT` succeeds, `UPDATE` and
+`DELETE` both come back `permission denied for table audit_log` - a
+database-level rejection a code bug cannot bypass.
+
+### Readiness reports each broken dependency
+
+Real server, real lab services, stopped one at a time via `docker stop`
+and confirmed with `curl` before restoring each:
+
+| Dependency stopped | `/health/ready` status | `checks` body (abridged) |
+|---|---|---|
+| (baseline) | 200 | `postgres: ok, clickhouse: ok, kafka: ok` |
+| PostgreSQL | 503 | `postgres: false ("Connection refused" via psycopg2), clickhouse: ok, kafka: ok` |
+| ClickHouse (both replicas) | 503 | `postgres: ok, clickhouse: false ("Connection refused"), kafka: ok` |
+| Kafka | 503 | `postgres: ok, clickhouse: ok, kafka: false ("Broker transport failure")` |
+| (all restored) | 200 | `postgres: ok, clickhouse: ok, kafka: ok` |
+
+Full real JSON bodies for each step are in the commit this doc ships
+with.
+
+## Open items
+
+- `/health/detail`'s shipper-lag polling expects `SHIPPER_METRICS_URLS`
+  to be configured with reachable addresses - in the lab, shippers run as
+  host processes (Phase 3's design), so the console (in a container, once
+  Step 7 adds it to `deploy/lab`) needs `host.docker.internal` wired via
+  `extra_hosts: host-gateway` to reach them. Not yet exercised end-to-end
+  with a running shipper - tracked for Step 7.
