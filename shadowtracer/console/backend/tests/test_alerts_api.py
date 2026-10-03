@@ -149,6 +149,49 @@ def test_renaming_a_tenant_does_not_change_which_events_it_sees(client, db, ch_c
     assert {a["message"] for a in after["alerts"]} == {"alert-0", "alert-1"}
 
 
+def test_tenant_key_cannot_be_updated_even_by_the_app_role(db, lab_env, test_postgres_db):
+    """tenant_key's immutability (follow-up 1) is now a database grant, not
+    just an application convention - the app's own restricted role can
+    rename a tenant (name is the one column it's actually allowed to
+    write) but cannot touch tenant_key no matter what the Python code
+    does, same enforcement style as audit_log's append-only grant."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    from app.models import tenants
+
+    tenant_id = db.execute(
+        tenants.insert().values(name="tenant-key-grant-test", tenant_key="immutable-key").returning(tenants.c.id)
+    ).scalar_one()
+    db.commit()
+
+    restricted_url = (
+        f"postgresql+psycopg2://shadowtracer_app:{lab_env['APP_DB_PASSWORD']}"
+        f"@127.0.0.1:5432/{test_postgres_db}"
+    )
+    engine = create_engine(restricted_url)
+    Session = sessionmaker(bind=engine)
+    restricted_db = Session()
+    try:
+        restricted_db.execute(
+            tenants.update().where(tenants.c.id == tenant_id).values(name="renamed-by-app-role")
+        )
+        restricted_db.commit()
+
+        restricted_db.rollback()
+        with pytest.raises(Exception, match="permission denied"):
+            restricted_db.execute(
+                tenants.update().where(tenants.c.id == tenant_id).values(tenant_key="hacked")
+            )
+    finally:
+        restricted_db.rollback()
+        restricted_db.close()
+
+    row = db.execute(text("SELECT name, tenant_key FROM tenants WHERE id = :id"), {"id": tenant_id}).mappings().first()
+    assert row["name"] == "renamed-by-app-role"
+    assert row["tenant_key"] == "immutable-key"
+
+
 def test_alerts_requires_auth(client):
     resp = client.get("/api/alerts")
     assert resp.status_code == 401

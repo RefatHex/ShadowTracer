@@ -492,6 +492,34 @@ a shared volume.
   follow-up (not Phase 3's own tracked items in `PHASE3_DATA_PLATFORM.md`,
   which are separate and unchanged):
 
+### 4. Tenant key immutability, enforced by the database
+
+Follow-up 1 made `tenant_key` permanent by convention - the application
+code never updates it, but the blanket table-level `GRANT UPDATE ON
+tenants` from migration `5f408777ad31` meant the restricted app role
+*could* have, if a bug or a compromised process ever tried. Migration
+`6cb09091c77c` revokes that and grants `UPDATE (name)` instead - a
+column-level grant, the same enforcement style as `audit_log`'s
+append-only grant (Step 4): the one column that's actually meant to be
+editable (`name`, display-only) is writable, `tenant_key` is not, at the
+database level, independent of the Python code.
+
+Verified for real, connected as `shadowtracer_app` (the lab's own, not a
+copy):
+
+```
+$ psql -U shadowtracer_app -d shadowtracer -c "UPDATE tenants SET name = 'lab' WHERE id = 1;"
+UPDATE 1
+
+$ psql -U shadowtracer_app -d shadowtracer -c "UPDATE tenants SET tenant_key = 'hacked' WHERE id = 1;"
+ERROR:  permission denied for table tenants
+```
+
+`tenant_key` confirmed unchanged afterward. A permanent regression test
+(`test_tenant_key_cannot_be_updated_even_by_the_app_role`) connects as
+the restricted role the same way and asserts both halves - full suite
+green (65 tests).
+
 ## Open items
 
 - **Full interactive browser verification is still not done.** Blocked on
