@@ -520,6 +520,33 @@ ERROR:  permission denied for table tenants
 the restricted role the same way and asserts both halves - full suite
 green (65 tests).
 
+### 5. Kafka partition count
+
+`shadowtracer.events.raw` was running on 1 (or, by the time anyone
+checked, 3) partitions - never explicitly set, just whatever
+`auto.create.topics.enable` happened to create on first use.
+`deploy/lab/create-kafka-topics.sh` now provisions it explicitly at 24
+partitions, called from `smoke-test.sh` right after Kafka itself comes
+up and before anything else starts (so shipper/writer never race
+auto-create). The key (`tenant_key:agent_id`, unchanged) is why this had
+to be decided deliberately rather than tuned later - see DECISIONS.md's
+"Kafka partition count" entry for the full reasoning (parallelism
+ceiling, and why growing the count later reshuffles per-agent ordering).
+
+Verified for real: deleted the old topic, ran `create-kafka-topics.sh`,
+confirmed 24 partitions via `kafka-topics.sh --describe`, restarted
+`writer-1`/`writer-2` and confirmed the split:
+
+```
+$ kafka-consumer-groups.sh --describe --group shadowtracer-writer
+... 12 partitions owned by writer-1 (172.28.0.40)
+... 12 partitions owned by writer-2 (172.28.0.41)
+```
+
+Full `smoke-test.sh` green afterward, and a second run confirms
+`create-kafka-topics.sh` is idempotent (`"... already exists, leaving it
+alone"`) rather than re-creating or resizing on every lab bring-up.
+
 ## Open items
 
 - **Full interactive browser verification is still not done.** Blocked on

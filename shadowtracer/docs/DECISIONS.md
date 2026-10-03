@@ -306,3 +306,41 @@ via) the same `wazuh` uid, so the cross-container uid mismatch this shim
 works around doesn't exist in that topology. Packaging that sidecar
 (install alongside the manager package, not a standalone container image)
 is tracked as Phase 5+ work - out of scope for the lab's walking skeleton.
+
+## Kafka partition count: 24, set once, not resized later
+
+`shadowtracer.events.raw` is provisioned explicitly at 24 partitions
+(`deploy/lab/create-kafka-topics.sh`), keyed by `tenant_key:agent_id`
+(`shipper.py`) - not left to `auto.create.topics.enable`'s implicit
+default of 1, which is what the topic had been silently running on.
+
+**Why 24, and why this has to be decided up front rather than tuned
+later:**
+
+- **Partition count is a hard ceiling on parallelism**, for both the
+  writer (Phase 3/4) and correlation workers (Phase 5+): a Kafka consumer
+  group can never have more *active* consumers than partitions - the
+  Nth+1 consumer in a group sits idle once every partition already has an
+  owner. 2 writer replicas need at least 2 partitions to split work at
+  all (3 happened to allow a 2/1 split by accident); 24 leaves headroom
+  for both the writer and, later, parallel correlation workers to scale
+  out independently without hitting that ceiling immediately.
+- **Growing the partition count later reshuffles key-to-partition
+  mapping for every existing key.** Kafka routes a keyed message to
+  `hash(key) % partition_count` - changing the denominator changes the
+  result for most keys, not just the new ones. Since the key is
+  `tenant_key:agent_id`, that means most agents would land on a
+  *different* partition than the one carrying their event history,
+  breaking the per-agent ordering guarantee the partition scheme exists
+  for in the first place (two events from the same agent can arrive out
+  of order if they're suddenly split across two different partitions
+  mid-stream). Partitions can only be grown, never shrunk, so
+  under-provisioning is a one-way door too. Picking a number with real
+  headroom now avoids ever needing to cross that door.
+- **24 is deliberately generous for this lab's current load, not derived
+  from a specific target throughput** - the cost of an oversized
+  partition count (more files, more per-partition overhead) is far
+  cheaper here than the cost of a resize-triggered reordering incident
+  later. Revisit with real production throughput numbers before Phase 9;
+  this is a lab-scale placeholder for "comfortably more than 2", not a
+  capacity-planning result.

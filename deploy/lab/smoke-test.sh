@@ -22,6 +22,22 @@ check() {
 }
 
 echo "--- bringing up the lab ---"
+# Kafka first, alone: the events topic must be explicitly provisioned
+# (create-kafka-topics.sh - 24 partitions, see DECISIONS.md) before
+# shipper/writer start and race it via auto.create.topics.enable's
+# implicit 1-partition default.
+docker compose up -d kafka
+waited=0
+until docker exec shadowtracer-lab-kafka-1 /opt/kafka/bin/kafka-topics.sh \
+    --bootstrap-server localhost:9092 --list >/dev/null 2>&1; do
+    sleep 2
+    waited=$((waited + 2))
+    if [ "$waited" -ge 60 ]; then
+        echo "FAIL: kafka did not become ready within 60s"
+        exit 1
+    fi
+done
+./create-kafka-topics.sh
 docker compose up -d
 
 # Only wait on the services expected to reach healthy. agent-rocky-1/2 have a
