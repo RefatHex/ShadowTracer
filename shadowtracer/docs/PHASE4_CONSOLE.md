@@ -547,17 +547,68 @@ Full `smoke-test.sh` green afterward, and a second run confirms
 `create-kafka-topics.sh` is idempotent (`"... already exists, leaving it
 alone"`) rather than re-creating or resizing on every lab bring-up.
 
+### 6. The real browser check - and a real bug it found
+
+Chromium's missing shared libraries (`libnspr4` and others) are now
+installed in this environment (`sudo npx playwright install-deps
+chromium`) - confirmed present (`ldconfig -p`, `dpkg -l`) and Chromium
+launches for real. Ran the actual check against the real lab (`https://
+localhost:8443`, the same Caddy-fronted deployment `smoke-test.sh` uses,
+not a dev server): log in, confirm the live alert list renders, confirm
+an attacker-controlled payload renders as text, confirm a page reload
+keeps the session.
+
+The first two passed immediately. The XSS check passed against a
+synthetic ClickHouse event inserted directly (`message` containing a
+real `<script>` tag and an `<img onerror>` payload, same shape as
+`AlertRow.test.tsx`'s jsdom test) - no `<script>`/`<img>` element
+matching the payload exists in the real DOM, `window.__xss_fired` was
+never set, and the payload is visible as literal text.
+
+**The reload check failed - for real, not a tooling problem.** A reload
+always showed the login form again, even with a valid refresh cookie
+still in the browser. Root cause: `AuthContext.tsx`'s `session` state
+always started `null` and nothing ever called `api.refresh()` (which
+already existed and already worked - proven by the backend's own
+`test_refresh_rotates_token_and_replay_revokes_family`) to try restoring
+it from the cookie on load. The refresh-token rotation design existed
+end-to-end on the backend but was never actually wired to anything that
+used it after the initial login.
+
+Fixed in `AuthContext.tsx`: a one-time effect on mount calls
+`api.refresh()`; a successful response (real `access_token` present, not
+just a 200) restores the session, any failure (no cookie, expired,
+`{}` from an untouched mock in tests) leaves the user logged out, same
+as any other failed auth. `App.tsx` holds off rendering either the login
+form or the alert list until that check resolves (a new `restoring`
+flag), so a reload with a good cookie never flashes the login form
+first. New regression test
+(`restores the session from the refresh cookie on mount, without showing
+the login form`) locks this in at the component level; the two existing
+App tests updated to wait for the mount-time check to resolve first.
+
+Re-ran the full check after rebuilding the lab's `caddy` image with the
+fix:
+
+```
+LOGGED IN, alert list visible: true
+real <script> element matching payload: 0
+real <img src=x> element matching payload: 0
+window.__xss_fired actually set (script executed): false
+payload visible as literal text: true
+after reload, login form present (session lost): false
+after reload, alerts text still present (session kept): true
+```
+
+Frontend suite green (8 tests, was 7), production build still succeeds,
+full `smoke-test.sh` still green.
+
 ## Open items
 
-- **Full interactive browser verification is still not done.** Blocked on
-  Chromium's missing shared libraries (`libnspr4` and likely others) in
-  this sandboxed environment, with no passwordless sudo to install them.
-  What *is* verified for real (Step 6, unchanged): production build
-  succeeds, Vite dev server serves the app, component tests exercise a
-  real DOM (jsdom) including the XSS property specifically.
 - **The load-balancer fix's CMocka regression test has still never
   executed anywhere** (`PHASE3_DATA_PLATFORM.md`, `UPSTREAM.md`) - blocked
   on unrelated build dependencies in this environment. The live
   load-balancer re-test (20/20) remains the only validation that has run.
-- Everything else from Steps 1-7 and follow-ups 1-2 is verified for real
-  against live infrastructure, as documented above.
+- Everything else from Steps 1-7 and follow-ups 1-6 is verified for real
+  against live infrastructure, as documented above - including, as of
+  follow-up 6, full interactive browser verification.

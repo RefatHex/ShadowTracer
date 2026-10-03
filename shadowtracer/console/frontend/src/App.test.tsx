@@ -46,7 +46,9 @@ describe('App: login then live alert list', () => {
 
     render(<App />)
 
-    expect(screen.getByLabelText(/email/i)).toBeInTheDocument()
+    // AuthContext tries a silent refresh-cookie restore on mount first -
+    // with no cookie in this test, it resolves to the login form.
+    await waitFor(() => expect(screen.getByLabelText(/email/i)).toBeInTheDocument())
 
     await user.type(screen.getByLabelText(/email/i), 'viewer@example.com')
     await user.type(screen.getByLabelText(/password/i), 'correct horse battery staple')
@@ -62,10 +64,36 @@ describe('App: login then live alert list', () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ detail: 'invalid credentials' }), { status: 401 }))
 
     render(<App />)
+    await waitFor(() => expect(screen.getByLabelText(/email/i)).toBeInTheDocument())
     await user.type(screen.getByLabelText(/email/i), 'viewer@example.com')
     await user.type(screen.getByLabelText(/password/i), 'wrong')
     await user.click(screen.getByRole('button', { name: /sign in/i }))
 
     await waitFor(() => expect(screen.getByText(/invalid email or password/i)).toBeInTheDocument())
+  })
+
+  it('restores the session from the refresh cookie on mount, without showing the login form', async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>
+
+    fetchMock.mockImplementation((url: string) => {
+      if (url.toString().includes('/auth/refresh')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: 'restored-token', token_type: 'bearer', tenant_id: 1, role: 'viewer' }), {
+            status: 200,
+          }),
+        )
+      }
+      if (url.toString().includes('/api/alerts')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ alerts: [], next_cursor: null }), { status: 200 }),
+        )
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    })
+
+    render(<App />)
+
+    await waitFor(() => expect(screen.getByText(/recent alerts/i)).toBeInTheDocument())
+    expect(screen.queryByLabelText(/email/i)).not.toBeInTheDocument()
   })
 })
