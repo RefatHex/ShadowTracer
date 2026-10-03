@@ -33,27 +33,27 @@ def _event_row(tenant_id: str, alert_id: str, time: datetime.datetime, message: 
 
 
 @pytest.fixture
-def ch_client(lab_env):
+def ch_client(lab_env, test_clickhouse_db):
     client = clickhouse_connect.get_client(
         host="127.0.0.1", port=8123,
         username=lab_env["CLICKHOUSE_USER"], password=lab_env["CLICKHOUSE_PASSWORD"],
-        database="shadowtracer",
+        database=test_clickhouse_db,
     )
     yield client
     client.close()
 
 
 @pytest.fixture
-def app_settings(lab_env):
+def app_settings(lab_env, test_postgres_db, test_clickhouse_db):
     return Settings(
         jwt_secret="test-jwt-secret-" + "x" * 40,
         database_url=(
             f"postgresql+psycopg2://shadowtracer_app:{lab_env['APP_DB_PASSWORD']}"
-            f"@127.0.0.1:5432/{lab_env['POSTGRES_DB']}"
+            f"@127.0.0.1:5432/{test_postgres_db}"
         ),
         clickhouse_host="127.0.0.1", clickhouse_port=8123,
         clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
-        clickhouse_database="shadowtracer",
+        clickhouse_database=test_clickhouse_db,
         kafka_bootstrap_servers="127.0.0.1:9094",
         writer_consumer_group="shadowtracer-writer",
     )

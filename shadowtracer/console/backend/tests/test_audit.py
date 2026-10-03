@@ -59,7 +59,7 @@ def test_genesis_hash_is_used_for_the_first_row(db, tenant_id):
     assert row["prev_hash"] == GENESIS_HASH
 
 
-def test_append_works_under_the_restricted_app_role(lab_env, tenant_id, db):
+def test_append_works_under_the_restricted_app_role(lab_env, test_postgres_db, tenant_id, db):
     """Regression test for a real bug found building this: SELECT ... FOR
     UPDATE requires UPDATE privilege on the table in Postgres, even just
     to take the row lock - using it to serialize concurrent appends would
@@ -73,7 +73,7 @@ def test_append_works_under_the_restricted_app_role(lab_env, tenant_id, db):
 
     restricted_url = (
         f"postgresql+psycopg2://shadowtracer_app:{lab_env['APP_DB_PASSWORD']}"
-        f"@127.0.0.1:5432/{lab_env['POSTGRES_DB']}"
+        f"@127.0.0.1:5432/{test_postgres_db}"
     )
     engine = create_engine(restricted_url)
     Session = sessionmaker(bind=engine)

@@ -105,6 +105,22 @@ for component in shipper writer; do
     fi
 done
 
+# Tests must never touch the lab's real data: both test suites' conftest.py
+# must define the refusal guard (and actually call it from their
+# session-scoped database-setup fixtures) - a conftest.py that lost this
+# function, or stopped calling it, could silently start truncating/
+# inserting into the lab's real Postgres/ClickHouse again.
+for conftest_file in shadowtracer/console/backend/tests/conftest.py shadowtracer/ingest/tests/conftest.py; do
+    [ -f "$conftest_file" ] || { die "$conftest_file is missing"; continue; }
+    guard_fn=$(grep -oE '_refuse_if_pointed_at_lab_[a-z_]*' "$conftest_file" | head -1)
+    [ -n "$guard_fn" ] || { die "$conftest_file has no _refuse_if_pointed_at_lab_* guard function"; continue; }
+    grep -qE "^def ${guard_fn}" "$conftest_file" \
+        || die "$conftest_file's ${guard_fn} is referenced but never defined"
+    call_count=$(grep -c "${guard_fn}(" "$conftest_file")
+    [ "$call_count" -ge 2 ] \
+        || die "$conftest_file's ${guard_fn} is defined but never called from a fixture"
+done
+
 if [ "$fail" -eq 0 ]; then
     echo "check-project.sh: OK"
 else

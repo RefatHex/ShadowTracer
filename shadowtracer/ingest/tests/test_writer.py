@@ -4,6 +4,7 @@ import uuid
 
 from confluent_kafka import Producer
 
+from conftest import TEST_CLICKHOUSE_DB
 from shadowtracer_ingest import writer
 from shadowtracer_ingest.metrics import Metrics
 
@@ -31,7 +32,7 @@ def _start_writer(kafka_bootstrap, topic, ch_env):
             clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
             clickhouse_user=ch_env["CLICKHOUSE_USER"],
             clickhouse_password=ch_env["CLICKHOUSE_PASSWORD"],
-            clickhouse_database="shadowtracer",
+            clickhouse_database=TEST_CLICKHOUSE_DB,
             metrics=metrics,
             stop_flag=stop_flag,
             started_flag=started_flag,
@@ -115,7 +116,7 @@ def test_writer_restart_mid_ingest_no_loss_no_duplicates(
                 bootstrap_servers=kafka_bootstrap, topic=kafka_topic, group_id=gid,
                 clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
                 clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
-                clickhouse_database="shadowtracer", metrics=metrics2, stop_flag=stop2, started_flag=started2,
+                clickhouse_database=TEST_CLICKHOUSE_DB, metrics=metrics2, stop_flag=stop2, started_flag=started2,
             ),
             daemon=True,
         )
@@ -173,7 +174,7 @@ def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_top
                 bootstrap_servers=kafka_bootstrap, topic=kafka_topic, group_id=group_id,
                 clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
                 clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
-                clickhouse_database="shadowtracer", metrics=metrics, stop_flag=stop_flag, started_flag=started_flag,
+                clickhouse_database=TEST_CLICKHOUSE_DB, metrics=metrics, stop_flag=stop_flag, started_flag=started_flag,
             ),
             daemon=True,
         )
@@ -247,7 +248,7 @@ def test_failover_clickhouse_skips_a_dead_host():
 
     ch = _FailoverClickHouse(
         hosts=[("127.0.0.1", 1), ("127.0.0.1", 8123)],  # port 1: nothing listens there
-        user=env["CLICKHOUSE_USER"], password=env["CLICKHOUSE_PASSWORD"], database="shadowtracer",
+        user=env["CLICKHOUSE_USER"], password=env["CLICKHOUSE_PASSWORD"], database=TEST_CLICKHOUSE_DB,
     )
     used = ch.insert("events", [], column_names=["tenant_id"])
     assert used == 1  # fell through to the second (working) host

@@ -11,7 +11,7 @@ from app.models import tenants, users
 
 
 @pytest.fixture
-def app_settings(lab_env):
+def app_settings(lab_env, test_postgres_db, test_clickhouse_db):
     return Settings(
         jwt_secret="test-jwt-secret-" + "x" * 40,
         # The restricted role, matching what the real app connects as -
@@ -19,11 +19,11 @@ def app_settings(lab_env):
         # under the same DB permissions production actually has.
         database_url=(
             f"postgresql+psycopg2://shadowtracer_app:{lab_env['APP_DB_PASSWORD']}"
-            f"@127.0.0.1:5432/{lab_env['POSTGRES_DB']}"
+            f"@127.0.0.1:5432/{test_postgres_db}"
         ),
         clickhouse_host="127.0.0.1", clickhouse_port=8123,
         clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
-        clickhouse_database="shadowtracer",
+        clickhouse_database=test_clickhouse_db,
         kafka_bootstrap_servers="127.0.0.1:9094",
         writer_consumer_group="shadowtracer-writer",
         access_token_ttl_seconds=2,  # short, for the expiry test
