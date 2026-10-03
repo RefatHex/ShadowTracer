@@ -19,6 +19,7 @@ from .security import decode_access_token
 class CurrentUser:
     user_id: int
     tenant_id: int
+    tenant_key: str
     role: str
 
 
@@ -52,7 +53,10 @@ class RequireRole:
         if role not in self.allowed_roles:
             raise HTTPException(status_code=403, detail="insufficient role")
 
-        user = CurrentUser(user_id=int(payload["sub"]), tenant_id=payload["tenant_id"], role=role)
+        user = CurrentUser(
+            user_id=int(payload["sub"]), tenant_id=payload["tenant_id"],
+            tenant_key=payload["tenant_key"], role=role,
+        )
         request.state.current_user = user
         return user
 

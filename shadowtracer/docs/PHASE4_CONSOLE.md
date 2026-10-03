@@ -194,6 +194,13 @@ assumption (using `str(pg_tenant_id)` as the ClickHouse value in its
 fixtures) and has been corrected to use the tenant name, so it would have
 caught this had it matched the lab's real tagging from the start.
 
+**Superseded by the follow-ups below:** filtering by the tenant's *name*
+was itself a stopgap - a name is supposed to be a renameable, display-only
+label, not a stable identifier, and this design required a Postgres
+lookup on every single `/api/alerts` call. The tenant-key follow-up
+replaces this with a permanent, immutable identifier carried in the token
+itself.
+
 ## VERIFY
 
 ### Route-enumeration test fails when a role is removed, then passes
@@ -315,6 +322,52 @@ SMOKE TEST: PASS
 ```
 $ ./check-project.sh
 check-project.sh: OK
+```
+
+## Phase 4 follow-ups
+
+### 1. One permanent tenant key
+
+`tenants.tenant_key` (migration `6d5b50d3e5b5`): a random 32-hex-char
+value generated once, when `cli.py create-admin` creates a new tenant,
+and never exposed through any update path - `tenants.name` stays
+display-only and freely renameable. The access token now carries
+`tenant_key` directly (`security.create_access_token`,
+`rbac.CurrentUser`), and `GET /api/alerts` filters ClickHouse with
+`current_user.tenant_key` with no Postgres lookup at all - replacing the
+Step 7 fix's per-request `SELECT name FROM tenants WHERE id = ...`. The
+shipper is configured with `TENANT_ID=<tenant_key>` (printed by
+`create-admin`) instead of a human tenant name, so what ClickHouse's
+`events.tenant_id` column holds is the same immutable value, end to end.
+
+Verified:
+
+```
+$ python -m pytest tests/test_alerts_api.py -q
+......                                                              [100%]
+6 passed
+```
+
+- `test_alerts_scoped_to_callers_tenant` - two tenants, each with its own
+  `tenant_key`-tagged events in ClickHouse; a viewer from tenant A sees
+  only tenant A's alerts.
+- `test_renaming_a_tenant_does_not_change_which_events_it_sees` - creates
+  a tenant, confirms its alerts are visible, renames it with a raw
+  `UPDATE tenants SET name = ...` (there is no rename endpoint), logs in
+  again, confirms the exact same alerts are still visible - the rename
+  touched nothing about visibility because nothing was ever keyed on the
+  name.
+
+Full suite still green after the schema/token change (64 tests), and the
+real lab smoke test end-to-end check passes with the admin's actual
+generated `tenant_key` (`6ec120578e113843244dbe369869eaf3` for this lab)
+wired into the shipper via `deploy/lab/.env`'s new `TENANT_KEY`:
+
+```
+--- end-to-end: login, SSH brute force, alert through the API ---
+PASS: alert for smoketest1791006551 appears through /api/alerts within 30s
+---
+SMOKE TEST: PASS
 ```
 
 ## Open items

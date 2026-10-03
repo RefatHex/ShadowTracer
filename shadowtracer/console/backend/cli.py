@@ -6,6 +6,7 @@ history, process list)."""
 
 import argparse
 import getpass
+import secrets
 import sys
 
 from sqlalchemy import select
@@ -24,10 +25,18 @@ def create_admin(args) -> int:
 
     tenant_row = db.execute(select(tenants).where(tenants.c.name == args.tenant)).mappings().first()
     if tenant_row is None:
-        result = db.execute(tenants.insert().values(name=args.tenant).returning(tenants.c.id))
+        # tenant_key is permanent from this point on - generated once
+        # here, never exposed through any update path. The shipper for
+        # this tenant's manager nodes must be configured with this exact
+        # value as TENANT_ID.
+        tenant_key = secrets.token_hex(16)
+        result = db.execute(
+            tenants.insert().values(name=args.tenant, tenant_key=tenant_key).returning(tenants.c.id)
+        )
         tenant_id = result.scalar_one()
         db.commit()
-        print(f"created tenant {args.tenant!r} (id={tenant_id})")
+        print(f"created tenant {args.tenant!r} (id={tenant_id}, tenant_key={tenant_key})")
+        print("configure this tenant's shippers with TENANT_ID=" + tenant_key)
     else:
         tenant_id = tenant_row["id"]
 

@@ -84,24 +84,29 @@ def _clean_test_events(ch_client):
     ch_client.command("ALTER TABLE events DELETE WHERE cluster_node = 'testnode'")
 
 
+def _make_tenant(db, tenants, name, tenant_key):
+    return db.execute(
+        tenants.insert().values(name=name, tenant_key=tenant_key).returning(tenants.c.id)
+    ).scalar_one()
+
+
 def test_alerts_scoped_to_callers_tenant(client, db, ch_client):
-    """Postgres's tenant_id (relational, used in the JWT) and ClickHouse's
-    tenant_id column are different identifiers: ClickHouse stores the
-    tenant's *name* (what Phase 3's shipper is given as TENANT_ID), not
-    Postgres's numeric id - use the name here so this test matches what the
-    real ingest pipeline actually stamps on each event."""
+    """ClickHouse's events.tenant_id column stores the tenant's permanent
+    tenant_key (what Phase 3's shipper is given as TENANT_ID) - the same
+    value the JWT carries directly, never Postgres's numeric id and never
+    the tenant's (display-only, renameable) name."""
     from app.models import tenants
 
     marker = uuid.uuid4().hex[:8]
     now = datetime.datetime.now(datetime.timezone.utc)
-    tenant_a_name, tenant_b_name = f"tenant-a-{marker}", f"tenant-b-{marker}"
+    tenant_a_key, tenant_b_key = f"key-a-{marker}", f"key-b-{marker}"
 
-    tenant_a_id = db.execute(tenants.insert().values(name=tenant_a_name).returning(tenants.c.id)).scalar_one()
-    tenant_b_id = db.execute(tenants.insert().values(name=tenant_b_name).returning(tenants.c.id)).scalar_one()
+    tenant_a_id = _make_tenant(db, tenants, f"tenant-a-{marker}", tenant_a_key)
+    tenant_b_id = _make_tenant(db, tenants, f"tenant-b-{marker}", tenant_b_key)
     db.commit()
 
-    rows_a = [_event_row(tenant_a_name, f"a-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-a-{i}") for i in range(3)]
-    rows_b = [_event_row(tenant_b_name, f"b-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-b-{i}") for i in range(3)]
+    rows_a = [_event_row(tenant_a_key, f"a-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-a-{i}") for i in range(3)]
+    rows_b = [_event_row(tenant_b_key, f"b-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-b-{i}") for i in range(3)]
     ch_client.insert("events", rows_a + rows_b, column_names=COLUMNS)
 
     token_a = _token_for_tenant(client, db, tenant_a_id, f"viewer-a-{marker}@example.com")
@@ -114,6 +119,36 @@ def test_alerts_scoped_to_callers_tenant(client, db, ch_client):
     assert "alert-b-0" not in messages
 
 
+def test_renaming_a_tenant_does_not_change_which_events_it_sees(client, db, ch_client):
+    """tenant_key, not the display-only name, is what scopes visibility -
+    renaming the tenant (a raw UPDATE, since there's no rename endpoint)
+    must not affect which alerts its users see."""
+    from app.models import tenants
+
+    marker = uuid.uuid4().hex[:8]
+    now = datetime.datetime.now(datetime.timezone.utc)
+    tenant_key = f"key-rename-{marker}"
+    tenant_pg_id = _make_tenant(db, tenants, f"before-rename-{marker}", tenant_key)
+    db.commit()
+
+    rows = [_event_row(tenant_key, f"r-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-{i}") for i in range(2)]
+    ch_client.insert("events", rows, column_names=COLUMNS)
+
+    token = _token_for_tenant(client, db, tenant_pg_id, f"viewer-rename-{marker}@example.com")
+
+    before = client.get("/api/alerts", headers={"Authorization": f"Bearer {token}"}).json()
+    assert {a["message"] for a in before["alerts"]} == {"alert-0", "alert-1"}
+
+    db.execute(tenants.update().where(tenants.c.id == tenant_pg_id).values(name=f"after-rename-{marker}"))
+    db.commit()
+
+    # A fresh login (new token) after the rename - same tenant_key claim
+    # either way, since it was never derived from the name.
+    token_after = _token_for_tenant(client, db, tenant_pg_id, f"viewer-rename2-{marker}@example.com")
+    after = client.get("/api/alerts", headers={"Authorization": f"Bearer {token_after}"}).json()
+    assert {a["message"] for a in after["alerts"]} == {"alert-0", "alert-1"}
+
+
 def test_alerts_requires_auth(client):
     resp = client.get("/api/alerts")
     assert resp.status_code == 401
@@ -124,11 +159,11 @@ def test_alerts_keyset_pagination(client, db, ch_client):
 
     marker = uuid.uuid4().hex[:8]
     now = datetime.datetime.now(datetime.timezone.utc)
-    tenant_name = f"tenant-page-{marker}"
-    tenant_pg_id = db.execute(tenants.insert().values(name=tenant_name).returning(tenants.c.id)).scalar_one()
+    tenant_key = f"key-page-{marker}"
+    tenant_pg_id = _make_tenant(db, tenants, f"tenant-page-{marker}", tenant_key)
     db.commit()
 
-    rows = [_event_row(tenant_name, f"p-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-{i}") for i in range(5)]
+    rows = [_event_row(tenant_key, f"p-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-{i}") for i in range(5)]
     ch_client.insert("events", rows, column_names=COLUMNS)
 
     token = _token_for_tenant(client, db, tenant_pg_id, f"viewer-page-{marker}@example.com")

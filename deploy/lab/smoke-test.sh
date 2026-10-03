@@ -81,8 +81,8 @@ check "console readiness (Postgres/ClickHouse/Kafka all reachable)" \
 # containerized in this lab). Needs SMOKE_TEST_ADMIN_EMAIL/PASSWORD in
 # .env for an admin user already created via `python cli.py create-admin`
 # - this script never creates one itself (no default admin, Step 2).
-if [ -z "${SMOKE_TEST_ADMIN_EMAIL:-}" ] || [ -z "${SMOKE_TEST_ADMIN_PASSWORD:-}" ]; then
-    echo "SKIP: end-to-end alert test (set SMOKE_TEST_ADMIN_EMAIL/PASSWORD in .env - create that user first with: cd ../../shadowtracer/console/backend && python cli.py create-admin --tenant lab --email <email>)"
+if [ -z "${SMOKE_TEST_ADMIN_EMAIL:-}" ] || [ -z "${SMOKE_TEST_ADMIN_PASSWORD:-}" ] || [ -z "${TENANT_KEY:-}" ]; then
+    echo "SKIP: end-to-end alert test (set SMOKE_TEST_ADMIN_EMAIL/PASSWORD and TENANT_KEY in .env - create that user first with: cd ../../shadowtracer/console/backend && python cli.py create-admin --tenant lab --email <email>, which prints the tenant_key to put in TENANT_KEY)"
 else
     INGEST_DIR="../../shadowtracer/ingest"
     SHIPPER_PIDS=()
@@ -98,7 +98,7 @@ else
         for pair in "wazuh-worker1:alerts-worker1:9101" "wazuh-worker2:alerts-worker2:9103"; do
             manager="${pair%%:*}"; rest="${pair#*:}"; dir="${rest%%:*}"; port="${rest##*:}"
             if ! curl -s "http://127.0.0.1:$port" >/dev/null 2>&1; then
-                TENANT_ID=lab MANAGER_NAME="$manager" ALERTS_PATH="$(pwd)/$dir/alerts.json" \
+                TENANT_ID="$TENANT_KEY" MANAGER_NAME="$manager" ALERTS_PATH="$(pwd)/$dir/alerts.json" \
                     KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9094 KAFKA_TOPIC=shadowtracer.events.raw \
                     OFFSET_FILE="/tmp/smoke-test-shipper-${manager}-offsets.json" METRICS_PORT="$port" \
                     "$INGEST_DIR/.venv/bin/python" "$INGEST_DIR/run_shipper.py" \

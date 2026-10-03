@@ -63,7 +63,7 @@ def login(
         raise HTTPException(status_code=401, detail="invalid credentials")
 
     access_token = security.create_access_token(
-        settings.jwt_secret, user.id, user.tenant_id, user.role, settings.access_token_ttl_seconds,
+        settings.jwt_secret, user.id, user.tenant_id, user.tenant_key, user.role, settings.access_token_ttl_seconds,
     )
     register_secret(access_token)
 
@@ -97,7 +97,7 @@ def refresh(
 
     _set_refresh_cookie(response, new_token, settings.refresh_token_ttl_seconds)
     access_token = security.create_access_token(
-        settings.jwt_secret, user.id, user.tenant_id, user.role, settings.access_token_ttl_seconds,
+        settings.jwt_secret, user.id, user.tenant_id, user.tenant_key, user.role, settings.access_token_ttl_seconds,
     )
     register_secret(access_token)
     return TokenResponse(access_token=access_token, tenant_id=user.tenant_id, role=user.role)

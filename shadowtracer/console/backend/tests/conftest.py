@@ -79,7 +79,9 @@ def db(engine):
 @pytest.fixture
 def tenant_id(db):
     from app.models import tenants
-    result = db.execute(tenants.insert().values(name="test-tenant").returning(tenants.c.id))
+    result = db.execute(
+        tenants.insert().values(name="test-tenant", tenant_key="test-tenant-key").returning(tenants.c.id)
+    )
     db.commit()
     return result.scalar_one()
 

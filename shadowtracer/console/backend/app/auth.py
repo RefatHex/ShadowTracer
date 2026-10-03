@@ -10,13 +10,14 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from . import security
-from .models import login_attempts, refresh_tokens, users
+from .models import login_attempts, refresh_tokens, tenants, users
 
 
 @dataclass
 class AuthenticatedUser:
     id: int
     tenant_id: int
+    tenant_key: str
     email: str
     role: str
 
@@ -60,7 +61,9 @@ def authenticate(db: Session, email: str, password: str) -> AuthenticatedUser | 
     corrupted stored hash - the caller can't and shouldn't distinguish
     these (same generic "invalid credentials" response either way)."""
     row = db.execute(
-        select(users).where(users.c.email == email, users.c.is_active.is_(True))
+        select(users, tenants.c.tenant_key)
+        .join(tenants, tenants.c.id == users.c.tenant_id)
+        .where(users.c.email == email, users.c.is_active.is_(True))
     ).mappings().first()
     if row is None:
         # Still run a verify against a dummy hash so a nonexistent-user
@@ -81,7 +84,10 @@ def authenticate(db: Session, email: str, password: str) -> AuthenticatedUser | 
         db.execute(users.update().where(users.c.id == row["id"]).values(password_hash=new_hash))
         db.commit()
 
-    return AuthenticatedUser(id=row["id"], tenant_id=row["tenant_id"], email=row["email"], role=row["role"])
+    return AuthenticatedUser(
+        id=row["id"], tenant_id=row["tenant_id"], tenant_key=row["tenant_key"],
+        email=row["email"], role=row["role"],
+    )
 
 
 def issue_refresh_token(db: Session, user_id: int, family_id: str, ttl_seconds: int) -> str:
@@ -139,7 +145,11 @@ def redeem_refresh_token(db: Session, presented_token: str, ttl_seconds: int) ->
         db.commit()
         raise RefreshTokenReplayed(f"family {row['family_id']} revoked")
 
-    user_row = db.execute(select(users).where(users.c.id == row["user_id"])).mappings().first()
+    user_row = db.execute(
+        select(users, tenants.c.tenant_key)
+        .join(tenants, tenants.c.id == users.c.tenant_id)
+        .where(users.c.id == row["user_id"])
+    ).mappings().first()
     if user_row is None or not user_row["is_active"]:
         raise RefreshTokenInvalid("user no longer active")
 
@@ -147,7 +157,7 @@ def redeem_refresh_token(db: Session, presented_token: str, ttl_seconds: int) ->
     new_token = issue_refresh_token(db, row["user_id"], row["family_id"], ttl_seconds)
 
     user = AuthenticatedUser(
-        id=user_row["id"], tenant_id=user_row["tenant_id"],
+        id=user_row["id"], tenant_id=user_row["tenant_id"], tenant_key=user_row["tenant_key"],
         email=user_row["email"], role=user_row["role"],
     )
     return new_token, user

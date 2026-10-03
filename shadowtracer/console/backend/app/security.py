@@ -43,11 +43,12 @@ def needs_rehash(stored_hash: str) -> bool:
         return False
 
 
-def create_access_token(jwt_secret: str, user_id: int, tenant_id: int, role: str, ttl_seconds: int) -> str:
+def create_access_token(jwt_secret: str, user_id: int, tenant_id: int, tenant_key: str, role: str, ttl_seconds: int) -> str:
     now = int(time.time())
     payload = {
         "sub": str(user_id),
         "tenant_id": tenant_id,
+        "tenant_key": tenant_key,
         "role": role,
         "iat": now,
         "exp": now + ttl_seconds,

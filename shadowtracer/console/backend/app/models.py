@@ -14,6 +14,11 @@ tenants = Table(
     "tenants", metadata,
     Column("id", Integer, primary_key=True),
     Column("name", String(255), nullable=False, unique=True),
+    # Permanent identity, set once at creation and never exposed through
+    # any update path - the shipper stamps events with this and the
+    # access token carries it, so renaming `name` (display-only) can
+    # never change which events a tenant sees.
+    Column("tenant_key", String(64), nullable=False, unique=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now()),
 )
 
