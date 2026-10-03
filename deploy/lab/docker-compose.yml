@@ -31,10 +31,38 @@ x-console-backend-env: &console-backend-env
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   KAFKA_WRITER_GROUP: shadowtracer-writer
   CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-https://localhost:8443}
-  # Phase 3's shipper/writer run as host processes, not containers (see
-  # PHASE3_DATA_PLATFORM.md) - host.docker.internal is how a container
-  # reaches them for /health/detail's shipper-lag polling.
-  SHIPPER_METRICS_URLS: http://host.docker.internal:9101,http://host.docker.internal:9103
+  # Phase 4 follow-up 2: shipper/writer are services on this same compose
+  # network now, not host processes - reached by service name directly,
+  # no host.docker.internal needed any more.
+  SHIPPER_METRICS_URLS: http://shipper-worker1:9101,http://shipper-worker2:9101
+
+# Phase 4 follow-up 2: one shipper container per manager node, reading
+# that node's alerts volume read-only - it has no business writing to it.
+# TENANT_ID is the tenant's permanent tenant_key (follow-up 1), printed by
+# `cli.py create-admin`, never the display-only tenant name.
+x-shipper-env: &shipper-env
+  TENANT_ID: ${TENANT_KEY:?set TENANT_KEY in deploy/lab/.env, see .env.example}
+  ALERTS_PATH: /var/ossec/logs/alerts/alerts.json
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_TOPIC: shadowtracer.events.raw
+  # On the /offsets volume, not /tmp - must survive a container restart or
+  # the shipper would re-read (and re-ship) its entire backlog every time.
+  OFFSET_FILE: /offsets/offsets.json
+
+# 2 writer replicas, same consumer group - Kafka splits the topic's
+# partitions between them (VERIFY in PHASE4_CONSOLE.md).
+x-writer-env: &writer-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_TOPIC: shadowtracer.events.raw
+  KAFKA_GROUP_ID: shadowtracer-writer
+  CLICKHOUSE_HOSTS: ch-clickhouse-1:8123,ch-clickhouse-2:8123
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+  CLICKHOUSE_DATABASE: shadowtracer
+  # run_writer.py's own default (9102) differs from the shipper's (9101) -
+  # the image's HEALTHCHECK always checks 9101 unless told otherwise, so
+  # this must be explicit or the writer never reports healthy.
+  METRICS_PORT: "9102"
 
 services:
   wazuh-master:
@@ -71,8 +99,8 @@ services:
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
-      # Phase 3: the shipper (shadowtracer/ingest) tails this from the host
-      # - one shipper process per manager node, per Step 3.
+      # shipper-worker1 (Phase 4 follow-up 2) mounts this same host path
+      # read-only and tails it from there.
       - ./alerts-worker1:/var/ossec/logs/alerts
     depends_on:
       wazuh-master:
@@ -304,6 +332,88 @@ services:
       lab:
         ipv4_address: 172.28.0.34
 
+  # --- Phase 4 follow-up 2: ingest pipeline as services ------------------
+
+  shipper-worker1:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ingest.Dockerfile
+    image: shadowtracer-lab/ingest:local
+    hostname: shipper-worker1
+    command: ["python3", "run_shipper.py"]
+    environment:
+      <<: *shipper-env
+      MANAGER_NAME: wazuh-worker1
+    volumes:
+      # Read-only - the shipper has no business writing to a manager's
+      # alert log, only tailing it.
+      - ./alerts-worker1:/var/ossec/logs/alerts:ro
+      - shipper-worker1-offsets:/offsets
+    depends_on:
+      wazuh-worker1:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.38
+
+  shipper-worker2:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ingest.Dockerfile
+    image: shadowtracer-lab/ingest:local
+    hostname: shipper-worker2
+    command: ["python3", "run_shipper.py"]
+    environment:
+      <<: *shipper-env
+      MANAGER_NAME: wazuh-worker2
+    volumes:
+      - ./alerts-worker2:/var/ossec/logs/alerts:ro
+      - shipper-worker2-offsets:/offsets
+    depends_on:
+      wazuh-worker2:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.39
+
+  writer-1:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ingest.Dockerfile
+    image: shadowtracer-lab/ingest:local
+    hostname: writer-1
+    command: ["python3", "run_writer.py"]
+    environment: *writer-env
+    depends_on:
+      kafka:
+        condition: service_started
+      ch-clickhouse-1:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.40
+
+  writer-2:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ingest.Dockerfile
+    image: shadowtracer-lab/ingest:local
+    hostname: writer-2
+    command: ["python3", "run_writer.py"]
+    environment: *writer-env
+    depends_on:
+      kafka:
+        condition: service_started
+      ch-clickhouse-1:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.41
+
   # --- Phase 4 console ------------------------------------------------
 
   console-backend-1:
@@ -313,8 +423,6 @@ services:
     image: shadowtracer-lab/console-backend:local
     hostname: console-backend-1
     environment: *console-backend-env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_started
@@ -333,8 +441,6 @@ services:
     image: shadowtracer-lab/console-backend:local
     hostname: console-backend-2
     environment: *console-backend-env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_started
@@ -374,3 +480,5 @@ volumes:
   ch1-data:
   ch2-data:
   postgres-data:
+  shipper-worker1-offsets:
+  shipper-worker2-offsets:

@@ -370,10 +370,66 @@ PASS: alert for smoketest1791006551 appears through /api/alerts within 30s
 SMOKE TEST: PASS
 ```
 
+### 2. The ingest pipeline as services
+
+Phase 3's shipper and writer ran as host processes throughout Phase 3 and
+Step 7 (`shadowtracer/ingest` has no Dockerfile of its own; `smoke-test.sh`
+started them itself as a fallback). That's gone now: `deploy/lab/ingest.Dockerfile`
+builds one shared image for both (same package, different entrypoint
+script via each compose service's `command:`), and `docker-compose.yml`
+runs:
+
+- `shipper-worker1`, `shipper-worker2` - one per manager node, each
+  mounting that node's `./alerts-worker*` directory **read-only** (it has
+  no business writing to a manager's alert log) and writing its offset
+  file to its own named volume (`shipper-worker*-offsets`) so a restart
+  resumes instead of re-shipping the whole backlog. `TENANT_ID` is the
+  tenant's `tenant_key` (follow-up 1) from `deploy/lab/.env`'s `TENANT_KEY`.
+- `writer-1`, `writer-2` - same image, same `KAFKA_GROUP_ID` - Kafka
+  splits the topic's partitions between them, not duplicate work.
+- `/health/detail`'s `SHIPPER_METRICS_URLS` now points at
+  `shipper-worker1`/`shipper-worker2` by compose service name, over the
+  same network as everything else - no `host.docker.internal` needed, and
+  the `extra_hosts: host-gateway` entries on the console backends are gone.
+- `smoke-test.sh` no longer starts anything - the pipeline is just
+  compose services like everything else in the lab now, included in the
+  existing health-wait loop (same 180s-per-service pattern already used
+  for the manager/agent containers) alongside the rest.
+
+**A real bug found getting the writer healthy:** the image's
+`HEALTHCHECK` defaults to polling port 9101 (the shipper's default metrics
+port) unless `METRICS_PORT` is set, but `run_writer.py`'s own default is
+9102 - so a writer container ran correctly but never reported healthy,
+and the smoke test's wait loop would eventually time out against it.
+Fixed by setting `METRICS_PORT: "9102"` explicitly in the writer's env
+block.
+
+Verified for real:
+
+- **The writer replicas genuinely split partitions, not duplicate work** -
+  `shadowtracer.events.raw` has 3 partitions; `kafka-consumer-groups.sh
+  --describe --group shadowtracer-writer` shows partitions 0 and 1 owned
+  by `writer-1` (172.28.0.40) and partition 2 owned by `writer-2`
+  (172.28.0.41) - two different consumer IDs, two different hosts, one
+  shared group.
+- **The smoke test genuinely fails when the pipeline isn't running** -
+  stopped all 4 pipeline containers (`docker compose stop
+  shipper-worker1 shipper-worker2 writer-1 writer-2`), ran the exact
+  login → SSH-brute-force → 30s-poll sequence by hand (bypassing only the
+  script's own `docker compose up -d`, which would otherwise just restart
+  them): `found=0` - no alert, as expected, nothing silently covers for a
+  missing pipeline any more. Restarted the 4 containers and the full
+  `smoke-test.sh` passed again end to end.
+- Full suite still green (64 tests, unaffected by this follow-up),
+  `check-project.sh: OK`, act's `shellcheck-syntax` job green.
+
+```
+--- end-to-end: login, SSH brute force, alert through the API ---
+PASS: alert for smoketest1791007588 appears through /api/alerts within 30s
+---
+SMOKE TEST: PASS
+```
+
 ## Open items
 
-None outstanding. (`/health/detail`'s shipper-lag polling over
-`host.docker.internal`, noted here as untested through Step 6, is now
-exercised for real by the Step 7 smoke test's end-to-end check, which
-runs the real shipper/writer as host processes and reaches them from the
-containerized console.)
+None outstanding.
