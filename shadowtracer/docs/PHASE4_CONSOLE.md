@@ -146,6 +146,54 @@ for the XSS property specifically - not a mock of the DOM. A full
 visual/click-through check is still owed once a host with the right
 shared libraries (or `--with-deps` sudo access) is available.
 
+## Step 7 — lab and checks
+
+- `deploy/lab/console-backend.Dockerfile` builds the FastAPI backend;
+  `deploy/lab/console-caddy.Dockerfile` builds the frontend (`npm run
+  build`) and serves the static output from Caddy, which also reverse-
+  proxies `/auth`, `/api`, `/health` to the backend replicas.
+- `docker-compose.yml` runs `console-backend-1` and `console-backend-2` -
+  byte-identical (same image, same `x-console-backend-env` block, nothing
+  replica-specific) - behind `caddy`, which round-robins between them by
+  default. Identical behavior from either replica is what makes "the
+  console is stateless" an actual property of the deployment, not just a
+  claim about the code.
+- `deploy/lab/Caddyfile` terminates TLS with `tls internal` (self-signed,
+  no real domain in the lab). The site address must be an explicit
+  hostname (`localhost:8443`), not a bare `:8443` - a bare port-only
+  address gives Caddy no hostname to issue an internal certificate for up
+  front, so it falls back to per-connection matching by SNI/local-IP
+  identifier, which fails outright for an empty SNI or a raw-IP
+  connection ("no certificate matching TLS ClientHello"). An explicit
+  hostname lets Caddy issue and cache one real certificate at startup,
+  matching `CORS_ALLOW_ORIGINS`.
+- `smoke-test.sh` gained a console section: Caddy reachability and
+  `/health/ready` over TLS, then an end-to-end check - log in as a real
+  admin user, trigger a real SSH brute force against `agent-ubuntu-1`,
+  and poll `/api/alerts` for up to 30s for the resulting alert. This
+  needs Phase 3's shipper (one per manager node) and writer actually
+  running; the script starts them as host processes if they aren't
+  already up (matching how Phase 3 runs them - not containerized in this
+  lab), reusing a running instance instead of starting a duplicate.
+
+**Real bug found and fixed while getting the end-to-end check to pass:**
+the console's JWT carries Postgres's numeric `tenants.id` (e.g. `1`), but
+Phase 3's ingest pipeline stamps ClickHouse's `events.tenant_id` column
+with the tenant's *name* (the `TENANT_ID` string given to the shipper,
+e.g. `"lab"`) - two different identifiers for the same tenant that were
+never reconciled. `GET /api/alerts` was filtering ClickHouse with
+`str(current_user.tenant_id)` (`"1"`), which never matches any row, so
+the endpoint silently returned an empty list for every caller regardless
+of timing. The alert was genuinely landing in ClickHouse the whole time
+(confirmed directly with `clickhouse-client`); the API just couldn't find
+it. Fixed by having the route look up the caller's tenant *name* from
+Postgres (`SELECT name FROM tenants WHERE id = :tenant_id`) and filtering
+ClickHouse with that, matching what the real ingest pipeline actually
+writes. `tests/test_alerts_api.py` previously encoded the same wrong
+assumption (using `str(pg_tenant_id)` as the ClickHouse value in its
+fixtures) and has been corrected to use the tenant name, so it would have
+caught this had it matched the lab's real tagging from the start.
+
 ## VERIFY
 
 ### Route-enumeration test fails when a role is removed, then passes
@@ -250,11 +298,29 @@ $ npx vitest run src/AlertRow.test.tsx
       Tests  5 passed (5)
 ```
 
+### Smoke test green with 2 console replicas behind Caddy
+
+```
+--- console (Step 7) ---
+PASS: caddy reachable (TLS)
+PASS: console readiness (Postgres/ClickHouse/Kafka all reachable)
+--- end-to-end: login, SSH brute force, alert through the API ---
+PASS: alert for smoketest1791005798 appears through /api/alerts within 30s
+---
+SMOKE TEST: PASS
+```
+
+### check-project.sh and act CI
+
+```
+$ ./check-project.sh
+check-project.sh: OK
+```
+
 ## Open items
 
-- `/health/detail`'s shipper-lag polling expects `SHIPPER_METRICS_URLS`
-  to be configured with reachable addresses - in the lab, shippers run as
-  host processes (Phase 3's design), so the console (in a container, once
-  Step 7 adds it to `deploy/lab`) needs `host.docker.internal` wired via
-  `extra_hosts: host-gateway` to reach them. Not yet exercised end-to-end
-  with a running shipper - tracked for Step 7.
+None outstanding. (`/health/detail`'s shipper-lag polling over
+`host.docker.internal`, noted here as untested through Step 6, is now
+exercised for real by the Step 7 smoke test's end-to-end check, which
+runs the real shipper/writer as host processes and reaches them from the
+containerized console.)

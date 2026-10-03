@@ -1,0 +1,31 @@
+# Step 7: Caddy terminates TLS (self-signed, "tls internal" - no real
+# domain in the lab) and fronts the frontend's static build plus 2
+# console backend replicas, round-robin by default - if both replicas
+# behave identically, the console is stateless, as required.
+#
+# The site address must be an explicit hostname ("localhost:8443"), not a
+# bare ":8443" - found the hard way: a bare port-only address has no
+# hostname to issue an internal cert FOR up front, so Caddy falls back to
+# matching per-connection by SNI/local-IP identifier, which fails outright
+# for a client that sends an empty SNI or connects by raw IP ("no
+# certificate matching TLS ClientHello" / "no certificate available for
+# '<container-ip>'"). An explicit hostname lets Caddy issue and cache one
+# real certificate for that name at startup, matching CORS_ALLOW_ORIGINS.
+localhost:8443 {
+    tls internal
+
+    handle /auth/* {
+        reverse_proxy console-backend-1:8000 console-backend-2:8000
+    }
+    handle /api/* {
+        reverse_proxy console-backend-1:8000 console-backend-2:8000
+    }
+    handle /health* {
+        reverse_proxy console-backend-1:8000 console-backend-2:8000
+    }
+    handle {
+        root * /srv/frontend
+        try_files {path} /index.html
+        file_server
+    }
+}

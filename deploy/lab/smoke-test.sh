@@ -63,6 +63,90 @@ echo "$agent_out"
 check "agent-ubuntu-1 Active" "echo \"\$agent_out\" | grep agent-ubuntu-1 | grep -q Active"
 check "agent-ubuntu-2 Active" "echo \"\$agent_out\" | grep agent-ubuntu-2 | grep -q Active"
 
+echo "--- console (Step 7) ---"
+if [ -f .env ]; then
+    set -a; source .env; set +a
+fi
+
+check "caddy reachable (TLS)" \
+    "curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/health | grep -q '\"status\":\"ok\"'"
+check "console readiness (Postgres/ClickHouse/Kafka all reachable)" \
+    "curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/health/ready | grep -q '\"ready\":true'"
+
+# End-to-end: log in, generate a real SSH brute force on agent-ubuntu-1,
+# confirm the alert reaches /api/alerts within 30s - the walking skeleton's
+# whole point (Phase 4 Step 7). Needs Phase 3's shipper (one per manager
+# node) and writer actually running - started here as host processes if
+# not already up, matching how they're run throughout Phase 3 (not
+# containerized in this lab). Needs SMOKE_TEST_ADMIN_EMAIL/PASSWORD in
+# .env for an admin user already created via `python cli.py create-admin`
+# - this script never creates one itself (no default admin, Step 2).
+if [ -z "${SMOKE_TEST_ADMIN_EMAIL:-}" ] || [ -z "${SMOKE_TEST_ADMIN_PASSWORD:-}" ]; then
+    echo "SKIP: end-to-end alert test (set SMOKE_TEST_ADMIN_EMAIL/PASSWORD in .env - create that user first with: cd ../../shadowtracer/console/backend && python cli.py create-admin --tenant lab --email <email>)"
+else
+    INGEST_DIR="../../shadowtracer/ingest"
+    SHIPPER_PIDS=()
+    cleanup_shippers() {
+        for pid in "${SHIPPER_PIDS[@]:-}"; do
+            kill "$pid" 2>/dev/null || true
+        done
+    }
+    trap cleanup_shippers EXIT
+
+    if [ -x "$INGEST_DIR/.venv/bin/python" ]; then
+        CH_PW="${CLICKHOUSE_PASSWORD:-}"
+        for pair in "wazuh-worker1:alerts-worker1:9101" "wazuh-worker2:alerts-worker2:9103"; do
+            manager="${pair%%:*}"; rest="${pair#*:}"; dir="${rest%%:*}"; port="${rest##*:}"
+            if ! curl -s "http://127.0.0.1:$port" >/dev/null 2>&1; then
+                TENANT_ID=lab MANAGER_NAME="$manager" ALERTS_PATH="$(pwd)/$dir/alerts.json" \
+                    KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9094 KAFKA_TOPIC=shadowtracer.events.raw \
+                    OFFSET_FILE="/tmp/smoke-test-shipper-${manager}-offsets.json" METRICS_PORT="$port" \
+                    "$INGEST_DIR/.venv/bin/python" "$INGEST_DIR/run_shipper.py" \
+                    > "/tmp/smoke-test-shipper-${manager}.log" 2>&1 &
+                SHIPPER_PIDS+=("$!")
+            fi
+        done
+        if ! curl -s "http://127.0.0.1:9102" >/dev/null 2>&1; then
+            KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9094 KAFKA_TOPIC=shadowtracer.events.raw KAFKA_GROUP_ID=shadowtracer-writer \
+                CLICKHOUSE_HOSTS=127.0.0.1:8123,127.0.0.1:8124 CLICKHOUSE_USER="${CLICKHOUSE_USER:-shadowtracer}" \
+                CLICKHOUSE_PASSWORD="$CH_PW" CLICKHOUSE_DATABASE=shadowtracer METRICS_PORT=9102 \
+                "$INGEST_DIR/.venv/bin/python" "$INGEST_DIR/run_writer.py" > /tmp/smoke-test-writer.log 2>&1 &
+            SHIPPER_PIDS+=("$!")
+        fi
+        sleep 3
+
+        echo "--- end-to-end: login, SSH brute force, alert through the API ---"
+        login_resp="$(curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/auth/login \
+            -X POST -H "Content-Type: application/json" \
+            -d "{\"email\":\"$SMOKE_TEST_ADMIN_EMAIL\",\"password\":\"$SMOKE_TEST_ADMIN_PASSWORD\"}")"
+        access_token="$(echo "$login_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)"
+
+        if [ -z "$access_token" ]; then
+            echo "FAIL: could not log in as $SMOKE_TEST_ADMIN_EMAIL ($login_resp)"
+            fail=1
+        else
+            marker="smoketest$(date +%s)"
+            docker exec shadowtracer-lab-agent-ubuntu-1-1 sh -c \
+                "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=3 ${marker}@localhost true" \
+                >/dev/null 2>&1 || true
+
+            found=0
+            for _ in $(seq 1 30); do
+                alerts_resp="$(curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/api/alerts \
+                    -H "Authorization: Bearer $access_token")"
+                if echo "$alerts_resp" | grep -q "$marker"; then
+                    found=1
+                    break
+                fi
+                sleep 1
+            done
+            check "alert for $marker appears through /api/alerts within 30s" "[ \"$found\" = 1 ]"
+        fi
+    else
+        echo "SKIP: end-to-end alert test (shadowtracer/ingest/.venv not set up - see shadowtracer/docs/PHASE3_DATA_PLATFORM.md)"
+    fi
+fi
+
 echo "---"
 if [ "$fail" -eq 0 ]; then
     echo "SMOKE TEST: PASS"

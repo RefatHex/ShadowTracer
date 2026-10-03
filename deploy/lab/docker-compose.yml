@@ -15,6 +15,27 @@ x-agent-env: &agent-env
   MANAGER_ENROLL_HOST: wazuh-master
   ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
 
+# Phase 4 Step 7: 2 byte-identical console backend replicas (same image,
+# same env, nothing replica-specific) share this block - Caddy round-robins
+# between them, and the console being stateless means it doesn't matter
+# which one answers a given request.
+x-console-backend-env: &console-backend-env
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in deploy/lab/.env}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
+  POSTGRES_HOST: postgres
+  POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
+  CLICKHOUSE_HOST: ch-clickhouse-1
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+  CLICKHOUSE_DATABASE: shadowtracer
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_WRITER_GROUP: shadowtracer-writer
+  CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-https://localhost:8443}
+  # Phase 3's shipper/writer run as host processes, not containers (see
+  # PHASE3_DATA_PLATFORM.md) - host.docker.internal is how a container
+  # reaches them for /health/detail's shipper-lag polling.
+  SHIPPER_METRICS_URLS: http://host.docker.internal:9101,http://host.docker.internal:9103
+
 services:
   wazuh-master:
     build: *manager-build
@@ -282,6 +303,63 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.34
+
+  # --- Phase 4 console ------------------------------------------------
+
+  console-backend-1:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/console-backend.Dockerfile
+    image: shadowtracer-lab/console-backend:local
+    hostname: console-backend-1
+    environment: *console-backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_started
+      ch-clickhouse-1:
+        condition: service_started
+      kafka:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.35
+
+  console-backend-2:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/console-backend.Dockerfile
+    image: shadowtracer-lab/console-backend:local
+    hostname: console-backend-2
+    environment: *console-backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_started
+      ch-clickhouse-1:
+        condition: service_started
+      kafka:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.36
+
+  caddy:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/console-caddy.Dockerfile
+    image: shadowtracer-lab/console-caddy:local
+    hostname: caddy
+    depends_on:
+      - console-backend-1
+      - console-backend-2
+    ports:
+      - "127.0.0.1:8443:8443"
+    networks:
+      lab:
+        ipv4_address: 172.28.0.37
 
 networks:
   lab:

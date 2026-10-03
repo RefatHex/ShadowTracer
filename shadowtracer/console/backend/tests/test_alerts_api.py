@@ -86,21 +86,22 @@ def _clean_test_events(ch_client):
 
 def test_alerts_scoped_to_callers_tenant(client, db, ch_client):
     """Postgres's tenant_id (relational, used in the JWT) and ClickHouse's
-    tenant_id column (a string the shipper stamps on each event) are
-    different types in this lab - using str(pg_tenant_id) as the CH
-    column value for both tenants here makes the scoping comparison exact
-    without conflating the two concepts."""
+    tenant_id column are different identifiers: ClickHouse stores the
+    tenant's *name* (what Phase 3's shipper is given as TENANT_ID), not
+    Postgres's numeric id - use the name here so this test matches what the
+    real ingest pipeline actually stamps on each event."""
     from app.models import tenants
 
     marker = uuid.uuid4().hex[:8]
     now = datetime.datetime.now(datetime.timezone.utc)
+    tenant_a_name, tenant_b_name = f"tenant-a-{marker}", f"tenant-b-{marker}"
 
-    tenant_a_id = db.execute(tenants.insert().values(name=f"tenant-a-{marker}").returning(tenants.c.id)).scalar_one()
-    tenant_b_id = db.execute(tenants.insert().values(name=f"tenant-b-{marker}").returning(tenants.c.id)).scalar_one()
+    tenant_a_id = db.execute(tenants.insert().values(name=tenant_a_name).returning(tenants.c.id)).scalar_one()
+    tenant_b_id = db.execute(tenants.insert().values(name=tenant_b_name).returning(tenants.c.id)).scalar_one()
     db.commit()
 
-    rows_a = [_event_row(str(tenant_a_id), f"a-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-a-{i}") for i in range(3)]
-    rows_b = [_event_row(str(tenant_b_id), f"b-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-b-{i}") for i in range(3)]
+    rows_a = [_event_row(tenant_a_name, f"a-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-a-{i}") for i in range(3)]
+    rows_b = [_event_row(tenant_b_name, f"b-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-b-{i}") for i in range(3)]
     ch_client.insert("events", rows_a + rows_b, column_names=COLUMNS)
 
     token_a = _token_for_tenant(client, db, tenant_a_id, f"viewer-a-{marker}@example.com")
@@ -123,10 +124,11 @@ def test_alerts_keyset_pagination(client, db, ch_client):
 
     marker = uuid.uuid4().hex[:8]
     now = datetime.datetime.now(datetime.timezone.utc)
-    tenant_pg_id = db.execute(tenants.insert().values(name=f"tenant-page-{marker}").returning(tenants.c.id)).scalar_one()
+    tenant_name = f"tenant-page-{marker}"
+    tenant_pg_id = db.execute(tenants.insert().values(name=tenant_name).returning(tenants.c.id)).scalar_one()
     db.commit()
 
-    rows = [_event_row(str(tenant_pg_id), f"p-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-{i}") for i in range(5)]
+    rows = [_event_row(tenant_name, f"p-{marker}-{i}", now - datetime.timedelta(seconds=i), f"alert-{i}") for i in range(5)]
     ch_client.insert("events", rows, column_names=COLUMNS)
 
     token = _token_for_tenant(client, db, tenant_pg_id, f"viewer-page-{marker}@example.com")

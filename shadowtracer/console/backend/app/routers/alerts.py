@@ -11,11 +11,14 @@ scrolling list.
 import datetime
 
 import clickhouse_connect
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..config import Settings
-from ..deps import get_settings
+from ..deps import get_db, get_settings
+from ..models import tenants
 from ..rbac import ALL_ROLES, CurrentUser
 
 router = APIRouter(prefix="/api", tags=["alerts"])
@@ -69,11 +72,22 @@ def recent_alerts(
     cursor: str | None = None,
     settings: Settings = Depends(get_settings),
     current_user: CurrentUser = Depends(ALL_ROLES),
+    db: Session = Depends(get_db),
 ):
+    # ClickHouse's events.tenant_id is the tenant's *name* (what Phase 3's
+    # shipper is given as TENANT_ID), not Postgres's numeric tenants.id that
+    # the JWT carries - resolve the name here rather than conflating the two
+    # identifiers in the query.
+    tenant_name = db.execute(
+        select(tenants.c.name).where(tenants.c.id == current_user.tenant_id)
+    ).scalar_one_or_none()
+    if tenant_name is None:
+        raise HTTPException(status_code=404, detail="tenant not found")
+
     client = _get_ch_client(settings)
     try:
         where = ["tenant_id = {tenant_id:String}"]
-        params = {"tenant_id": str(current_user.tenant_id), "limit": limit}
+        params = {"tenant_id": tenant_name, "limit": limit}
 
         if cursor:
             cursor_time, cursor_alert_id = _decode_cursor(cursor)
