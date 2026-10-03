@@ -287,3 +287,22 @@ include, at minimum:
   query against ClickHouse or PostgreSQL runs without a `tenant_id`
   filter - enforced by a single RBAC dependency every route goes
   through (Step 3), not left to each route handler to remember.
+
+## Phase 4 follow-up 2: the shipper in production is a sidecar, not this lab's container
+
+The lab runs `shipper-worker1`/`shipper-worker2` as their own compose
+services (`deploy/lab/ingest.Dockerfile`), each reaching its manager
+node's alert log over a shared Docker volume. That's a lab convenience,
+not the production shape: a real deployment runs the shipper as a
+**sidecar process installed alongside the manager on the same host** (or
+in the same pod), reading `/var/ossec/logs/alerts/alerts.json` directly
+off local disk under the manager's own `wazuh` user - not over a network
+filesystem, and not depending on a separate container's lifecycle to stay
+in sync with the manager it's shipping for. This also removes the
+lab-only `chmod o+r` permission shim in `entrypoint-manager.sh`
+(`shadowtracer/docs/PHASE3_DATA_PLATFORM.md`'s open items): a true sidecar
+shares the manager's host/pod and can run as (or be granted read access
+via) the same `wazuh` uid, so the cross-container uid mismatch this shim
+works around doesn't exist in that topology. Packaging that sidecar
+(install alongside the manager package, not a standalone container image)
+is tracked as Phase 5+ work - out of scope for the lab's walking skeleton.

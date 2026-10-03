@@ -430,6 +430,79 @@ PASS: alert for smoketest1791007588 appears through /api/alerts within 30s
 SMOKE TEST: PASS
 ```
 
+Recorded separately (`shadowtracer/docs/DECISIONS.md`, "Phase 4 follow-up
+2: the shipper in production is a sidecar, not this lab's container"):
+these lab containers are a convenience, not the production shape - a real
+deployment installs the shipper as a sidecar alongside the manager,
+sharing its host/pod and uid, not as a standalone container reading over
+a shared volume.
+
+### 3. Closing the open items
+
+- **The two pre-Phase-4 checks were already done, before this phase
+  started** (commits `36bdd0bdbd`, `50af5f4544`) - not skipped, just
+  reporting them here as asked. (1) The rollup's `uniqExact` distinct-count
+  layer was tested in total isolation from the writer's
+  `insert_deduplication_token` (token disabled, 20 synthetic events
+  inserted once as a batch of 20 then replayed as three batches of
+  3/7/10): `uniqExactMerge` still read back the correct count of 20 with
+  zero help from the token, and storage was measured at ~22% of the base
+  table's compressed size on two 20,000-row datasets - full detail and
+  tables in `PHASE3_DATA_PLATFORM.md`'s "Pre-Phase-4 check" section. (2)
+  The load-balancer fix's CMocka regression test is explicitly marked
+  **NOT YET RUN** in both `PHASE3_DATA_PLATFORM.md` and `UPSTREAM.md` -
+  it still can't execute in this environment (the full CMocka suite pulls
+  in unrelated `syscollector`/`data_provider` build dependencies that
+  don't build here); the live re-test (20/20 through the real load
+  balancer) remains the only validation that has actually run. Still
+  open, unchanged from before Phase 4.
+- **act CI, full run, after clearing a stale local `act` container**
+  (`act-ShadowTracer-CI-build-agent-...`, left running from an earlier
+  invocation in this environment with a CMake cache baked for a different
+  checkout path - `docker rm -f` on that container, then a clean `act`
+  run; not a real regression, a local-runner artifact):
+
+  ```
+  $ act
+  [ShadowTracer CI/shellcheck-syntax]   ✅  Success - Main actions/checkout@v4 [54.33s]
+  [ShadowTracer CI/shellcheck-syntax]   ✅  Success - Main status=0
+  [ShadowTracer CI/shellcheck-syntax] 🏁  Job succeeded
+
+  [ShadowTracer CI/check-project    ]   ✅  Success - Main actions/checkout@v4 [56.30s]
+  [ShadowTracer CI/check-project    ]   ✅  Success - Main git fetch https://github.com/wazuh/wazuh.git tag v4.14.8 [1.17s]
+  [ShadowTracer CI/check-project    ]   ✅  Success - Main bash check-project.sh [3.98s]
+  [ShadowTracer CI/check-project    ] 🏁  Job succeeded
+
+  [ShadowTracer CI/build-agent      ]   ✅  Success - Main actions/checkout@v4 [56.30s]
+  [ShadowTracer CI/build-agent      ]   ✅  Success - Main sudo apt-get update -qq / install build deps
+  [ShadowTracer CI/build-agent      ]   ✅  Success - Main cd src && make deps TARGET=agent [23.00s]
+  [ShadowTracer CI/build-agent      ]   ✅  Success - Main cd src && make TARGET=agent -j$(nproc) [12m0.55s]
+  [ShadowTracer CI/build-agent      ] 🏁  Job succeeded
+  ```
+
+  All 3 jobs green.
+- **The browser check is still blocked, not newly broken.** Re-attempted
+  with `@playwright/test` and a fresh Chromium install: launching still
+  fails with the identical `libnspr4.so: cannot open shared object file`
+  error as the original Step 6 attempt - confirmed for real this time
+  (`find / -iname libnspr4*` and `dpkg -l | grep nspr` both come back
+  empty; no passwordless sudo to install it from here). Still open,
+  pending the system packages actually landing in this environment.
+- Open items, corrected to reflect what's actually still open as of this
+  follow-up (not Phase 3's own tracked items in `PHASE3_DATA_PLATFORM.md`,
+  which are separate and unchanged):
+
 ## Open items
 
-None outstanding.
+- **Full interactive browser verification is still not done.** Blocked on
+  Chromium's missing shared libraries (`libnspr4` and likely others) in
+  this sandboxed environment, with no passwordless sudo to install them.
+  What *is* verified for real (Step 6, unchanged): production build
+  succeeds, Vite dev server serves the app, component tests exercise a
+  real DOM (jsdom) including the XSS property specifically.
+- **The load-balancer fix's CMocka regression test has still never
+  executed anywhere** (`PHASE3_DATA_PLATFORM.md`, `UPSTREAM.md`) - blocked
+  on unrelated build dependencies in this environment. The live
+  load-balancer re-test (20/20) remains the only validation that has run.
+- Everything else from Steps 1-7 and follow-ups 1-2 is verified for real
+  against live infrastructure, as documented above.
