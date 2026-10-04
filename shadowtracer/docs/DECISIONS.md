@@ -344,3 +344,31 @@ later:**
   later. Revisit with real production throughput numbers before Phase 9;
   this is a lab-scale placeholder for "comfortably more than 2", not a
   capacity-planning result.
+
+## Phase 5A Step 2/3: fingerprints are tenant-scoped, not a shared library
+
+The fingerprint hash itself (Step 3) never includes tenant-identifying
+data - sorted rule groups, MITRE technique order, actor/target class,
+volume and duration buckets only - so the same attack shape in two
+different tenants hashes to the literal same value. That does not mean
+the two tenants share one fingerprint row: `fingerprints`' primary key is
+`(tenant_key, fingerprint_key)`, and every occurrence, verdict and
+suppression decision is scoped to the tenant that owns it.
+
+**Why, given a cross-tenant library is the more obviously valuable
+feature:** every other part of this project enforces hard tenant
+isolation as a hard rule - RBAC on every route, `tenant_key`-filtered
+ClickHouse queries, the audit log - and a shared occurrence count breaks
+that rule the moment it's useful: if tenant B can see "this fingerprint
+has occurred 50 times" and tenant A was 49 of those occurrences, tenant B
+has just learned tenant A was attacked, without ever touching tenant A's
+own data directly. A suppression decision is worse: one tenant's analysts
+marking a pattern as a false positive would silently lower its visibility
+for every other tenant too, including ones who've never seen it and have
+no way to know their own view of a real attack was quietly deprioritized
+by someone else's triage call.
+
+The real cost of this choice: the library doesn't get smarter from
+cross-customer volume the way a shared-fingerprint design would. Revisit
+only with an explicit, opt-in, genuinely anonymized threat-intel-sharing
+design - not as a side effect of how the hash happens to be computed.
