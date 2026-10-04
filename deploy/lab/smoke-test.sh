@@ -62,7 +62,8 @@ docker compose up -d
 # healthy - that's not a smoke-test regression, so --wait (which waits on
 # every service) would always time out here.
 for svc in wazuh-master wazuh-worker1 wazuh-worker2 agent-ubuntu-1 agent-ubuntu-2 \
-    shipper-worker1 shipper-worker2 writer-1 writer-2; do
+    shipper-worker1 shipper-worker2 writer-1 writer-2 \
+    correlate-1 correlate-2 closer-1 closer-2; do
     cid="$(docker compose ps -q "$svc")"
     waited=0
     while [ "$(docker inspect -f '{{.State.Health.Status}}' "$cid")" != "healthy" ]; do

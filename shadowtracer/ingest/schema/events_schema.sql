@@ -147,3 +147,30 @@ GROUP BY tenant_id, hour, agent_id, agent_name, rule_id, rule_level;
 --   SELECT ..., uniqExactMerge(identity_state) AS event_count
 --   FROM __DATABASE__.events_hourly_rollup GROUP BY ...
 -- never raw sum(event_count) - there is no such column any more.
+
+-- Phase 5A Step 3: one row per closed incident - the Attack Library's
+-- occurrence history. Mutable fingerprint state (label, notes, verdicts,
+-- suppression) lives in PostgreSQL; occurrence COUNTS come from here,
+-- not a counter column anywhere, so a closer retrying after a crash
+-- between this insert and its own PostgreSQL commit can never desync the
+-- two - see closer.py. Deliberately a plain (non-deduplicating)
+-- ReplicatedMergeTree: always read occurrence counts via
+-- uniqExact(incident_id), the same "exact count immune to duplicate
+-- insert blocks" pattern events_hourly_rollup already uses, rather than
+-- relying on merge-time row dedup.
+CREATE TABLE IF NOT EXISTS __DATABASE__.fingerprint_occurrences ON CLUSTER lab_cluster
+(
+    tenant_id       LowCardinality(String),
+    fingerprint_key String,
+    incident_id     UInt64,
+    closed_at       DateTime64(3),
+    alert_count     UInt32
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/__KEEPER_PREFIX__{shard}/fingerprint_occurrences', '{replica}')
+PARTITION BY toYYYYMM(closed_at)
+ORDER BY (tenant_id, fingerprint_key, incident_id);
+
+-- Console rule: always read occurrence counts as
+--   SELECT tenant_id, fingerprint_key, uniqExact(incident_id) AS occurrences
+--   FROM __DATABASE__.fingerprint_occurrences GROUP BY tenant_id, fingerprint_key
+-- never a plain count() - see this table's own header.

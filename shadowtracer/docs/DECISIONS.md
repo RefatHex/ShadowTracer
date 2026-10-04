@@ -372,3 +372,33 @@ The real cost of this choice: the library doesn't get smarter from
 cross-customer volume the way a shared-fingerprint design would. Revisit
 only with an explicit, opt-in, genuinely anonymized threat-intel-sharing
 design - not as a side effect of how the hash happens to be computed.
+
+## Phase 5A Step 1: correlation state lives only in PostgreSQL, never in a worker's memory
+
+The correlator keeps zero incident state in process memory between
+messages - every lookup, append, and aggregate update reads and writes
+`incidents`/`incident_alerts` directly, inside one transaction per alert.
+This is slower per-alert than an in-memory session cache would be, and
+deliberate: the 24-partition topic's key (`tenant_key:agent_id`) only
+guarantees a given agent's events stay *ordered* on one partition, not
+that the same worker keeps owning that partition forever. A Kafka
+rebalance (a worker joining, leaving, or crashing) can hand an agent's
+partition to a different worker mid-attack at any moment, and an
+in-memory design would lose that agent's in-flight incident state the
+instant it did - silently splitting one real attack into two incidents,
+unprovably, since nothing would ever report the handoff happened. Making
+PostgreSQL the only source of truth means a rebalance is invisible to the
+correlation result: whichever worker picks up the partition next reads
+the exact same state the previous one left, mid-incident, and keeps
+going. Verified for real in `test_killing_a_worker_mid_attack_...` by
+killing a consumer thread outright (not a graceful stop) and starting a
+replacement in the same consumer group.
+
+The closer follows the same principle for a different hazard: closing is
+a background sweep over ALL incidents (not partitioned), so running more
+than one closer replica is a genuine concurrent-access problem, not just
+a rebalance edge case. `pg_try_advisory_xact_lock` keyed on the
+incident's id - the same mechanism `app/audit.py` already uses for
+`append_entry`, just a per-incident key instead of one fixed key - makes
+losing the race for a given incident a normal, silent no-op rather than
+a double-close.

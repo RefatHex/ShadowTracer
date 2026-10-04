@@ -64,6 +64,38 @@ x-writer-env: &writer-env
   # this must be explicit or the writer never reports healthy.
   METRICS_PORT: "9102"
 
+# Phase 5A Step 1: 2 correlator replicas, same consumer group as a SECOND,
+# independent group on the same events topic (never ClickHouse) - Kafka
+# splits the 24 partitions between them the same way it does for
+# writer-1/writer-2.
+x-correlate-env: &correlate-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_TOPIC: shadowtracer.events.raw
+  KAFKA_GROUP_ID: shadowtracer-correlate
+  POSTGRES_HOST: postgres
+  POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
+  SESSION_GAP_SECONDS: "600"
+  MAX_SPAN_SECONDS: "14400"
+  METRICS_PORT: "9104"
+
+# 2 closer replicas - deliberately run more than one, same as the
+# correlators, so the advisory-lock protection (closer.py) is exercised
+# for real in the lab, not just in a unit test with 2 threads.
+x-closer-env: &closer-env
+  POSTGRES_HOST: postgres
+  POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
+  CLICKHOUSE_HOST: ch-clickhouse-1
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+  CLICKHOUSE_DATABASE: shadowtracer
+  SESSION_GAP_SECONDS: "600"
+  # The lab's own docker network - see networks.lab.ipam below.
+  INTERNAL_IP_RANGES: "172.28.0.0/24"
+  CLOSER_POLL_INTERVAL_SECONDS: "30"
+  METRICS_PORT: "9105"
+
 services:
   wazuh-master:
     build: *manager-build
@@ -413,6 +445,76 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.41
+
+  # --- Phase 5A: correlation engine --------------------------------------
+
+  correlate-1:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/correlate.Dockerfile
+    image: shadowtracer-lab/correlate:local
+    hostname: correlate-1
+    command: ["python3", "run_correlator.py"]
+    environment: *correlate-env
+    depends_on:
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.42
+
+  correlate-2:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/correlate.Dockerfile
+    image: shadowtracer-lab/correlate:local
+    hostname: correlate-2
+    command: ["python3", "run_correlator.py"]
+    environment: *correlate-env
+    depends_on:
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.43
+
+  closer-1:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/correlate.Dockerfile
+    image: shadowtracer-lab/correlate:local
+    hostname: closer-1
+    command: ["python3", "run_closer.py"]
+    environment: *closer-env
+    depends_on:
+      postgres:
+        condition: service_started
+      ch-clickhouse-1:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.44
+
+  closer-2:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/correlate.Dockerfile
+    image: shadowtracer-lab/correlate:local
+    hostname: closer-2
+    command: ["python3", "run_closer.py"]
+    environment: *closer-env
+    depends_on:
+      postgres:
+        condition: service_started
+      ch-clickhouse-1:
+        condition: service_started
+    networks:
+      lab:
+        ipv4_address: 172.28.0.45
 
   # --- Phase 4 console ------------------------------------------------
 

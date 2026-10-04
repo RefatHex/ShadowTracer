@@ -105,12 +105,23 @@ for component in shipper writer; do
     fi
 done
 
+# Phase 5A Step 1: same requirement for the correlation consumer and
+# (Step 1's closer, once it exists) - a test that only proves
+# process_event()/close logic works when called directly would miss a
+# main loop that never actually starts draining.
+for component in correlator closer; do
+    test_file=$(grep -lRE "^def test_.*${component}.*draining" shadowtracer/correlate/tests/ 2>/dev/null | head -1)
+    if [ -d shadowtracer/correlate/tests ] && [ -z "$test_file" ]; then
+        die "shadowtracer/correlate/tests/ has no started-and-draining test for ${component} (a test function matching test_.*${component}.*draining)"
+    fi
+done
+
 # Tests must never touch the lab's real data: both test suites' conftest.py
 # must define the refusal guard (and actually call it from their
 # session-scoped database-setup fixtures) - a conftest.py that lost this
 # function, or stopped calling it, could silently start truncating/
 # inserting into the lab's real Postgres/ClickHouse again.
-for conftest_file in shadowtracer/console/backend/tests/conftest.py shadowtracer/ingest/tests/conftest.py; do
+for conftest_file in shadowtracer/console/backend/tests/conftest.py shadowtracer/ingest/tests/conftest.py shadowtracer/correlate/tests/conftest.py; do
     [ -f "$conftest_file" ] || { die "$conftest_file is missing"; continue; }
     guard_fn=$(grep -oE '_refuse_if_pointed_at_lab_[a-z_]*' "$conftest_file" | head -1)
     [ -n "$guard_fn" ] || { die "$conftest_file has no _refuse_if_pointed_at_lab_* guard function"; continue; }
