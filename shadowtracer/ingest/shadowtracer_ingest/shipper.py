@@ -26,8 +26,9 @@ import json
 import os
 import time
 
-from confluent_kafka import Producer
+from confluent_kafka import KafkaException, Producer
 
+from .dead_letter import send_to_dead_letter
 from .metrics import Metrics
 
 BATCH_MAX_LINES = 500
@@ -65,7 +66,12 @@ class TailSource:
         except FileNotFoundError:
             return
         if self._fd is None:
-            self._fd = open(self.path, "r")
+            # Binary, not text mode - a text-mode file object raises
+            # UnicodeDecodeError straight out of readline() on invalid
+            # UTF-8 bytes, which would crash this generator (and the
+            # whole shipper loop) on the very first bad byte instead of
+            # dead-lettering just that one line and reading on past it.
+            self._fd = open(self.path, "rb")
             if self.inode == st.st_ino:
                 self._fd.seek(self.offset)
             else:
@@ -83,16 +89,23 @@ class TailSource:
         count = 0
         while count < max_lines:
             pos_before = self._fd.tell()
-            line = self._fd.readline()
-            if not line:
+            raw_line = self._fd.readline()
+            if not raw_line:
                 break
-            if not line.endswith("\n"):
+            if not raw_line.endswith(b"\n"):
                 # Partial line at EOF (writer hasn't finished it yet) -
                 # rewind and wait for more.
                 self._fd.seek(pos_before)
                 break
             self.offset = self._fd.tell()
-            yield line.rstrip("\n"), self.offset
+            # errors="replace", never strict: invalid UTF-8 bytes become
+            # U+FFFD rather than raising here - the resulting (now valid
+            # Python str) line fails JSON parsing naturally downstream
+            # and gets dead-lettered there, instead of one bad byte
+            # anywhere in the file stopping every line behind it from
+            # ever being read at all.
+            line = raw_line.rstrip(b"\n").decode("utf-8", errors="replace")
+            yield line, self.offset
             count += 1
 
         try:
@@ -129,7 +142,12 @@ def run(
     offset_file: str,
     metrics: Metrics,
     stop_flag,
+    ch_client=None,
 ):
+    """ch_client is optional (None is fine, e.g. in tests that don't care
+    about dead-letter counts) - a malformed line still always goes to the
+    Kafka dead-letter topic either way; ch_client only adds the
+    queryable-per-tenant-count side of send_to_dead_letter."""
     offsets = load_offsets(offset_file)
     sources = {"alerts.json": TailSource(alerts_path, offsets.get("alerts.json", {}))}
     if archives_path:
@@ -157,8 +175,8 @@ def run(
         for source_name, source in sources.items():
             batch = []
             deadline = time.monotonic() + BATCH_MAX_SECONDS
-            for line, _ in source.read_lines(BATCH_MAX_LINES):
-                batch.append(line)
+            for line, byte_offset in source.read_lines(BATCH_MAX_LINES):
+                batch.append((line, byte_offset))
                 metrics.incr("lines_read")
                 if time.monotonic() > deadline:
                     break
@@ -167,24 +185,46 @@ def run(
             did_work = True
 
             delivery_errors.clear()
-            for line in batch:
+            for line, byte_offset in batch:
                 try:
                     agent_id = extract_agent_id(line)
-                except (json.JSONDecodeError, AttributeError):
+                except Exception as exc:  # noqa: BLE001 - any parse failure is permanent, never retried: dead-letter and move on (deeply nested JSON, invalid UTF-8, wrong types, ... none of these succeed on a retry)
                     metrics.incr("lines_failed")
+                    send_to_dead_letter(
+                        kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_id,
+                        component="shipper", source_location=f"{source.path}:{byte_offset}",
+                        error=f"{type(exc).__name__}: {exc}", raw_event=line,
+                    )
                     continue
                 key = f"{tenant_id}:{agent_id}".encode()
-                producer.produce(
-                    topic,
-                    key=key,
-                    value=line.encode(),
-                    headers=[
-                        ("tenant_id", tenant_id.encode()),
-                        ("source_manager", manager_name.encode()),
-                        ("source_file", source_name.encode()),
-                    ],
-                    on_delivery=on_delivery,
-                )
+                value = line.encode()
+                headers = [
+                    ("tenant_id", tenant_id.encode()),
+                    ("source_manager", manager_name.encode()),
+                    ("source_file", source_name.encode()),
+                ]
+                while True:
+                    try:
+                        producer.produce(topic, key=key, value=value, headers=headers, on_delivery=on_delivery)
+                        break
+                    except BufferError:
+                        # Local produce queue full - transient backpressure,
+                        # not bad data: drain some deliveries and retry the
+                        # SAME message rather than dropping it.
+                        producer.poll(1.0)
+                        continue
+                    except KafkaException as exc:
+                        # e.g. message too large for the broker
+                        # (message.max.bytes) - a hostile/edge-case huge
+                        # full_log. Permanent: this exact message will
+                        # never fit no matter how many times it's retried.
+                        metrics.incr("lines_failed")
+                        send_to_dead_letter(
+                            kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_id,
+                            component="shipper", source_location=f"{source.path}:{byte_offset}",
+                            error=f"{type(exc).__name__}: {exc}", raw_event=line,
+                        )
+                        break
 
             still_pending = producer.flush(30)
 

@@ -7,21 +7,23 @@ committed) - if the process dies in between, the next consumer in the
 group re-reads the same message on restart and reprocesses it, which
 process_event makes a safe no-op (see its own docstring).
 
-A message that fails to normalise (genuinely malformed JSON) is counted
-and its offset still committed - never retried forever, same policy as
-shadowtracer_ingest.writer. A message that normalises but can't be
-correlated by any basis (no source IP, user, or rule group at all) is
-also counted and committed - there's nothing to retry there either. A
-message with a permanently malformed field process_event can detect
-(correlator.UnparseableEvent - so far just a bad timestamp) gets the same
-treatment, for the same reason: retrying bytes that can never parse
-differently just wedges the partition forever (found for real in Phase
-5A VERIFY - a single bad timestamp stopped this consumer from processing
-anything else on that partition until this was fixed).
+No single event may stop the pipeline - two distinct failure kinds, never
+confused with each other (same split as shadowtracer_ingest.writer):
 
-Any OTHER failure during process_event (e.g. a transient database error)
-is NOT committed, so it's redelivered on restart - that's the one case
-where retrying is the right answer, since the failure might not recur.
+- PERMANENT (bad data - a message that fails to normalise, or one
+  process_event flags via correlator.UnparseableEvent, so far just a bad
+  timestamp): counted, dead-lettered (dead_letter.send_to_dead_letter),
+  and its offset committed - never retried, since retrying bytes that can
+  never parse differently just wedges the partition forever (found for
+  real in Phase 5A VERIFY - a single bad timestamp stopped this consumer
+  from processing anything else on that partition until this was fixed).
+- TRANSIENT (any other process_event failure, e.g. a database outage):
+  retried in place with capped exponential backoff, forever, never
+  dead-lettered and never committed - redelivering it to a DIFFERENT
+  consumer on restart would be pointless when this one can just keep
+  retrying the same message until the database comes back. stop_flag
+  interrupts the wait for a graceful shutdown (message stays uncommitted,
+  genuinely redelivered on restart then).
 """
 
 import logging
@@ -29,9 +31,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest"))
+from shadowtracer_ingest.dead_letter import send_to_dead_letter  # noqa: E402
 from shadowtracer_ingest.normalizer import normalize_alert  # noqa: E402
 
-from confluent_kafka import Consumer
+from confluent_kafka import Consumer, Producer
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -41,6 +44,8 @@ from .metrics import Metrics
 logger = logging.getLogger(__name__)
 
 POLL_TIMEOUT_SECONDS = 1.0
+PROCESS_BASE_DELAY_SECONDS = 1.0
+PROCESS_MAX_DELAY_SECONDS = 30.0
 
 
 def run(
@@ -53,7 +58,12 @@ def run(
     started_flag=None,
     session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
     max_span_seconds: int = DEFAULT_MAX_SPAN_SECONDS,
+    ch_client=None,
 ):
+    """ch_client is optional (None is fine, e.g. in tests that don't care
+    about dead-letter counts) - a dead-lettered event still always goes to
+    the Kafka dead-letter topic either way; ch_client only adds the
+    queryable-per-tenant-count side of send_to_dead_letter."""
     consumer = Consumer({
         "bootstrap.servers": bootstrap_servers,
         "group.id": group_id,
@@ -64,6 +74,7 @@ def run(
 
     engine = create_engine(database_url, pool_pre_ping=True)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
+    dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers})
 
     if started_flag is not None:
         started_flag.set()
@@ -83,27 +94,69 @@ def run(
                     tenant_key = v.decode()
                     break
 
+            # errors="replace", never strict: invalid UTF-8 in a Kafka
+            # message value must not crash the consumer loop - replaced
+            # bytes fail JSON parsing naturally below and get
+            # dead-lettered there.
+            raw_line = msg.value().decode("utf-8", errors="replace")
+            source_location = f"{msg.topic()}:{msg.partition()}:{msg.offset()}"
+
             try:
-                event = normalize_alert(msg.value().decode(), tenant_key or "")
-            except Exception:
+                event = normalize_alert(raw_line, tenant_key or "")
+            except Exception as exc:  # noqa: BLE001 - permanent, bad data: dead-letter and move on, never retried
                 metrics.incr("messages_failed")
+                send_to_dead_letter(
+                    kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
+                    component="correlator", source_location=source_location,
+                    error=f"{type(exc).__name__}: {exc}", raw_event=raw_line,
+                )
                 consumer.commit(msg)
                 continue
 
-            db = Session()
-            try:
-                result = process_event(db, event, session_gap_seconds, max_span_seconds)
-            except UnparseableEvent:
-                logger.warning("alert %s has a permanently malformed field - skipping, not retrying", event.alert_id)
-                metrics.incr("messages_failed")
-                consumer.commit(msg)
+            # Retries the SAME message in place, forever, with capped
+            # backoff, for a transient process_event failure (e.g. the
+            # database is briefly unreachable) - never dead-lettered, since
+            # by this point the event is known-good data. A permanently
+            # malformed field (UnparseableEvent) is the one exception this
+            # loop does NOT retry: it's bad data, so it's dead-lettered
+            # immediately instead, same as a normalize_alert failure above.
+            attempt_n = 0
+            result = None
+            while True:
+                db = Session()
+                try:
+                    result = process_event(db, event, session_gap_seconds, max_span_seconds)
+                except UnparseableEvent:
+                    db.close()
+                    logger.warning("alert %s has a permanently malformed field - dead-lettering, not retrying", event.alert_id)
+                    metrics.incr("messages_failed")
+                    send_to_dead_letter(
+                        kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
+                        component="correlator", source_location=source_location,
+                        error="UnparseableEvent: permanently malformed field", raw_event=raw_line,
+                    )
+                    consumer.commit(msg)
+                    result = None
+                    break
+                except Exception as exc:  # noqa: BLE001 - presumed transient (e.g. database outage): retry forever, never dead-letter, never commit
+                    db.close()
+                    attempt_n += 1
+                    metrics.incr("process_errors")
+                    logger.warning(
+                        "process_event attempt %d failed for alert %s (transient - retrying): %s",
+                        attempt_n, event.alert_id, exc,
+                    )
+                    delay = min(PROCESS_BASE_DELAY_SECONDS * (2 ** (attempt_n - 1)), PROCESS_MAX_DELAY_SECONDS)
+                    if stop_flag.wait(delay):
+                        result = None  # graceful shutdown mid-retry: leave uncommitted, genuinely redelivered on restart
+                        break
+                    continue
+                else:
+                    db.close()
+                    break
+
+            if result is None:
                 continue
-            except Exception:
-                logger.exception("process_event failed for alert %s - not committing, will retry", event.alert_id)
-                metrics.incr("process_errors")
-                continue
-            finally:
-                db.close()
 
             metrics.incr(f"alerts_{result.status}")
             consumer.commit(msg)

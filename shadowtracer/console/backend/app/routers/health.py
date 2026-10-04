@@ -24,11 +24,12 @@ def health_ready(response: Response, db: Session = Depends(get_db), settings=Dep
 
 @router.get("/health/detail")
 def health_detail(settings=Depends(get_settings), _=Depends(ADMIN_ONLY)):
-    """Admin-only: shipper lag per node, writer consumer lag, and last
-    event time per tenant - operational detail, not something every
-    logged-in user should see."""
+    """Admin-only: shipper lag per node, writer consumer lag, last event
+    time per tenant, and dead-lettered event counts per tenant -
+    operational detail, not something every logged-in user should see."""
     return {
         "shipper_lag": health_checks.shipper_lag_per_node(settings),
         "writer_consumer_lag": health_checks.writer_consumer_lag(settings),
         "last_event_time_per_tenant": health_checks.last_event_time_per_tenant(settings),
+        "dead_letter_counts": health_checks.dead_letter_counts_per_tenant(settings),
     }

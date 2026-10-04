@@ -108,6 +108,40 @@ def writer_consumer_lag(settings: Settings) -> dict:
         return {"error": str(exc)}
 
 
+def dead_letter_counts_per_tenant(settings: Settings, window_hours: int = 24) -> dict:
+    """No single event may stop the pipeline: counts dead_letter_events
+    rows (shipper/writer/correlator - shadowtracer_ingest/dead_letter.py)
+    in the last window_hours, per tenant. A ClickHouse-side count, not a
+    component's in-process counter, since those don't survive a restart
+    or aggregate across replicas - this is the one place that can
+    actually answer "how many for tenant X"."""
+    try:
+        client = clickhouse_connect.get_client(
+            host=settings.clickhouse_host, port=settings.clickhouse_port,
+            username=settings.clickhouse_user, password=settings.clickhouse_password,
+            database=settings.clickhouse_database, connect_timeout=3,
+        )
+        rows = client.query(
+            "SELECT tenant_id, component, count() AS n FROM dead_letter_events "
+            "WHERE failed_at >= now() - INTERVAL {window_hours:UInt32} HOUR "
+            "GROUP BY tenant_id, component ORDER BY tenant_id, component",
+            parameters={"window_hours": window_hours},
+        ).result_rows
+        client.close()
+        by_tenant: dict = {}
+        for tenant_id, component, n in rows:
+            by_tenant.setdefault(tenant_id, {"total": 0, "by_component": {}})
+            by_tenant[tenant_id]["total"] += n
+            by_tenant[tenant_id]["by_component"][component] = n
+        return {
+            "window_hours": window_hours,
+            "alert": any(t["total"] > 0 for t in by_tenant.values()),
+            "by_tenant": by_tenant,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
 def last_event_time_per_tenant(settings: Settings) -> dict:
     try:
         client = clickhouse_connect.get_client(

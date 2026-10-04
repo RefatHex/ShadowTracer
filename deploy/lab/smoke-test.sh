@@ -149,6 +149,132 @@ else
     fi
 fi
 
+echo "--- hostile input: no single event may stop the pipeline ---"
+# Injects a batch mixing 2 good events with 8 hostile ones - one per
+# category the pipeline must survive without crashing (an invalid
+# timestamp, an out-of-range timestamp, a missing required field, a wrong
+# type, a 10 MB full_log, invalid UTF-8, deeply nested JSON, and an empty
+# object) - straight into shipper-worker1's real, tailed alerts.json, the
+# same file Wazuh itself writes to. Proves: every good event still lands
+# in ClickHouse and an incident, every bad one is dead-lettered (not
+# silently dropped, not crashing anything), and no container restarts.
+hostile_marker="hostile$(date +%s)"
+hostile_agent="hostile-agent-${hostile_marker}"
+
+dl_before="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client --query "SELECT count() FROM shadowtracer.dead_letter_events")"
+
+restart_counts_before=()
+pipeline_services="shipper-worker1 shipper-worker2 writer-1 writer-2 correlate-1 correlate-2"
+for svc in $pipeline_services; do
+    cid="$(docker compose ps -q "$svc")"
+    restart_counts_before+=("$(docker inspect -f '{{.RestartCount}}' "$cid")")
+done
+
+hostile_batch_file="$(mktemp)"
+python3 - "$hostile_marker" "$hostile_agent" > "$hostile_batch_file" <<'PYEOF'
+import json
+import sys
+
+marker, agent = sys.argv[1], sys.argv[2]
+
+
+def good(suffix):
+    return json.loads(json.dumps({
+        "timestamp": "2026-10-04T12:00:00.000+0000",
+        "rule": {"id": "5710", "level": 5, "description": "sshd failure", "groups": ["sshd"]},
+        "agent": {"id": agent, "name": agent, "ip": "10.0.0.1"},
+        "manager": {"name": "wazuh-worker1"},
+        "cluster": {"node": "worker1"},
+        "id": f"{marker}.good.{suffix}",
+        "data": {"srcip": "9.9.9.9"},
+        "decoder": {"name": "sshd"},
+        "location": "/var/log/auth.log",
+        "full_log": f"Invalid user {marker} from 9.9.9.9",
+    }))
+
+
+lines = [json.dumps(good("1")), json.dumps(good("2"))]
+
+missing_ts = good("missing-ts")
+del missing_ts["timestamp"]
+lines.append(json.dumps(missing_ts))
+
+bad_ts = good("bad-ts")
+bad_ts["timestamp"] = "2026-10-04T05:00:118.000+0000"  # seconds=118: not valid ISO8601
+lines.append(json.dumps(bad_ts))
+
+bad_month = good("bad-month")
+bad_month["timestamp"] = "2026-13-01T00:00:00.000+0000"  # month=13: out of range
+lines.append(json.dumps(bad_month))
+
+lines.append("{}")  # empty object
+
+wrong_type = good("wrong-type")
+wrong_type["agent"] = "not-an-object"  # wrong type: breaks agent.get(...) before anything else even runs
+lines.append(json.dumps(wrong_type))
+
+huge = good("huge")
+huge["full_log"] = "x" * (11 * 1024 * 1024)  # 10+ MB: exceeds Kafka's message.max.bytes
+lines.append(json.dumps(huge))
+
+# Deeply nested JSON: 20000 levels is past CPython's json decoder's own
+# recursion limit (confirmed empirically: 5000 parses fine, 20000 cleanly
+# raises RecursionError, never a C stack overflow/segfault) - exercises
+# the same path a genuinely pathological payload would hit.
+lines.append("[" * 20000 + "]" * 20000)
+
+print("\n".join(lines))
+PYEOF
+
+# Invalid UTF-8 can't round-trip through the python heredoc's text stdout -
+# appended separately, in raw bytes. Leading invalid bytes before any JSON
+# quoting: errors="replace" turns them into U+FFFD rather than crashing the
+# shipper's read loop, but the result still isn't valid JSON, so it fails
+# downstream and gets dead-lettered same as anything else malformed (see
+# shadowtracer/ingest/tests/test_shipper.py's identical construction).
+printf '\xff\xfe{"bad": "invalid utf-8"}\n' >> "$hostile_batch_file"
+
+n_lines="$(wc -l < "$hostile_batch_file")"
+echo "injecting $n_lines lines (2 good + 8 hostile) into shipper-worker1's real alerts.json..."
+docker run --rm -i -v "$(pwd)/alerts-worker1:/data" busybox sh -c 'cat >> /data/alerts.json' < "$hostile_batch_file"
+rm -f "$hostile_batch_file"
+
+good_count=0
+dl_after=0
+deadline=$(( $(date +%s) + 30 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    good_count="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
+        --query "SELECT count() FROM shadowtracer.events WHERE alert_id LIKE '${hostile_marker}.good.%'")"
+    dl_after="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
+        --query "SELECT count() FROM shadowtracer.dead_letter_events")"
+    if [ "$good_count" = "2" ] && [ "$((dl_after - dl_before))" = "12" ]; then
+        break
+    fi
+    sleep 1
+done
+
+check "both good events landed in ClickHouse" "[ \"$good_count\" = 2 ]"
+check "all 12 dead-letter writes landed (4 shipper-stage + 8 from writer+correlator each independently dead-lettering the 4 that reach Kafka)" \
+    "[ \"\$((dl_after - dl_before))\" = 12 ]"
+
+incident_count="$(docker exec shadowtracer-lab-postgres-1 env PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+    "SELECT alert_count FROM incidents WHERE agent_id = '${hostile_agent}'" | tr -d '[:space:]')"
+check "an incident with both good alerts exists (agent_id=${hostile_agent})" "[ \"$incident_count\" = 2 ]"
+
+restart_ok=1
+i=0
+for svc in $pipeline_services; do
+    cid="$(docker compose ps -q "$svc")"
+    now_count="$(docker inspect -f '{{.RestartCount}}' "$cid")"
+    before_count="${restart_counts_before[$i]}"
+    if [ "$now_count" != "$before_count" ]; then
+        echo "FAIL: $svc restarted during the hostile-input batch ($before_count -> $now_count)"
+        restart_ok=0
+    fi
+    i=$((i + 1))
+done
+check "no pipeline container restarted" "[ \"$restart_ok\" = 1 ]"
+
 echo "---"
 if [ "$fail" -eq 0 ]; then
     echo "SMOKE TEST: PASS"

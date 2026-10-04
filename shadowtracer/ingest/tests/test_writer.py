@@ -233,6 +233,48 @@ def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_top
     ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in alert_ids)})")
 
 
+def test_writer_dead_letters_bad_data_keeps_good_ones(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines):
+    """No single event may stop the pipeline: a batch mixing a permanently
+    malformed event (one that fails normalize_alert, here via an invalid
+    timestamp) with a good one must land the good one in ClickHouse,
+    dead-letter the bad one (never retried - bad data, not a transient
+    failure), and keep the writer running and committing offsets."""
+    import json
+    marker = uuid.uuid4().hex[:8]
+    tenant_id = f"test-{marker}"
+
+    good = json.loads(real_alert_lines[0])
+    good["id"] = f"{good['id']}.{marker}.good"
+    bad = json.loads(real_alert_lines[1])
+    bad["id"] = f"{bad['id']}.{marker}.bad"
+    bad["timestamp"] = "2026-10-04T05:00:118.000+0000"  # seconds=118: not valid ISO8601
+
+    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env)
+    try:
+        _produce(kafka_bootstrap, kafka_topic, [json.dumps(good), json.dumps(bad)], tenant_id=tenant_id)
+
+        deadline = time.monotonic() + 20
+        good_count = dl_count = 0
+        while time.monotonic() < deadline:
+            good_count = _count_alert_ids(ch_client, [good["id"]])
+            dl_count = ch_client.query(
+                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{tenant_id}' AND component = 'writer'"
+            ).result_rows[0][0]
+            if good_count == 1 and dl_count == 1:
+                break
+            time.sleep(0.5)
+
+        assert good_count == 1, "the good event must still land in ClickHouse"
+        assert dl_count == 1, "the bad event must be dead-lettered, not silently dropped or crash the writer"
+        assert thread.is_alive(), "writer must never crash on bad data"
+        assert metrics.snapshot()["messages_failed"] >= 1
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+        ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id = '{good['id']}'")
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_id}'")
+
+
 def test_failover_clickhouse_skips_a_dead_host():
     """Unit-level proof of _FailoverClickHouse's own logic: a bogus first
     host must not stop the insert from landing on the second, real one."""

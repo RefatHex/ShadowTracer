@@ -43,7 +43,7 @@ def _produce(kafka_bootstrap, topic, lines, tenant_key="lab"):
     producer.flush(30)
 
 
-def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None):
+def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None, ch_client=None):
     metrics = Metrics()
     stop_flag = threading.Event()
     started_flag = threading.Event()
@@ -53,7 +53,7 @@ def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None):
             bootstrap_servers=kafka_bootstrap, topic=topic,
             group_id=group_id or f"test-correlate-{uuid.uuid4().hex[:8]}",
             database_url=database_url, metrics=metrics,
-            stop_flag=stop_flag, started_flag=started_flag,
+            stop_flag=stop_flag, started_flag=started_flag, ch_client=ch_client,
         ),
         daemon=True,
     )
@@ -128,6 +128,55 @@ def test_a_permanently_malformed_alert_is_skipped_not_wedging_the_partition(kafk
     finally:
         stop_flag.set()
         thread.join(timeout=5)
+
+
+def test_bad_data_is_dead_lettered_not_silently_dropped(kafka_bootstrap, kafka_topic, database_url, db, ch_client):
+    """No single event may stop the pipeline: both failure kinds this
+    consumer treats as permanent (a normalize_alert failure - here a
+    missing required field, since the real shipper already filters out
+    unparseable JSON before anything reaches this topic - and a
+    permanently malformed field caught as UnparseableEvent) must land in
+    dead_letter_events, not just bump a counter - someone needs to be able
+    to find and inspect what got dropped."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    marker = uuid.uuid4().hex[:8]
+    agent = f"agent-{marker}"
+    missing_timestamp = json.loads(_alert(agent, "9.9.9.9", f"{marker}.missing-ts"))
+    del missing_timestamp["timestamp"]
+    missing_timestamp = json.dumps(missing_timestamp)
+    bad_timestamp = _alert(agent, "9.9.9.9", f"{marker}.bad-ts", timestamp="2026-10-04T05:00:118.000+0000")
+    good = _alert(agent, "9.9.9.9", f"{marker}.good")
+
+    stop_flag, thread, metrics = _start_consumer(kafka_bootstrap, kafka_topic, database_url, ch_client=ch_client)
+    try:
+        _produce(kafka_bootstrap, kafka_topic, [missing_timestamp, bad_timestamp, good], tenant_key=tenant)
+
+        deadline = time.monotonic() + 20
+        row = None
+        while time.monotonic() < deadline:
+            row = db.execute(
+                select(incidents).where(incidents.c.tenant_key == tenant, incidents.c.agent_id == agent)
+            ).mappings().first()
+            if row is not None and row["alert_count"] == 1:
+                break
+            time.sleep(0.5)
+        assert row is not None and row["alert_count"] == 1, "the good alert must still land"
+
+        deadline = time.monotonic() + 15
+        dl_count = 0
+        while time.monotonic() < deadline:
+            dl_count = ch_client.query(
+                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{tenant}' AND component = 'correlator'"
+            ).result_rows[0][0]
+            if dl_count == 2:
+                break
+            time.sleep(0.5)
+        assert dl_count == 2, f"expected 2 dead-lettered events (missing timestamp + unparseable timestamp), got {dl_count}"
+        assert thread.is_alive(), "correlator must never crash on bad data"
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant}'")
 
 
 def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kafka_bootstrap, kafka_topic, database_url, db):

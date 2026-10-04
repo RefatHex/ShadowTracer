@@ -174,3 +174,27 @@ ORDER BY (tenant_id, fingerprint_key, incident_id);
 --   SELECT tenant_id, fingerprint_key, uniqExact(incident_id) AS occurrences
 --   FROM __DATABASE__.fingerprint_occurrences GROUP BY tenant_id, fingerprint_key
 -- never a plain count() - see this table's own header.
+
+-- No single event may stop the pipeline: one row per dead-lettered event
+-- - shipper, writer and correlator all write here directly (dual-write,
+-- same call site as the Kafka dead-letter topic produce -
+-- shadowtracer_ingest/dead_letter.py) whenever an event fails parsing,
+-- normalizing or processing in a way that will never succeed no matter
+-- how many times it's retried (a permanently malformed field - NOT a
+-- transient failure like ClickHouse/Postgres being briefly unreachable,
+-- which retries with backoff instead and never reaches this table at
+-- all). /health/detail reads per-tenant counts from here, not from any
+-- single component's in-process counter, since those don't survive a
+-- restart or aggregate across replicas.
+CREATE TABLE IF NOT EXISTS __DATABASE__.dead_letter_events ON CLUSTER lab_cluster
+(
+    tenant_id       LowCardinality(String),
+    component       LowCardinality(String),
+    source_location String,
+    error           String,
+    raw_event       String CODEC(ZSTD(3)),
+    failed_at       DateTime64(3)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/__KEEPER_PREFIX__{shard}/dead_letter_events', '{replica}')
+PARTITION BY toYYYYMM(failed_at)
+ORDER BY (tenant_id, failed_at);

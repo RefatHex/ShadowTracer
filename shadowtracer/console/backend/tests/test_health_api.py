@@ -91,3 +91,5 @@ def test_health_detail_admin_gets_200(client, admin_token):
     assert "shipper_lag" in body
     assert "writer_consumer_lag" in body
     assert "last_event_time_per_tenant" in body
+    assert "dead_letter_counts" in body
+    assert body["dead_letter_counts"]["alert"] is False

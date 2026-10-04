@@ -36,10 +36,15 @@ import logging
 import time
 
 import clickhouse_connect
-from confluent_kafka import Consumer
+from confluent_kafka import Consumer, Producer
 
+from .dead_letter import send_to_dead_letter
 from .metrics import Metrics
 from .normalizer import normalize_alert
+from .retry import retry_with_backoff
+
+INSERT_BASE_DELAY_SECONDS = 1.0
+INSERT_MAX_DELAY_SECONDS = 30.0
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +124,7 @@ def run(
     consumer.subscribe([topic])
 
     ch = _FailoverClickHouse(clickhouse_hosts, clickhouse_user, clickhouse_password, clickhouse_database)
+    dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers})
 
     if started_flag is not None:
         started_flag.set()
@@ -154,10 +160,21 @@ def run(
                         if k == "tenant_id":
                             tenant_id = v.decode()
                             break
+                    # errors="replace", never strict: invalid UTF-8 bytes in
+                    # a Kafka message value must not crash the writer the
+                    # way a raw-mode file read once could (shipper.py) -
+                    # replaced bytes fail JSON parsing naturally below and
+                    # get dead-lettered there instead.
+                    raw_line = msg.value().decode("utf-8", errors="replace")
                     try:
-                        ev = normalize_alert(msg.value().decode(), tenant_id or "")
-                    except Exception:
+                        ev = normalize_alert(raw_line, tenant_id or "")
+                    except Exception as exc:  # noqa: BLE001 - any parse/normalize failure is permanent, never retried: dead-letter and move on
                         metrics.incr("messages_failed")
+                        send_to_dead_letter(
+                            kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=tenant_id,
+                            component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
+                            error=f"{type(exc).__name__}: {exc}", raw_event=raw_line,
+                        )
                         continue
                     if ev.cluster_node_fell_back:
                         logger.warning(
@@ -172,7 +189,20 @@ def run(
 
                 offsets = [msg.offset() for msg in msgs]
                 token = f"{msg_topic}:{partition}:{min(offsets)}-{max(offsets)}"
-                ch.insert("events", rows, column_names=COLUMNS, settings={"insert_deduplication_token": token})
+                # By the time a row gets here it already passed
+                # normalize_alert() - any insert failure now is presumed
+                # infrastructure (ClickHouse unreachable/overloaded), not bad
+                # data. Retry forever with capped backoff; never dead-letter
+                # this path. stop_flag lets a graceful shutdown interrupt a
+                # long wait instead of blocking it.
+                retry_with_backoff(
+                    lambda: ch.insert("events", rows, column_names=COLUMNS, settings={"insert_deduplication_token": token}),
+                    max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                    max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                    on_retry=lambda attempt, exc: logger.warning(
+                        "ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc,
+                    ),
+                )
                 metrics.incr("messages_inserted", len(rows))
 
             consumer.commit(asynchronous=False)

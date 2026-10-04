@@ -48,6 +48,13 @@ x-shipper-env: &shipper-env
   # On the /offsets volume, not /tmp - must survive a container restart or
   # the shipper would re-read (and re-ship) its entire backlog every time.
   OFFSET_FILE: /offsets/offsets.json
+  # No single event may stop the pipeline: a dead-lettered line always
+  # goes to the Kafka dead-letter topic regardless of these - they only
+  # add the queryable per-tenant count on /health/detail.
+  CLICKHOUSE_HOST: ch-clickhouse-1
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+  CLICKHOUSE_DATABASE: shadowtracer
 
 # 2 writer replicas, same consumer group - Kafka splits the topic's
 # partitions between them (VERIFY in PHASE4_CONSOLE.md).
@@ -78,6 +85,13 @@ x-correlate-env: &correlate-env
   SESSION_GAP_SECONDS: "600"
   MAX_SPAN_SECONDS: "14400"
   METRICS_PORT: "9104"
+  # No single event may stop the pipeline: a dead-lettered event always
+  # goes to the Kafka dead-letter topic regardless of these - they only
+  # add the queryable per-tenant count on /health/detail.
+  CLICKHOUSE_HOST: ch-clickhouse-1
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+  CLICKHOUSE_DATABASE: shadowtracer
 
 # 2 closer replicas - deliberately run more than one, same as the
 # correlators, so the advisory-lock protection (closer.py) is exercised

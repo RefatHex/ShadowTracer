@@ -7,12 +7,19 @@ Env vars:
   POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, APP_DB_PASSWORD
   SESSION_GAP_SECONDS (default 600), MAX_SPAN_SECONDS (default 14400)
   METRICS_PORT (default 9104)
+  CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD,
+  CLICKHOUSE_DATABASE - optional; a dead-lettered event always goes to the
+  Kafka dead-letter topic regardless, these only add the queryable
+  per-tenant count (shadowtracer_ingest/dead_letter.py). Omit all of them
+  to run without a ClickHouse dependency at all (e.g. in a test).
 """
 
 import logging
 import os
 import signal
 import threading
+
+import clickhouse_connect
 
 from shadowtracer_correlate.consumer import run
 from shadowtracer_correlate.metrics import Metrics, serve_metrics
@@ -32,6 +39,14 @@ database_url = (
     f"/{os.environ.get('POSTGRES_DB', 'shadowtracer')}"
 )
 
+ch_client = None
+if os.environ.get("CLICKHOUSE_HOST"):
+    ch_client = clickhouse_connect.get_client(
+        host=os.environ["CLICKHOUSE_HOST"], port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
+        username=os.environ.get("CLICKHOUSE_USER", "default"), password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
+        database=os.environ.get("CLICKHOUSE_DATABASE", "shadowtracer"),
+    )
+
 run(
     bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9094"),
     topic=os.environ.get("KAFKA_TOPIC", "shadowtracer.events.raw"),
@@ -41,4 +56,5 @@ run(
     stop_flag=stop_flag,
     session_gap_seconds=int(os.environ.get("SESSION_GAP_SECONDS", "600")),
     max_span_seconds=int(os.environ.get("MAX_SPAN_SECONDS", "14400")),
+    ch_client=ch_client,
 )
