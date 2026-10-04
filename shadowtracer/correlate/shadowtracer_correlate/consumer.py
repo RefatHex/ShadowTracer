@@ -11,10 +11,17 @@ A message that fails to normalise (genuinely malformed JSON) is counted
 and its offset still committed - never retried forever, same policy as
 shadowtracer_ingest.writer. A message that normalises but can't be
 correlated by any basis (no source IP, user, or rule group at all) is
-also counted and committed - there's nothing to retry there either.
-A message that fails during process_event itself (e.g. a transient
-database error) is NOT committed, so it's redelivered on restart -
-that's the one case where retrying is the right answer.
+also counted and committed - there's nothing to retry there either. A
+message with a permanently malformed field process_event can detect
+(correlator.UnparseableEvent - so far just a bad timestamp) gets the same
+treatment, for the same reason: retrying bytes that can never parse
+differently just wedges the partition forever (found for real in Phase
+5A VERIFY - a single bad timestamp stopped this consumer from processing
+anything else on that partition until this was fixed).
+
+Any OTHER failure during process_event (e.g. a transient database error)
+is NOT committed, so it's redelivered on restart - that's the one case
+where retrying is the right answer, since the failure might not recur.
 """
 
 import logging
@@ -28,7 +35,7 @@ from confluent_kafka import Consumer
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from .correlator import DEFAULT_MAX_SPAN_SECONDS, DEFAULT_SESSION_GAP_SECONDS, process_event
+from .correlator import DEFAULT_MAX_SPAN_SECONDS, DEFAULT_SESSION_GAP_SECONDS, UnparseableEvent, process_event
 from .metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -86,6 +93,11 @@ def run(
             db = Session()
             try:
                 result = process_event(db, event, session_gap_seconds, max_span_seconds)
+            except UnparseableEvent:
+                logger.warning("alert %s has a permanently malformed field - skipping, not retrying", event.alert_id)
+                metrics.incr("messages_failed")
+                consumer.commit(msg)
+                continue
             except Exception:
                 logger.exception("process_event failed for alert %s - not committing, will retry", event.alert_id)
                 metrics.incr("process_errors")

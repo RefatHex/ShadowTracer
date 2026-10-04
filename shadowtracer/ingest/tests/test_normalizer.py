@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from shadowtracer_ingest.normalizer import normalize_alert
 
 
@@ -57,3 +59,17 @@ def test_malformed_line_raises_for_caller_to_count():
         assert False, "expected an exception"
     except Exception:
         pass
+
+
+def test_malformed_timestamp_raises_instead_of_reaching_clickhouse(real_alert_lines):
+    """Regression test for a real bug found in Phase 5A VERIFY: a
+    timestamp string that isn't valid ISO8601 (e.g. seconds >= 60) used
+    to sail through normalize_alert unexamined and only fail later,
+    inside ClickHouse's own client library mid-batch-insert - crashing
+    the writer process outright instead of being counted and skipped like
+    any other malformed alert. Must raise here, at normalization time,
+    where every caller already catches and counts it."""
+    alert = json.loads(real_alert_lines[0])
+    alert["timestamp"] = "2026-10-04T05:00:118.000+0000"  # seconds=118, not valid ISO8601
+    with pytest.raises(ValueError):
+        normalize_alert(json.dumps(alert), tenant_id="lab")

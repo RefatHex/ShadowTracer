@@ -3,10 +3,13 @@ import os
 import sys
 import uuid
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest"))
 from shadowtracer_ingest.normalizer import NormalizedEvent  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shadowtracer_correlate import correlator  # noqa: E402
 from shadowtracer_correlate.correlator import (  # noqa: E402
     correlation_key_and_basis, process_event,
 )
@@ -239,3 +242,16 @@ def test_rule_ids_rule_groups_and_mitre_ids_accumulate_without_duplicates(db):
     assert sorted(row["rule_groups"]) == ["authentication_failed", "invalid_login", "sshd"]
     # order of first appearance, not sorted, and no duplicate of T1110.001
     assert row["mitre_ids"] == ["T1110.001", "T1021.004"]
+
+
+def test_a_permanently_malformed_timestamp_raises_unparseable_not_a_generic_error(db):
+    """Regression test (Phase 5A VERIFY): a bad timestamp must be
+    distinguishable from a transient failure (a DB hiccup) - the consumer
+    skips and commits past the first, but retries the second forever.
+    Before this, both looked like the same generic exception, and a bad
+    timestamp wedged a partition's consumer in an infinite retry loop."""
+    ev = _event(src_ip="1.2.3.4")
+    ev.time = "2026-10-04T05:00:118.000+0000"  # seconds=118 - not valid ISO8601
+
+    with pytest.raises(correlator.UnparseableEvent):
+        process_event(db, ev)

@@ -13,6 +13,7 @@ shadowtracer/ingest/fixtures/real_alerts_4.14.8.jsonl, not guessed):
   real captured alerts.
 """
 
+import datetime
 import json
 from dataclasses import dataclass, field
 
@@ -77,6 +78,16 @@ def normalize_alert(raw_line: str, tenant_id: str) -> NormalizedEvent:
     moving on without crashing, per the Step 3/5 spec."""
 
     alert = json.loads(raw_line)
+
+    # Validated here, once, for every caller - found the hard way (Phase
+    # 5A VERIFY) that a malformed timestamp survived normalization
+    # unexamined and only failed later, inside ClickHouse's own client
+    # library mid-batch-insert, crashing the writer process outright
+    # instead of being counted and skipped like any other malformed
+    # alert. datetime.fromisoformat is used only to validate - the
+    # original string (not the parsed object) is still what ClickHouse's
+    # own parser receives, unchanged.
+    datetime.datetime.fromisoformat(alert["timestamp"])
 
     rule = alert.get("rule", {})
     agent = alert.get("agent", {})

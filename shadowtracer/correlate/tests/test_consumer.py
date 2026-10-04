@@ -12,9 +12,9 @@ from shadowtracer_correlate.metrics import Metrics
 from shadowtracer_correlate.models import incident_alerts, incidents
 
 
-def _alert(agent_id: str, src_ip: str, alert_id: str) -> str:
+def _alert(agent_id: str, src_ip: str, alert_id: str, timestamp: str = "2026-01-01T12:00:00.000+0000") -> str:
     return json.dumps({
-        "timestamp": "2026-01-01T12:00:00.000+0000",
+        "timestamp": timestamp,
         "id": alert_id,
         "rule": {"id": "5710", "level": 5, "description": "sshd failure", "groups": ["sshd"]},
         "agent": {"id": agent_id, "name": agent_id, "ip": "10.0.0.1"},
@@ -89,6 +89,42 @@ def test_correlator_is_actually_running_and_draining_not_just_callable(kafka_boo
         assert row is not None, "no incident appeared for the produced alerts"
         assert row["alert_count"] == 5
         assert metrics.snapshot().get("alerts_created", 0) >= 1
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+
+
+def test_a_permanently_malformed_alert_is_skipped_not_wedging_the_partition(kafka_bootstrap, kafka_topic, database_url, db):
+    """Regression test for a real bug found in Phase 5A VERIFY: a bad
+    timestamp (produced by a script bug, but the consumer can't tell that
+    from a genuinely corrupt upstream alert) used to be treated as a
+    transient failure and never committed - wedging the partition in an
+    infinite retry loop that blocked every alert behind it, forever. One
+    bad alert followed by 3 good ones on the same partition/agent must
+    not lose the 3 good ones."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    marker = uuid.uuid4().hex[:8]
+    agent = f"agent-{marker}"
+    bad = _alert(agent, "9.9.9.9", f"{marker}.bad", timestamp="2026-10-04T05:00:118.000+0000")
+    good = [_alert(agent, "9.9.9.9", f"{marker}.{i}") for i in range(3)]
+
+    stop_flag, thread, metrics = _start_consumer(kafka_bootstrap, kafka_topic, database_url)
+    try:
+        _produce(kafka_bootstrap, kafka_topic, [bad] + good, tenant_key=tenant)
+
+        deadline = time.monotonic() + 20
+        row = None
+        while time.monotonic() < deadline:
+            row = db.execute(
+                select(incidents).where(incidents.c.tenant_key == tenant, incidents.c.agent_id == agent)
+            ).mappings().first()
+            if row is not None and row["alert_count"] == 3:
+                break
+            time.sleep(0.5)
+
+        assert row is not None, "the 3 good alerts after the bad one never got processed - partition is wedged"
+        assert row["alert_count"] == 3
+        assert metrics.snapshot().get("messages_failed", 0) >= 1
     finally:
         stop_flag.set()
         thread.join(timeout=5)

@@ -29,6 +29,16 @@ DEFAULT_MAX_SPAN_SECONDS = 4 * 3600
 CAPPED_VALUES_LIMIT = 20
 
 
+class UnparseableEvent(Exception):
+    """A permanently malformed field (so far: a timestamp that isn't real
+    ISO8601) - never worth retrying, since nothing about redelivering the
+    same bytes makes them parse differently next time. Found the hard way
+    (Phase 5A VERIFY): consumer.py originally treated every exception from
+    process_event as transient and never committed the offset, so one bad
+    timestamp wedged a partition in an infinite retry loop instead of
+    being skipped and counted like any other malformed alert."""
+
+
 @dataclass
 class CorrelationResult:
     status: str  # "created" | "joined" | "duplicate" | "unkeyable"
@@ -51,7 +61,10 @@ def correlation_key_and_basis(event) -> tuple[str, str] | None:
 
 
 def _parse_time(value: str) -> datetime.datetime:
-    dt = datetime.datetime.fromisoformat(value)
+    try:
+        dt = datetime.datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise UnparseableEvent(f"not a valid ISO8601 timestamp: {value!r}") from exc
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     return dt
