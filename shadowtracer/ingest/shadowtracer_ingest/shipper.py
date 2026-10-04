@@ -200,7 +200,7 @@ def run(
             if delivery_errors or still_pending:
                 # Don't advance the offset - we'll re-read and retry this
                 # batch next loop. Duplicates from a retried batch are
-                # handled at the ClickHouse layer (see schema/001_events.sql).
+                # handled at the ClickHouse layer (see schema/events_schema.sql).
                 metrics.incr("lines_failed", len(delivery_errors))
                 continue
 

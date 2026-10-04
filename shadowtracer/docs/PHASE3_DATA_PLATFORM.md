@@ -469,6 +469,32 @@ falling back to this `uniqExact` rollup or `FINAL` only for the specific
 queries that need exactness. Out of scope for Phase 3 - noted so it isn't
 rediscovered cold later.
 
+## Phase 5A Step 0: one ClickHouse schema source
+
+`schema/001_events.sql` (the lab) and `schema/test_only_clickhouse_schema.sql`
+(the isolated test database, Phase 4 follow-ups) were two independently
+hand-maintained files describing what was supposed to be the same table
+shape - exactly the kind of pair that drifts silently. Consolidated into
+`schema/events_schema.sql`, parameterized by `__DATABASE__` and
+`__KEEPER_PREFIX__` (empty in the lab, a fresh random token per session
+in tests - a Replicated engine's Keeper path isn't namespaced by
+database, so a shared/fixed path would either collide with the lab's
+real tables or race a previous test session's own `DROP DATABASE`).
+`shadowtracer_ingest/clickhouse_schema.py` renders and applies it;
+`deploy/lab/create-clickhouse-schema.sh` uses it for the lab (new -
+previously this schema was applied to the lab by hand, once, with no
+reproducible record at all), both test suites' `conftest.py` use it for
+`shadowtracer_test`. `check-project.sh` fails if either superseded file
+comes back or if any of the three consumers stops referencing this one
+source.
+
+A real bug found consolidating: naively splitting the rendered SQL on
+every literal `;` broke on the file's own prose comments, which contain
+semicolons in ordinary sentences ("safe for dedup; a retried produce...")
+- this silently cut a `CREATE TABLE` statement's column list in half
+mid-render. Fixed by stripping `-- ...` line comments before splitting,
+not by scrubbing semicolons out of the prose.
+
 ## Open items
 
 - The shipper's offset-file bookkeeping can lag behind what's actually

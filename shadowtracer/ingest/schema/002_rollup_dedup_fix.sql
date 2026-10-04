@@ -1,3 +1,8 @@
+-- HISTORICAL RECORD ONLY - superseded by schema/events_schema.sql (Phase
+-- 5A Step 0 consolidated this and schema/001_events.sql, which had since
+-- absorbed this fix directly, into one parameterized source). Nothing
+-- applies this file any more; kept for the incident narrative below.
+--
 -- Phase 3 follow-up 1: the hourly rollup double-counted on replay.
 --
 -- Root cause: a MATERIALIZED VIEW fires once per inserted block, before

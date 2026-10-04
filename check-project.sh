@@ -121,6 +121,25 @@ for conftest_file in shadowtracer/console/backend/tests/conftest.py shadowtracer
         || die "$conftest_file's ${guard_fn} is defined but never called from a fixture"
 done
 
+# Phase 5A Step 0: the ClickHouse schema must have exactly ONE source
+# (schema/events_schema.sql, parameterized by database + Keeper path) -
+# the lab schema and the test schema used to be two hand-maintained
+# files that could silently drift apart. Fail if either superseded copy
+# ever comes back, and fail if the one source stops being what the lab
+# script and both conftest.py files actually apply.
+CH_SCHEMA=shadowtracer/ingest/schema/events_schema.sql
+[ -f "$CH_SCHEMA" ] || die "$CH_SCHEMA is missing - the one ClickHouse schema source"
+for stale in shadowtracer/ingest/schema/001_events.sql shadowtracer/ingest/schema/test_only_clickhouse_schema.sql; do
+    [ ! -f "$stale" ] || die "$stale exists again - schema source split back into two files, see $CH_SCHEMA"
+done
+for consumer in deploy/lab/create-clickhouse-schema.sh \
+    shadowtracer/ingest/tests/conftest.py \
+    shadowtracer/console/backend/tests/conftest.py; do
+    [ -f "$consumer" ] || { die "$consumer is missing"; continue; }
+    grep -q "events_schema.sql\|clickhouse_schema" "$consumer" \
+        || die "$consumer no longer applies $CH_SCHEMA - schema sources have diverged"
+done
+
 if [ "$fail" -eq 0 ]; then
     echo "check-project.sh: OK"
 else

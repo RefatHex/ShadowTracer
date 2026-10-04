@@ -9,6 +9,7 @@ kafka_topic below), so no separate "test cluster" is needed there.
 """
 
 import os
+import sys
 import time
 import uuid
 
@@ -16,19 +17,18 @@ import clickhouse_connect
 import pytest
 from confluent_kafka.admin import AdminClient, NewTopic
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shadowtracer_ingest.clickhouse_schema import apply_schema
+
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "lab", ".env")
 
 # The real, production/lab ClickHouse database name - hardcoded here (not
 # read from .env) because it's a fixed constant everywhere else in this
 # project too (docker-compose.yml's CLICKHOUSE_DB, config.py's default,
-# the schema/*.sql files) - there is no env var for it to drift out of
+# schema/events_schema.sql) - there is no env var for it to drift out of
 # sync with.
 LAB_CLICKHOUSE_DB = "shadowtracer"
 TEST_CLICKHOUSE_DB = "shadowtracer_test"
-
-_CLICKHOUSE_TEST_SCHEMA_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "schema", "test_only_clickhouse_schema.sql"
-)
 
 
 def _load_env() -> dict:
@@ -66,9 +66,9 @@ def lab_env():
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_clickhouse_test_database(lab_env):
     """Drops and recreates shadowtracer_test fresh at the start of every
-    test session, then applies the test-only schema (see that file's
-    header for why it's still Replicated/ON CLUSTER, just under a
-    different Keeper path prefix than the real tables)."""
+    test session, then applies the one schema source
+    (schema/events_schema.sql via clickhouse_schema.apply_schema) under a
+    fresh Keeper path prefix - see that module and schema file for why."""
     _refuse_if_pointed_at_lab_clickhouse_database()
 
     admin_client = clickhouse_connect.get_client(
@@ -76,16 +76,11 @@ def _isolated_clickhouse_test_database(lab_env):
         username=lab_env["CLICKHOUSE_USER"], password=lab_env["CLICKHOUSE_PASSWORD"],
     )
     admin_client.command(f"DROP DATABASE IF EXISTS {TEST_CLICKHOUSE_DB} ON CLUSTER lab_cluster")
-    # A fresh, never-before-used Keeper path suffix every session - see
+    # A fresh, never-before-used Keeper path prefix every session - see
     # the schema file's header for why a fixed path would race this same
     # DROP's asynchronous Keeper cleanup.
-    keeper_session = uuid.uuid4().hex[:8]
-    with open(_CLICKHOUSE_TEST_SCHEMA_PATH) as f:
-        schema_sql = f.read().replace("__KEEPER_SESSION__", keeper_session)
-    for statement in schema_sql.split(";"):
-        statement = statement.strip()
-        if statement:
-            admin_client.command(statement)
+    keeper_prefix = f"test-{uuid.uuid4().hex[:8]}/"
+    apply_schema(admin_client, database=TEST_CLICKHOUSE_DB, keeper_prefix=keeper_prefix)
     admin_client.close()
 
 

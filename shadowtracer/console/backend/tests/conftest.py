@@ -8,6 +8,7 @@ _refuse_if_pointed_at_lab_database.
 """
 
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -22,14 +23,20 @@ from sqlalchemy.orm import sessionmaker
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "deploy", "lab", ".env")
 INGEST_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ingest")
-_CLICKHOUSE_TEST_SCHEMA_PATH = os.path.join(INGEST_DIR, "schema", "test_only_clickhouse_schema.sql")
+# The one schema source (Phase 5A Step 0) - read directly by path rather
+# than importing shadowtracer_ingest.clickhouse_schema, since this venv
+# is separate from ingest's own and can't import across them. See that
+# module and schema/events_schema.sql for the placeholders substituted
+# below and why.
+_CLICKHOUSE_SCHEMA_PATH = os.path.join(INGEST_DIR, "schema", "events_schema.sql")
 
 TEST_POSTGRES_DB = "shadowtracer_test"
 TEST_CLICKHOUSE_DB = "shadowtracer_test"
 # The real ClickHouse database name - hardcoded (not read from .env)
 # because it's a fixed constant everywhere else in this project too
-# (docker-compose.yml's CLICKHOUSE_DB, config.py's default, schema/*.sql);
-# there's no env var for it to drift out of sync with.
+# (docker-compose.yml's CLICKHOUSE_DB, config.py's default,
+# schema/events_schema.sql); there's no env var for it to drift out of
+# sync with.
 LAB_CLICKHOUSE_DB = "shadowtracer"
 
 
@@ -136,9 +143,10 @@ def _isolated_postgres_test_database(lab_env):
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_clickhouse_test_database(lab_env):
     """Drops and recreates shadowtracer_test fresh at the start of every
-    test session - see schema/test_only_clickhouse_schema.sql's header for
-    why it's Replicated/ON CLUSTER under a different Keeper path than the
-    real tables, not a plain MergeTree."""
+    test session, applying the one schema source
+    (schema/events_schema.sql) under a fresh Keeper path prefix - see
+    that file's header for why it's Replicated/ON CLUSTER even for the
+    test database, not a plain MergeTree."""
     _refuse_if_pointed_at_lab_database(lab_postgres_db=lab_env["POSTGRES_DB"])
 
     admin_client = clickhouse_connect.get_client(
@@ -146,13 +154,18 @@ def _isolated_clickhouse_test_database(lab_env):
         username=lab_env["CLICKHOUSE_USER"], password=lab_env["CLICKHOUSE_PASSWORD"],
     )
     admin_client.command(f"DROP DATABASE IF EXISTS {TEST_CLICKHOUSE_DB} ON CLUSTER lab_cluster")
-    # A fresh, never-before-used Keeper path suffix every session - see
+    # A fresh, never-before-used Keeper path prefix every session - see
     # the schema file's header for why a fixed path would race this same
     # DROP's asynchronous Keeper cleanup.
-    keeper_session = uuid.uuid4().hex[:8]
-    with open(_CLICKHOUSE_TEST_SCHEMA_PATH) as f:
-        schema_sql = f.read().replace("__KEEPER_SESSION__", keeper_session)
-    for statement in schema_sql.split(";"):
+    keeper_prefix = f"test-{uuid.uuid4().hex[:8]}/"
+    with open(_CLICKHOUSE_SCHEMA_PATH) as f:
+        schema_sql = f.read().replace("__DATABASE__", TEST_CLICKHOUSE_DB).replace("__KEEPER_PREFIX__", keeper_prefix)
+    # Strip `-- ...` line comments before splitting on `;` - this schema's
+    # prose comments contain semicolons of their own, which a naive split
+    # on the raw text wrongly treats as statement boundaries (see
+    # shadowtracer_ingest/clickhouse_schema.py's identical fix for why).
+    uncommented = re.sub(r"--.*$", "", schema_sql, flags=re.MULTILINE)
+    for statement in uncommented.split(";"):
         statement = statement.strip()
         if statement:
             admin_client.command(statement)

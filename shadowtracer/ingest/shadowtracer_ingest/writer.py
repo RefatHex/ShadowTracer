@@ -25,7 +25,7 @@ for the full writeup and the real, measured behavior of each):
   at its default (0). This only works when the replay reproduces the same
   partition/offset grouping, which a live retry does (resuming from the
   last committed offset) but isn't guaranteed for every possible replay.
-- schema/001_events.sql's events table (ReplicatedReplacingMergeTree,
+- schema/events_schema.sql's events table (ReplicatedReplacingMergeTree,
   dedup on tenant_id/cluster_node/alert_id) and events_hourly_rollup
   (uniqExact on cluster_node/alert_id) are the backstop for whatever the
   token doesn't catch - they dedup by identity, not by batch shape, so

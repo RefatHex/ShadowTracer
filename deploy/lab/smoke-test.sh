@@ -38,6 +38,23 @@ until docker exec shadowtracer-lab-kafka-1 /opt/kafka/bin/kafka-topics.sh \
     fi
 done
 ./create-kafka-topics.sh
+
+# ClickHouse next, alone: the events/rollup schema must be explicitly
+# applied (create-clickhouse-schema.sh) before shipper/writer start and
+# find no events table at all on a from-scratch bring-up.
+docker compose up -d ch-keeper ch-clickhouse-1 ch-clickhouse-2
+waited=0
+until docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
+    --query "SELECT 1" >/dev/null 2>&1; do
+    sleep 2
+    waited=$((waited + 2))
+    if [ "$waited" -ge 90 ]; then
+        echo "FAIL: clickhouse did not become ready within 90s"
+        exit 1
+    fi
+done
+./create-clickhouse-schema.sh
+
 docker compose up -d
 
 # Only wait on the services expected to reach healthy. agent-rocky-1/2 have a
