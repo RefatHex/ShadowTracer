@@ -4,9 +4,12 @@ from starlette.middleware.cors import CORSMiddleware
 from .config import load_settings
 from .db import make_session_factory
 from .logging_redact import register_secret, setup_logging
+from .routers import agents as agents_router
 from .routers import alerts as alerts_router
 from .routers import auth as auth_router
+from .routers import fingerprints as fingerprints_router
 from .routers import health as health_router
+from .routers import incidents as incidents_router
 from .security_headers import SecurityHeadersMiddleware, install_generic_error_handler
 
 
@@ -28,13 +31,16 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH", "PUT"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
     app.include_router(auth_router.router)
     app.include_router(health_router.router)
     app.include_router(alerts_router.router)
+    app.include_router(incidents_router.router)
+    app.include_router(fingerprints_router.router)
+    app.include_router(agents_router.router)
 
     return app
 

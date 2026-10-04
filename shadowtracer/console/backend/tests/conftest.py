@@ -196,7 +196,8 @@ def db(engine):
     yield session
     session.rollback()
     session.execute(text(
-        "TRUNCATE TABLE audit_log, refresh_tokens, login_attempts, users, tenants RESTART IDENTITY CASCADE"
+        "TRUNCATE TABLE audit_log, refresh_tokens, login_attempts, fingerprint_verdicts, "
+        "incident_alerts, incidents, fingerprints, agent_role_tags, users, tenants RESTART IDENTITY CASCADE"
     ))
     session.commit()
     session.close()
