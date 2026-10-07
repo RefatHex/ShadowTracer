@@ -337,13 +337,89 @@ consumer, waits again - `alert_count` stays 4, membership row count stays
 
 ### Kill a correlation worker mid-attack → the incident survives and keeps growing
 
-`test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing`:
-starts a consumer, produces 3 alerts, confirms `alert_count == 3`,
-abandons the thread outright (no graceful `stop_flag`, simulating a
-crash - not a clean shutdown), starts a fresh consumer in the **same**
-consumer group, produces 3 more alerts - `alert_count` reaches 6 on the
-same incident id, and exactly one incident exists for that agent, not
+**Superseded as crash evidence by a real `docker kill` against the live
+lab** (`deploy/lab/verify-correlator-chaos.sh`, below) - the thread-abandon
+version below is kept only as a fast unit-level regression test (no real
+infra crash, no real rebalance, just proves the Postgres-as-source-of-truth
+design handles an abandoned consumer thread), not as proof the correlation
+engine survives a real worker crash:
+
+`test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing`
+(unit test, `shadowtracer/correlate/tests/test_consumer.py`): starts a
+consumer, produces 3 alerts, confirms `alert_count == 3`, abandons the
+thread outright (no graceful `stop_flag`), starts a fresh consumer in the
+**same** consumer group, produces 3 more alerts - `alert_count` reaches 6
+on the same incident id, exactly one incident exists for that agent, not
 two. `PASSED`.
+
+### Real correlator crash: `docker kill` on a live correlate-1/correlate-2 container
+
+`deploy/lab/verify-correlator-chaos.sh` - the real-infra replacement for
+the above. Produces real alerts for a fresh agent directly to the real
+`shadowtracer.events.raw` topic, confirms the incident is open and
+growing, finds (never guesses - reads `docker-compose.yml`'s
+`KAFKA_GROUP_ID` and the correlate-1/correlate-2 services' static IPs)
+which real container currently owns that agent's partition, and
+`docker kill`s that exact container - a real `SIGKILL`, not a graceful
+stop and not a Python thread abandoned in a test process - while 4 more
+alerts are still in flight. Real run against the live lab (run twice from
+clean per the hardening task; both runs `exit 0` - this is run 2's full
+output):
+
+```
+=== 1. Correlator consumer group partition split (real, 2 correlators) ===
+GROUP                  TOPIC                   PARTITION  ... HOST            CLIENT-ID
+shadowtracer-correlate shadowtracer.events.raw 13         ... /172.28.0.42    rdkafka
+shadowtracer-correlate shadowtracer.events.raw 12         ... /172.28.0.42    rdkafka
+...(12 rows total for /172.28.0.42 = correlate-1)...
+shadowtracer-correlate shadowtracer.events.raw 11         ... /172.28.0.43    rdkafka
+shadowtracer-correlate shadowtracer.events.raw 10         ... /172.28.0.43    rdkafka
+...(12 rows total for /172.28.0.43 = correlate-2)...
+PASS: correlate-1 (172.28.0.42) owns 12 partitions
+PASS: correlate-2 (172.28.0.43) owns 12 partitions
+PASS: total owned = 24
+
+=== 2. Chaos: kill the correlator owning a real, growing incident's partition ===
+agent chaos-agent-chaos1791375562's events land on partition 5
+partition 5 is currently owned by 172.28.0.43
+will kill shadowtracer-lab-correlate-2-1 (owns partition 5)
+PASS: incident exists and is growing before the kill (alert_count >= 1)
+PASS: incident grew to 4 alerts before the kill
+killing shadowtracer-lab-correlate-2-1 now (docker kill, not a graceful stop)...
+
+=== 3. Rebalance: survivor must pick up all 24 partitions ===
+PASS: survivor owns all 24 partitions after the kill
+
+=== 4. The incident survives and keeps growing across the outage ===
+--- final incident row ---
+ id |          agent_id           | correlation_basis | alert_count | state 
+----+-----------------------------+-------------------+-------------+-------
+ 52 | chaos-agent-chaos1791375562 | source_ip         |          10 | open
+
+PASS: exactly ONE incident for this agent (no split across the kill)
+PASS: alert_count equals every alert produced (10)
+PASS: incident_alerts has no duplicate (tenant_key, node, alert_id)
+
+=== 5. Restart the killed container, confirm it rejoins the group ===
+PASS: shadowtracer-lab-correlate-2-1 is healthy again after restart
+PASS: shadowtracer-lab-correlate-2-1 rejoined the group (owns >0 partitions again)
+PASS: total still 24 after rejoin
+
+VERIFY-CORRELATOR-CHAOS: PASS
+```
+
+All 4 alerts produced *after* the kill (while the group was down to one
+member) were still picked up once the rebalance completed - `alert_count`
+reached 10 (every alert produced across the whole run, before and after
+the kill), on the one incident id that existed before the kill, with zero
+duplicate `incident_alerts` rows. The rebalance also happened to restore
+a clean 12/12 split on rejoin (not required by the test, just what
+librdkafka's default assignor did with 2 members and 24 partitions).
+
+Not bundled into `smoke-test.sh` - see that script's header for why
+(real `docker kill` on a live service, ~60-90s, deliberately kept opt-in
+rather than run on every routine smoke-test invocation). Run directly:
+`cd deploy/lab && ./verify-correlator-chaos.sh`.
 
 ### Two correlation workers → the 24 partitions split, nothing processed twice
 
@@ -355,14 +431,16 @@ nothing duplicated), and both workers' metrics show `alerts_created > 0`
 (both genuinely owned partitions with data, not one grabbing everything).
 `PASSED`.
 
-Real lab evidence for the same property, with the actual 24-partition
-topic and `writer-1`/`writer-2` (the same mechanism `correlate-1`/
-`correlate-2` use):
+Real lab evidence for the same property, for the **correlator's own**
+consumer group specifically (`shadowtracer-correlate` - a prior version
+of this doc showed this section for `shadowtracer-writer` instead, a
+different consumer group on the same topic; see the real-crash section
+above for the correlator group's own full `--describe` output):
 
 ```
-$ kafka-consumer-groups.sh --describe --group shadowtracer-writer
-... 12 partitions owned by writer-1 (172.28.0.40)
-... 12 partitions owned by writer-2 (172.28.0.41)
+$ kafka-consumer-groups.sh --describe --group shadowtracer-correlate
+... 12 partitions owned by correlate-1 (172.28.0.42)
+... 12 partitions owned by correlate-2 (172.28.0.43)
 ```
 
 ### Suppression state machine, over real HTTP
@@ -470,6 +548,80 @@ Distinct fingerprints:               8
 specific traffic (smoke-test SSH brute forces, Step 7 verification runs,
 and this phase's own VERIFY activity) - not a claim about real-world
 attack volume or correlation effectiveness in production.
+
+### Incident id gaps investigated: not a bug
+
+A prior version of this doc showed incident ids up to 25 alongside "total
+incidents: 20" - a mismatch flagged as needing explanation. Current real
+state of the lab's `incidents` table:
+
+```sql
+SELECT min(id), max(id), count(*) FROM incidents;
+
+ min | max | count 
+-----+-----+-------
+   2 |  51 |    44
+```
+
+7 ids missing between 2 and 51 (1, 17, 19, 23, 24, 25, 32 - including, not
+coincidentally, 19/24/25, the exact ids the two-source-IP and
+different-attack VERIFY demonstrations above used and were manually
+cleaned up with `DELETE` after inspection, same as every other real-data
+VERIFY run in this doc tears down its own rows). `incidents.id` is a
+plain Postgres `SERIAL`/`IDENTITY` sequence, and **sequences are not
+transactional** - `nextval()` is permanently consumed the moment a row is
+inserted, whether or not that row is later deleted, and whether or not
+the transaction that inserted it ever commits. A gap by itself is
+therefore not evidence of anything wrong; it's the normal, expected
+consequence of (a) deleting real incidents after inspecting them (this
+doc's own stated practice throughout VERIFY) and (b) any transaction that
+called `incidents.insert()` and then rolled back for an unrelated reason
+before committing (`correlator.py`'s `process_event` wraps the insert and
+every subsequent step in one `with db.begin():` block - see its source;
+a later statement in the same block failing rolls the whole thing back,
+leaving the id consumed but no row).
+
+The real question the task asked was whether a gap could instead be
+hiding a **duplicate-incident-creation bug** - the correlator failing to
+find an already-open incident for a `(tenant_key, correlation_key)` pair
+and wrongly creating a second one with an overlapping time window.
+Checked directly against the real data:
+
+```sql
+-- Any two incidents sharing (tenant_key, correlation_key) with
+-- overlapping [first_seen, last_seen] windows:
+SELECT a.id, b.id FROM incidents a JOIN incidents b
+  ON a.tenant_key = b.tenant_key AND a.correlation_key = b.correlation_key
+  AND a.id < b.id AND a.first_seen <= b.last_seen AND b.first_seen <= a.last_seen;
+(0 rows)
+
+-- Any incident that was created but never got an alert attached
+-- (the one scenario that could leave an id-consuming INSERT committed
+-- without a corresponding, expected row of activity):
+SELECT count(*) FROM incidents WHERE alert_count = 0;
+(0 rows)
+
+-- Any duplicate (tenant_key, node, alert_id) in incident_alerts at all,
+-- anywhere, not just for one test run:
+SELECT tenant_key, node, alert_id, count(*) FROM incident_alerts
+  GROUP BY tenant_key, node, alert_id HAVING count(*) > 1;
+(0 rows)
+```
+
+Zero overlapping windows, zero zero-alert orphans, zero duplicate
+memberships. Multiple incidents DO legitimately share the same
+`correlation_key` over time (e.g. `012|rulegroup:osquery` appears on 8
+different incident ids: `{11,14,20,21,22,27,42,46}`) - expected, since
+this agent's background `osquery`/`ossec` rule groups fire periodically
+across many separate session-gap windows over hours of lab runtime, each
+closing and later reopening as a new incident once quiet long enough.
+That's correct behavior, not the bug being checked for.
+
+**Conclusion: no correlation bug. The gaps are explained entirely by
+ordinary Postgres sequence semantics plus this doc's own practice of
+deleting real VERIFY-demonstration incidents after inspecting them.** No
+code change made for this item - the investigation itself, with real
+evidence, is the resolution.
 
 ### Browser check on the new screens
 

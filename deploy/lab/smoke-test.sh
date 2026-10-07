@@ -7,6 +7,15 @@
 # and the agents we expect to be Active.
 #
 # Run from deploy/lab/: ./smoke-test.sh
+#
+# NOT included here: verify-correlator-chaos.sh (Phase 5A hardening) -
+# real `docker kill` on a live correlate-1/correlate-2 container to prove
+# the correlation engine survives a real crash mid-attack, plus the real
+# correlator consumer group's partition split/rebalance. Kept separate
+# deliberately (not bundled into routine smoke-test runs) since it
+# disrupts a real running service for ~60-90s each time, which a quick
+# structural-health check shouldn't do by default. Run it on its own:
+#   ./verify-correlator-chaos.sh
 set -uo pipefail
 cd "$(dirname "$0")"
 
