@@ -17,25 +17,29 @@ replicas).
 """
 
 import datetime
+import hashlib
 import json
 
 DEAD_LETTER_TOPIC = "shadowtracer.events.dead-letter"
 
-# A raw_event that's HERE because it was too large for Kafka's
-# message.max.bytes (a hostile/edge-case 10MB full_log, say) must not be
-# re-embedded at full size in the envelope this module itself produces to
-# Kafka - that second produce() would fail the exact same way, recursively.
-# Truncating keeps the dead-letter record itself well under the broker's
-# default limit; source_location still points at where to find the
-# original if it's ever needed.
-MAX_RAW_EVENT_BYTES = 65536
+# Stored (both sinks) as a CAPPED PREVIEW plus the full payload's real size
+# and sha256 - never the full payload. Two reasons: a raw_event that's
+# HERE because it was too large for Kafka's message.max.bytes (a
+# hostile/edge-case 10MB full_log, say) must not be re-embedded at full
+# size in the envelope this module itself produces to Kafka - that second
+# produce() would fail the exact same way, recursively - and ClickHouse
+# shouldn't be made to store and retain full attacker-controlled payloads
+# indefinitely just because they failed to parse. The sha256 is what lets
+# anyone who needs the original match it against a replayed/re-shipped
+# copy; source_location plus the preview is normally enough to diagnose
+# the failure without it.
+MAX_RAW_EVENT_PREVIEW_BYTES = 4096
 
 
-def _truncate(raw_event: str) -> str:
-    encoded = raw_event.encode("utf-8", errors="replace")
-    if len(encoded) <= MAX_RAW_EVENT_BYTES:
-        return raw_event
-    return encoded[:MAX_RAW_EVENT_BYTES].decode("utf-8", errors="ignore") + f"...<truncated, {len(encoded)} bytes total>"
+def _preview(encoded: bytes) -> str:
+    if len(encoded) <= MAX_RAW_EVENT_PREVIEW_BYTES:
+        return encoded.decode("utf-8", errors="replace")
+    return encoded[:MAX_RAW_EVENT_PREVIEW_BYTES].decode("utf-8", errors="ignore") + f"...<truncated, {len(encoded)} bytes total>"
 
 
 def send_to_dead_letter(
@@ -50,12 +54,16 @@ def send_to_dead_letter(
 ) -> None:
     failed_at = datetime.datetime.now(datetime.timezone.utc)
     tenant_key = tenant_key or ""
-    raw_event = _truncate(raw_event)
+    encoded = raw_event.encode("utf-8", errors="replace")
+    raw_event_size = len(encoded)
+    raw_event_sha256 = hashlib.sha256(encoded).hexdigest()
+    raw_event_preview = _preview(encoded)
 
     if kafka_producer is not None:
         envelope = {
             "tenant_key": tenant_key, "component": component, "source_location": source_location,
-            "error": error, "raw_event": raw_event, "failed_at": failed_at.isoformat(),
+            "error": error, "raw_event_preview": raw_event_preview, "raw_event_size": raw_event_size,
+            "raw_event_sha256": raw_event_sha256, "failed_at": failed_at.isoformat(),
         }
         kafka_producer.produce(
             DEAD_LETTER_TOPIC, value=json.dumps(envelope).encode(),
@@ -66,6 +74,9 @@ def send_to_dead_letter(
     if ch_client is not None:
         ch_client.insert(
             "dead_letter_events",
-            [[tenant_key, component, source_location, error, raw_event, failed_at]],
-            column_names=["tenant_id", "component", "source_location", "error", "raw_event", "failed_at"],
+            [[tenant_key, component, source_location, error, raw_event_preview, raw_event_size, raw_event_sha256, failed_at]],
+            column_names=[
+                "tenant_id", "component", "source_location", "error",
+                "raw_event_preview", "raw_event_size", "raw_event_sha256", "failed_at",
+            ],
         )

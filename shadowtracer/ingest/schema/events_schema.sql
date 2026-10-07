@@ -186,15 +186,25 @@ ORDER BY (tenant_id, fingerprint_key, incident_id);
 -- all). /health/detail reads per-tenant counts from here, not from any
 -- single component's in-process counter, since those don't survive a
 -- restart or aggregate across replicas.
+--
+-- raw_event_preview is a CAPPED preview (4 KB, dead_letter.py), never the
+-- full payload - this table must not become an indefinite store of full
+-- attacker-controlled data. raw_event_size/raw_event_sha256 describe the
+-- full original payload (sha256 lets anyone who needs it match this row
+-- against a replayed/re-shipped copy). TTL bounds how long even the
+-- preview is kept - 30 days, this is diagnostic data, not an audit trail.
 CREATE TABLE IF NOT EXISTS __DATABASE__.dead_letter_events ON CLUSTER lab_cluster
 (
-    tenant_id       LowCardinality(String),
-    component       LowCardinality(String),
-    source_location String,
-    error           String,
-    raw_event       String CODEC(ZSTD(3)),
-    failed_at       DateTime64(3)
+    tenant_id         LowCardinality(String),
+    component         LowCardinality(String),
+    source_location   String,
+    error             String,
+    raw_event_preview String CODEC(ZSTD(3)),
+    raw_event_size    UInt32,
+    raw_event_sha256  FixedString(64),
+    failed_at         DateTime64(3)
 )
 ENGINE = ReplicatedMergeTree('/clickhouse/tables/__KEEPER_PREFIX__{shard}/dead_letter_events', '{replica}')
 PARTITION BY toYYYYMM(failed_at)
-ORDER BY (tenant_id, failed_at);
+ORDER BY (tenant_id, failed_at)
+TTL toDateTime(failed_at) + INTERVAL 30 DAY;

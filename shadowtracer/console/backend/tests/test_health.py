@@ -62,34 +62,82 @@ def test_dead_letter_counts_per_tenant_zero_when_nothing_dead_lettered(lab_env, 
     assert tenant not in report["by_tenant"]
 
 
-def test_dead_letter_counts_per_tenant_counts_real_rows(lab_env, test_clickhouse_db):
+def _insert_dead_letter_rows(client, tenant, rows):
+    """rows: list of (component, source_location, error, raw_event)."""
     import datetime
+    import hashlib
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    client.insert(
+        "dead_letter_events",
+        [
+            [tenant, component, source_location, error, raw_event, len(raw_event.encode()),
+             hashlib.sha256(raw_event.encode()).hexdigest(), now]
+            for component, source_location, error, raw_event in rows
+        ],
+        column_names=[
+            "tenant_id", "component", "source_location", "error",
+            "raw_event_preview", "raw_event_size", "raw_event_sha256", "failed_at",
+        ],
+    )
+
+
+def test_dead_letter_counts_per_tenant_counts_real_rows(lab_env, test_clickhouse_db):
     import uuid
 
     import clickhouse_connect
 
     settings = _real_settings(lab_env, test_clickhouse_db)
+    object.__setattr__(settings, "dead_letter_alert_threshold", 1)  # low enough that 2 rows trips it
     tenant = f"t-{uuid.uuid4().hex[:8]}"
     client = clickhouse_connect.get_client(
         host="127.0.0.1", port=8123, username=lab_env["CLICKHOUSE_USER"],
         password=lab_env["CLICKHOUSE_PASSWORD"], database=test_clickhouse_db,
     )
     try:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        client.insert(
-            "dead_letter_events",
-            [
-                [tenant, "shipper", "alerts.json:10", "bad json", "{not json", now],
-                [tenant, "writer", "topic:0:5", "bad timestamp", "{}", now],
-            ],
-            column_names=["tenant_id", "component", "source_location", "error", "raw_event", "failed_at"],
-        )
+        _insert_dead_letter_rows(client, tenant, [
+            ("shipper", "alerts.json:10", "bad json", "{not json"),
+            ("writer", "topic:0:5", "bad timestamp", "{}"),
+        ])
 
         report = health_checks.dead_letter_counts_per_tenant(settings)
         assert "error" not in report
+        assert report["threshold"] == 1
         assert report["alert"] is True
         assert report["by_tenant"][tenant]["total"] == 2
+        assert report["by_tenant"][tenant]["over_threshold"] is True
         assert report["by_tenant"][tenant]["by_component"] == {"shipper": 1, "writer": 1}
+    finally:
+        client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant}'")
+        client.close()
+
+
+def test_dead_letter_counts_per_tenant_does_not_alert_below_threshold(lab_env, test_clickhouse_db):
+    """Alerts on VOLUME, not just non-zero: a handful of dead-lettered
+    events under the configured threshold must not raise the alert flag,
+    even though the tenant's total is nonzero."""
+    import uuid
+
+    import clickhouse_connect
+
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    object.__setattr__(settings, "dead_letter_alert_threshold", 10)
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    client = clickhouse_connect.get_client(
+        host="127.0.0.1", port=8123, username=lab_env["CLICKHOUSE_USER"],
+        password=lab_env["CLICKHOUSE_PASSWORD"], database=test_clickhouse_db,
+    )
+    try:
+        _insert_dead_letter_rows(client, tenant, [
+            ("shipper", "alerts.json:10", "bad json", "{not json"),
+            ("writer", "topic:0:5", "bad timestamp", "{}"),
+        ])
+
+        report = health_checks.dead_letter_counts_per_tenant(settings)
+        assert "error" not in report
+        assert report["by_tenant"][tenant]["total"] == 2
+        assert report["by_tenant"][tenant]["over_threshold"] is False
+        assert report["alert"] is False
     finally:
         client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant}'")
         client.close()

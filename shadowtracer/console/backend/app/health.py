@@ -114,7 +114,13 @@ def dead_letter_counts_per_tenant(settings: Settings, window_hours: int = 24) ->
     in the last window_hours, per tenant. A ClickHouse-side count, not a
     component's in-process counter, since those don't survive a restart
     or aggregate across replicas - this is the one place that can
-    actually answer "how many for tenant X"."""
+    actually answer "how many for tenant X".
+
+    Alerts on VOLUME (total over settings.dead_letter_alert_threshold),
+    not merely non-zero - a handful of dead-lettered events is expected
+    background noise (a hostile scanner, a misconfigured one-off agent),
+    not something worth paging anyone over; a tenant producing hundreds
+    of them is a real signal something's actually broken upstream."""
     try:
         client = clickhouse_connect.get_client(
             host=settings.clickhouse_host, port=settings.clickhouse_port,
@@ -133,9 +139,12 @@ def dead_letter_counts_per_tenant(settings: Settings, window_hours: int = 24) ->
             by_tenant.setdefault(tenant_id, {"total": 0, "by_component": {}})
             by_tenant[tenant_id]["total"] += n
             by_tenant[tenant_id]["by_component"][component] = n
+        for tenant in by_tenant.values():
+            tenant["over_threshold"] = tenant["total"] > settings.dead_letter_alert_threshold
         return {
             "window_hours": window_hours,
-            "alert": any(t["total"] > 0 for t in by_tenant.values()),
+            "threshold": settings.dead_letter_alert_threshold,
+            "alert": any(t["over_threshold"] for t in by_tenant.values()),
             "by_tenant": by_tenant,
         }
     except Exception as exc:  # noqa: BLE001
