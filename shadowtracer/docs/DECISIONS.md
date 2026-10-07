@@ -10,6 +10,12 @@
 
 - ML feature location
 - Licensing model
+- `session.timeout.ms` tuning for the correlator's Kafka consumer group:
+  left at librdkafka's default (45s), measured to produce a ~50s real
+  failover on a hard `docker kill` (see PHASE5A_CORRELATION.md's chaos
+  test). Not changed yet - revisit with a real slow-Postgres test (a
+  worker that's alive but can't commit in time may behave differently
+  than a cleanly-killed one) before deciding whether to lower it.
 
 ## Phase 3: queue, tenancy, alert identity, capacity (decided)
 

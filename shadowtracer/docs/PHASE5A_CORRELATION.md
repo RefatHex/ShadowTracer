@@ -440,31 +440,50 @@ VERIFY-CORRELATOR-CHAOS: PASS
 All 6 cycles across both runs: exactly one incident, `alert_count` equal
 to every alert produced (20 - 1 probe + 19 stream alerts), zero duplicate
 `incident_alerts` rows, both correlate-1 and correlate-2 killed as owner
-at least twice each. Every failover number clusters tightly around
-**47.8-50.3 seconds**. librdkafka's documented default
-`session.timeout.ms` is 45000ms (45s) - the broker only reassigns a dead
-member's partitions once its session expires, since `docker kill`
-(`SIGKILL`) gives the consumer no chance to send a graceful `LeaveGroup`
-first. The observed numbers (45s + ~3-5s of rebalance protocol round-trip
-and catch-up processing) are consistent with that default being the
-dominant driver. This wasn't queried from a live config dump (confluent_kafka's
-Python wrapper doesn't expose one) - it's librdkafka's well-documented
-default, corroborated here by how closely the real numbers track it. **Not
-tuned, per instruction** - this is a report, not a change.
+at least twice each.
+
+**What this script proves, stated plainly: failover and continuity -
+NOT redelivery de-duplication.** `alerts_duplicate` (the survivor's own
+metric, scraped live) was 0 in all 6 cycles: no uncommitted message was
+ever actually redelivered in these runs, so the idempotency path was
+never exercised here. That path is proven separately and deterministically
+by the Kafka-replay test below
+(`test_replaying_a_kafka_range_does_not_duplicate_membership_or_change_counts`),
+which forces a real replay of already-committed offsets. What this
+chaos script DOES prove, with real evidence: the correlation engine
+survives a real container crash mid-attack without losing or
+double-counting a single alert, and recovers automatically once the
+group rebalances.
+
+**Known correlator failover time: ~50 seconds** (47.8-50.3s across 6
+real runs). librdkafka's documented default `session.timeout.ms` is
+45000ms (45s) - the broker only reassigns a dead member's partitions
+once its session expires, since `docker kill` (`SIGKILL`) gives the
+consumer no chance to send a graceful `LeaveGroup` first. The observed
+numbers (45s + ~3-5s of rebalance protocol round-trip and catch-up
+processing) are consistent with that default being the dominant driver.
+This wasn't queried from a live config dump (confluent_kafka's Python
+wrapper doesn't expose one) - it's librdkafka's well-documented default,
+corroborated here by how closely the real numbers track it.
+
+**Open item for a later phase, not changed here**: `session.timeout.ms`
+is not tuned by this work. A ~50s correlation outage per correlator crash
+may or may not be acceptable depending on what's built on top of
+incidents later (alerting latency SLAs, etc.) - revisit with a real
+slow-Postgres test (a worker that's alive but can't commit in time could
+behave differently than a cleanly-killed one) before deciding whether to
+lower it.
 
 **Redelivery-dedup count was 0 in all 6 cycles** - reported honestly, not
-omitted because it's a "boring" number. This doesn't mean the idempotency
-path is untested: the Kafka-replay test below
-(`test_replaying_a_kafka_range_does_not_duplicate_membership_or_change_counts`)
-exercises it directly and deterministically. In this chaos test
-specifically, the baseline alert count is captured only *after* the kill
-is confirmed delivered, which means by construction the victim is already
-dead before anything is counted - a true duplicate here would require the
-kill to have landed in the narrow window between a message's Postgres
-commit and its Kafka offset commit, which `SIGKILL`'s arbitrary timing
-relative to the consumer's own processing cycle makes possible but
-evidently didn't hit in these particular 6 runs. Zero is a real,
-unmassaged measurement, not a claim that this window can never be hit.
+omitted because it's a "boring" number. In this chaos test specifically,
+the baseline alert count is captured only *after* the kill is confirmed
+delivered, which means by construction the victim is already dead before
+anything is counted - a true duplicate here would require the kill to
+have landed in the narrow window between a message's Postgres commit and
+its Kafka offset commit, which `SIGKILL`'s arbitrary timing relative to
+the consumer's own processing cycle makes possible but evidently didn't
+hit in these particular 6 runs. Zero is a real, unmassaged measurement,
+not a claim that this window can never be hit.
 
 Not bundled into `smoke-test.sh` - see that script's header for why (real
 `docker kill` on live services, ~5-6 minutes for all 3 cycles per
