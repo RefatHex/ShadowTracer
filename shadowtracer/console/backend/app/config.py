@@ -55,6 +55,7 @@ class Settings:
     kafka_bootstrap_servers: str
     writer_consumer_group: str
     dead_letter_alert_threshold: int = 50
+    lag_retention_alert_fraction: float = 0.25
     access_token_ttl_seconds: int = 900  # 15 minutes
     refresh_token_ttl_seconds: int = 60 * 60 * 24 * 7  # 7 days
     lockout_threshold: int = 5
@@ -97,6 +98,7 @@ def load_settings() -> Settings:
         kafka_bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9094"),
         writer_consumer_group=os.environ.get("KAFKA_WRITER_GROUP", "shadowtracer-writer"),
         dead_letter_alert_threshold=int(os.environ.get("DEAD_LETTER_ALERT_THRESHOLD", "50")),
+        lag_retention_alert_fraction=float(os.environ.get("LAG_RETENTION_ALERT_FRACTION", "0.25")),
         access_token_ttl_seconds=int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", "900")),
         refresh_token_ttl_seconds=int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", str(60 * 60 * 24 * 7))),
         lockout_threshold=int(os.environ.get("LOCKOUT_THRESHOLD", "5")),

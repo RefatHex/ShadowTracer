@@ -402,3 +402,72 @@ incident's id - the same mechanism `app/audit.py` already uses for
 `append_entry`, just a per-incident key instead of one fixed key - makes
 losing the race for a given incident a normal, silent no-op rather than
 a double-close.
+
+## Kafka retention: 7 days explicit on events.raw and events.dead-letter
+
+Both topics' `retention.ms` are now set explicitly by
+`deploy/lab/create-kafka-topics.sh` (7 days, `604800000`), re-applied on
+every run even for a topic that already exists - the same
+"explicit-not-implicit" reasoning as the partition count entry above, but
+retention is a dynamic topic config (safe to change later), not a
+structural property, so unlike partition count this script always
+re-asserts it rather than create-once-leave-alone.
+
+**Why this mattered**: both topics had been running on
+`auto.create.topics.enable`'s implicit defaults - confirmed by querying
+`events.raw`'s config before this change and finding `retention.ms`
+reported with `source: DEFAULT_CONFIG, is_default: True` (604800000, the
+*broker's* cluster-wide default, which only happens to already be 7 days
+- nothing was pinning it there, and a future broker config change would
+have silently changed it under us). `events.dead-letter` had never been
+explicitly provisioned at all - like `events.raw` before Phase 4's
+partition-count fix, it existed only because something had produced to
+it once, at whatever partition count and retention the broker defaulted
+to at that moment.
+
+**Why 7 days, and why this is a placeholder, not a capacity-planning
+result**: matches `dead_letter_events`' ClickHouse TTL (30 days;
+dead-lettered diagnostic data is kept longer there than its originating
+Kafka message, since replaying from Kafka is the point of the dead-letter
+topic but ClickHouse is where someone actually goes looking for it) and
+gives comfortable headroom over the writer/correlator's normal
+consumption latency (seconds, not days) without committing to a specific
+disk budget yet - revisit with real production retention/compliance
+requirements before Phase 9, same caveat as the partition count decision.
+
+**`events.dead-letter`'s partition count (6, not 24)**: no per-agent
+ordering guarantee depends on this topic the way `events.raw`'s does -
+dead-lettered records are inspected/replayed, never correlated by agent
+- so under-provisioning it isn't the same one-way door `events.raw`'s
+partition count is. 6 is "comfortably more than 1" for this topic's
+expected volume (a small fraction of the main event stream), the same
+placeholder spirit as 24 was for `events.raw`, not a derived number.
+Note: this lab's `events.dead-letter` topic had already been
+auto-created (by earlier dead-letter test runs, before this fix existed)
+at the implicit 1-partition default before this script ever ran against
+it - `create-kafka-topics.sh` intentionally leaves an existing topic's
+partition count alone (same policy as `events.raw`), so this lab
+instance is still running dead-letter on 1 partition; a from-scratch
+deployment gets 6 from the start.
+
+## /health/detail: lag measured as an AGE against retention, not just an offset count
+
+`writer_consumer_lag` already reported lag in offsets (log end offset
+minus committed offset, summed across partitions) - but an offset count
+alone doesn't say how close a stalled consumer is to actually losing
+data: whether 1,000,000 offsets behind means "five minutes of normal
+traffic" or "about to fall off the retention window entirely" depends
+entirely on produce rate, which isn't known at the health-check layer.
+Converted to something that answers the real question directly: for
+whichever lagging partition's oldest unconsumed message is OLDEST, how
+old is it (fetched by assigning a throwaway consumer to that partition's
+committed offset and reading just that one message's timestamp - it's
+never committed back, so this doesn't disturb the real consumer group's
+position), as a fraction of the topic's own `retention.ms` (read live via
+`AdminClient.describe_configs`, not a duplicated Python constant, so it
+can never drift from what's actually configured on the topic above).
+Alerts past a configurable fraction (`LAG_RETENTION_ALERT_FRACTION`,
+default 0.25) - a quarter of the retention window elapsed with a
+consumer still behind is "this will start losing data if it doesn't
+catch up soon", which is the actual operational question, not "is the
+offset count non-zero".

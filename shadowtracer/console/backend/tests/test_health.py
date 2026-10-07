@@ -53,6 +53,93 @@ def test_check_kafka_reports_failure_for_wrong_bootstrap(lab_env, test_clickhous
     assert not ok
 
 
+def test_writer_consumer_lag_reports_zero_when_caught_up(lab_env, test_clickhouse_db):
+    import time
+    import uuid
+
+    from confluent_kafka import Consumer, Producer
+    from confluent_kafka.admin import AdminClient, NewTopic
+
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    group_id = f"test-lag-{uuid.uuid4().hex[:8]}"
+    topic = f"shadowtracer.test.lag.{uuid.uuid4().hex[:8]}"
+    object.__setattr__(settings, "writer_consumer_group", group_id)
+
+    admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers})
+    admin.create_topics([NewTopic(topic, num_partitions=1, replication_factor=1)])
+    time.sleep(1)
+    try:
+        producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
+        producer.produce(topic, value=b"x")
+        producer.flush(10)
+
+        consumer = Consumer({
+            "bootstrap.servers": settings.kafka_bootstrap_servers,
+            "group.id": group_id, "auto.offset.reset": "earliest", "enable.auto.commit": False,
+        })
+        consumer.subscribe([topic])
+        msg = consumer.poll(10)
+        assert msg is not None and msg.error() is None
+        consumer.commit(msg)
+        consumer.close()
+
+        report = health_checks.writer_consumer_lag(settings)
+        group = report[group_id]
+        assert group["total_lag"] == 0
+        assert group["oldest_unconsumed_age_seconds"] == 0
+        assert group["alert"] is False
+    finally:
+        admin.delete_topics([topic])
+
+
+def test_writer_consumer_lag_reports_age_when_behind(lab_env, test_clickhouse_db):
+    """Offset lag alone doesn't say how close to falling off the topic's
+    retention a stalled consumer is - this proves the age/fraction
+    mechanics work (a few just-produced messages are seconds old, nowhere
+    near 25% of a multi-day retention window, so alert stays False without
+    needing to wait for real staleness)."""
+    import time
+    import uuid
+
+    from confluent_kafka import Consumer, Producer
+    from confluent_kafka.admin import AdminClient, NewTopic
+
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    group_id = f"test-lag-{uuid.uuid4().hex[:8]}"
+    topic = f"shadowtracer.test.lag.{uuid.uuid4().hex[:8]}"
+    object.__setattr__(settings, "writer_consumer_group", group_id)
+
+    admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers})
+    admin.create_topics([NewTopic(topic, num_partitions=1, replication_factor=1)])
+    time.sleep(1)
+    try:
+        producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
+        for _ in range(5):
+            producer.produce(topic, value=b"x")
+        producer.flush(10)
+
+        consumer = Consumer({
+            "bootstrap.servers": settings.kafka_bootstrap_servers,
+            "group.id": group_id, "auto.offset.reset": "earliest", "enable.auto.commit": False,
+        })
+        consumer.subscribe([topic])
+        for _ in range(2):  # consume+commit only 2 of 5 - leaves 3 behind
+            msg = consumer.poll(10)
+            assert msg is not None and msg.error() is None
+            consumer.commit(msg)
+        consumer.close()
+
+        report = health_checks.writer_consumer_lag(settings)
+        group = report[group_id]
+        assert group["total_lag"] == 3
+        assert group["oldest_unconsumed_age_seconds"] >= 0
+        assert group["retention_seconds"] is not None
+        assert group["fraction_of_retention"] >= 0
+        assert group["alert"] is False
+    finally:
+        admin.delete_topics([topic])
+
+
 def test_dead_letter_counts_per_tenant_zero_when_nothing_dead_lettered(lab_env, test_clickhouse_db):
     import uuid
     settings = _real_settings(lab_env, test_clickhouse_db)

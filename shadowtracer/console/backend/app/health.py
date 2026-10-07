@@ -9,7 +9,7 @@ import datetime
 import clickhouse_connect
 import httpx
 from confluent_kafka import Consumer, ConsumerGroupTopicPartitions, TopicPartition
-from confluent_kafka.admin import AdminClient
+from confluent_kafka.admin import AdminClient, ConfigResource
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -77,9 +77,23 @@ def shipper_lag_per_node(settings: Settings) -> dict:
     return result
 
 
+def _topic_retention_ms(admin: AdminClient, topic: str) -> int | None:
+    futures = admin.describe_configs([ConfigResource(ConfigResource.Type.TOPIC, topic)])
+    for _, future in futures.items():
+        config = future.result(timeout=5)
+        entry = config.get("retention.ms")
+        return int(entry.value) if entry is not None else None
+    return None
+
+
 def writer_consumer_lag(settings: Settings) -> dict:
     """Total lag (log end offset - committed offset) for the writer's
-    consumer group, summed across partitions, plus per-partition detail."""
+    consumer group, summed across partitions, plus per-partition detail -
+    and, for whichever lagging partition's oldest unconsumed message is
+    OLDEST, how old it is as a fraction of the topic's own retention.
+    Offset lag alone doesn't say how close a stalled consumer is to
+    falling off the retention window and losing data outright - this
+    does, which is what actually matters operationally."""
     try:
         admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers})
         group_futures = admin.list_consumer_group_offsets(
@@ -95,14 +109,43 @@ def writer_consumer_lag(settings: Settings) -> dict:
             })
             total_lag = 0
             partitions = []
+            lagging = []  # (topic, partition, committed) for partitions with lag > 0
             for tp in group_result.topic_partitions:
                 low, high = consumer.get_watermark_offsets(TopicPartition(tp.topic, tp.partition), timeout=5)
                 committed = tp.offset if tp.offset >= 0 else low
                 lag = max(0, high - committed)
                 total_lag += lag
                 partitions.append({"topic": tp.topic, "partition": tp.partition, "committed": committed, "high_watermark": high, "lag": lag})
+                if lag > 0:
+                    lagging.append((tp.topic, tp.partition, committed))
+
+            # Separate pass (not interleaved with the watermark queries
+            # above): assigns the consumer to each lagging partition's
+            # committed offset and reads just that one message to get its
+            # timestamp - the AGE of the oldest thing not yet consumed.
+            oldest_age_seconds = 0.0
+            lagging_topic = None
+            for topic, partition, committed in lagging:
+                consumer.assign([TopicPartition(topic, partition, committed)])
+                msg = consumer.poll(5)
+                if msg is not None and msg.error() is None:
+                    _, ts_ms = msg.timestamp()
+                    age_seconds = max(0.0, datetime.datetime.now(datetime.timezone.utc).timestamp() - ts_ms / 1000)
+                    if age_seconds > oldest_age_seconds:
+                        oldest_age_seconds = age_seconds
+                        lagging_topic = topic
             consumer.close()
-            results[group_id] = {"status": "ok", "total_lag": total_lag, "partitions": partitions}
+
+            retention_ms = _topic_retention_ms(admin, lagging_topic) if lagging_topic else None
+            retention_seconds = (retention_ms / 1000) if retention_ms else None
+            fraction = (oldest_age_seconds / retention_seconds) if retention_seconds else 0.0
+            results[group_id] = {
+                "status": "ok", "total_lag": total_lag, "partitions": partitions,
+                "oldest_unconsumed_age_seconds": oldest_age_seconds,
+                "retention_seconds": retention_seconds,
+                "fraction_of_retention": fraction,
+                "alert": fraction >= settings.lag_retention_alert_fraction,
+            }
         return results
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
