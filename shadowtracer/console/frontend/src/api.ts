@@ -40,6 +40,17 @@ export interface IncidentSummary {
   state: string
   triage_status: string
   fingerprint_key: string | null
+  rare_pattern_flag: boolean
+  rare_pattern_occurrence_count: number | null
+  rare_pattern_reason: string | null
+}
+
+export interface WarmupStatus {
+  complete: boolean
+  days_elapsed: number
+  warmup_days: number
+  incident_count: number
+  warmup_min_incidents: number
 }
 
 export interface IncidentsPage {
@@ -146,6 +157,13 @@ export async function fetchAlerts(accessToken: string, cursor?: string | null): 
 
 function authHeaders(accessToken: string) {
   return { Authorization: `Bearer ${accessToken}` }
+}
+
+export async function fetchWarmupStatus(accessToken: string): Promise<WarmupStatus> {
+  const resp = await fetch(`${API_BASE}/api/rare-pattern-warmup-status`, {
+    headers: authHeaders(accessToken), credentials: 'include',
+  })
+  return handle<WarmupStatus>(resp)
 }
 
 export async function fetchIncidents(accessToken: string, state?: 'open' | 'closed'): Promise<IncidentsPage> {

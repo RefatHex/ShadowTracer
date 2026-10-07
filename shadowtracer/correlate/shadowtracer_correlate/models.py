@@ -5,8 +5,8 @@ with it by hand, same as shadowtracer/console/backend/app/models.py does
 for the auth tables)."""
 
 from sqlalchemy import (
-    CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint,
-    Integer, MetaData, SmallInteger, String, Table, Text, UniqueConstraint, func,
+    Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint,
+    Integer, MetaData, SmallInteger, String, Table, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 
@@ -37,6 +37,9 @@ incidents = Table(
     Column("closed_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("rare_pattern_flag", Boolean, nullable=False, server_default=text("false")),
+    Column("rare_pattern_occurrence_count", Integer, nullable=True),
+    Column("rare_pattern_reason", Text, nullable=True),
     CheckConstraint("state IN ('open', 'closed')", name="incidents_state_check"),
     CheckConstraint(
         "triage_status IN ('new', 'acknowledged', 'escalated', 'false_positive', 'closed')",
@@ -101,5 +104,14 @@ agent_role_tags = Table(
     Column("agent_id", String(255), primary_key=True),
     Column("role_tag", String(100), nullable=True),
     Column("os_family", String(50), nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
+tenant_alert_settings = Table(
+    "tenant_alert_settings", metadata,
+    Column("tenant_key", String(64), primary_key=True),
+    Column("rare_alert_warmup_days", Integer, nullable=False, server_default="7"),
+    Column("rare_alert_warmup_min_incidents", Integer, nullable=False, server_default="30"),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )

@@ -9,7 +9,7 @@ from app import security
 from app.config import Settings
 from app.db import make_session_factory
 from app.main import create_app
-from app.models import audit_log, fingerprints, incident_alerts, incidents, tenants, users
+from app.models import audit_log, fingerprints, incident_alerts, incidents, tenant_alert_settings, tenants, users
 
 COLUMNS = [
     "tenant_id", "time", "cluster_node", "manager_name", "alert_id",
@@ -95,13 +95,18 @@ def _token_for(client, db, tenant_pg_id, email, role="viewer"):
     return resp.json()["access_token"]
 
 
-def _make_incident(db, tenant_key, agent_id="agent-1", alert_count=10, fingerprint_key=None, state="open"):
+def _make_incident(
+    db, tenant_key, agent_id="agent-1", alert_count=10, fingerprint_key=None, state="open",
+    rare_pattern_flag=False, rare_pattern_occurrence_count=None, rare_pattern_reason=None,
+):
     now = datetime.datetime.now(datetime.timezone.utc)
     incident_id = db.execute(
         incidents.insert().values(
             tenant_key=tenant_key, correlation_key=f"{agent_id}|srcip:8.8.8.8", correlation_basis="source_ip",
             agent_id=agent_id, first_seen=now, last_seen=now, alert_count=alert_count, max_level=5,
             state=state, fingerprint_key=fingerprint_key,
+            rare_pattern_flag=rare_pattern_flag, rare_pattern_occurrence_count=rare_pattern_occurrence_count,
+            rare_pattern_reason=rare_pattern_reason,
         ).returning(incidents.c.id)
     ).scalar_one()
     db.commit()  # the route handler uses a different session/connection - must be committed to be visible to it
@@ -221,3 +226,65 @@ def test_suppression_flow_via_the_real_api(client, db, tenant):
     }
     assert "fingerprint_suppression_proposed" in audit_actions
     assert "fingerprint_suppression_activated" in audit_actions
+
+
+def test_fresh_tenant_warmup_status_is_incomplete(client, db, tenant):
+    """Phase 5B Step 3: a fresh tenant with no incidents at all must show
+    an incomplete warm-up status via the real API, no row required in
+    tenant_alert_settings to get the default (7 days, 30 incidents)."""
+    tenant_id, tenant_key = tenant
+    token = _token_for(client, db, tenant_id, f"viewer-{uuid.uuid4().hex[:8]}@example.com")
+
+    resp = client.get("/api/rare-pattern-warmup-status", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["complete"] is False
+    assert body["incident_count"] == 0
+    assert body["warmup_days"] == 7
+    assert body["warmup_min_incidents"] == 30
+
+
+def test_warmup_status_respects_per_tenant_override(client, db, tenant):
+    tenant_id, tenant_key = tenant
+    db.execute(tenant_alert_settings.insert().values(
+        tenant_key=tenant_key, rare_alert_warmup_days=1, rare_alert_warmup_min_incidents=1,
+    ))
+    db.commit()
+    old_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=10)
+    db.execute(incidents.insert().values(
+        tenant_key=tenant_key, correlation_key="k", correlation_basis="source_ip", agent_id="agent-1",
+        first_seen=old_time, last_seen=old_time, created_at=old_time,
+    ))
+    db.commit()
+    token = _token_for(client, db, tenant_id, f"viewer-{uuid.uuid4().hex[:8]}@example.com")
+
+    resp = client.get("/api/rare-pattern-warmup-status", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["complete"] is True
+    assert body["warmup_days"] == 1
+    assert body["warmup_min_incidents"] == 1
+
+
+def test_rare_pattern_flag_surfaces_in_list_and_detail(client, db, tenant):
+    """A rare-pattern flag is additive - the incident appears in the list
+    and detail exactly as any other would, with the flag/count/reason
+    alongside everything else, never hiding or replacing anything."""
+    tenant_id, tenant_key = tenant
+    incident_id = _make_incident(
+        db, tenant_key, rare_pattern_flag=True, rare_pattern_occurrence_count=0,
+        rare_pattern_reason="Never seen before for this tenant - this is the first occurrence of this fingerprint.",
+    )
+    token = _token_for(client, db, tenant_id, f"viewer-{uuid.uuid4().hex[:8]}@example.com")
+
+    list_resp = client.get("/api/incidents", headers={"Authorization": f"Bearer {token}"})
+    assert list_resp.status_code == 200
+    item = next(i for i in list_resp.json()["incidents"] if i["id"] == incident_id)
+    assert item["rare_pattern_flag"] is True
+    assert item["rare_pattern_occurrence_count"] == 0
+
+    detail_resp = client.get(f"/api/incidents/{incident_id}", headers={"Authorization": f"Bearer {token}"})
+    assert detail_resp.status_code == 200
+    body = detail_resp.json()
+    assert body["rare_pattern_flag"] is True
+    assert "Never seen before" in body["rare_pattern_reason"]

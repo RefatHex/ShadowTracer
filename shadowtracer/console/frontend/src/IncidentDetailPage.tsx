@@ -72,6 +72,12 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
         {incident.correlation_basis} · {incident.state} · {incident.triage_status} ·{' '}
         {incident.alert_count} alerts · max level {incident.max_level}
       </p>
+      {incident.rare_pattern_flag && (
+        <p className="mb-4 rounded bg-purple-50 dark:bg-purple-900/30 px-3 py-2 text-sm text-purple-800 dark:text-purple-300">
+          Rare pattern (seen {incident.rare_pattern_occurrence_count} time(s) before for this tenant):{' '}
+          {incident.rare_pattern_reason}
+        </p>
+      )}
 
       <div className="mb-6 grid grid-cols-2 gap-4 text-sm">
         <div>

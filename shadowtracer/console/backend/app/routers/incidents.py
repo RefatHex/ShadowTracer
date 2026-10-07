@@ -16,6 +16,7 @@ from ..audit import append_entry
 from ..config import Settings
 from ..deps import get_db, get_settings
 from ..models import incident_alerts, incidents
+from ..rarity import warmup_status
 from ..rbac import ALL_ROLES, ANALYST_OR_ABOVE, CurrentUser
 
 router = APIRouter(prefix="/api", tags=["incidents"])
@@ -40,6 +41,11 @@ class IncidentSummary(BaseModel):
     state: str
     triage_status: str
     fingerprint_key: str | None
+    # Phase 5B Step 3: a flag, never a replacement for the incident - every
+    # other field above is populated exactly as before regardless of this.
+    rare_pattern_flag: bool
+    rare_pattern_occurrence_count: int | None
+    rare_pattern_reason: str | None
 
 
 class IncidentsPage(BaseModel):
@@ -99,6 +105,22 @@ def _encode_cursor(first_seen: datetime.datetime, incident_id: int) -> str:
 def _decode_cursor(cursor: str) -> tuple[str, int]:
     time_part, id_part = cursor.split("|", 1)
     return time_part, int(id_part)
+
+
+class WarmupStatus(BaseModel):
+    complete: bool
+    days_elapsed: int
+    warmup_days: int
+    incident_count: int
+    warmup_min_incidents: int
+
+
+@router.get("/rare-pattern-warmup-status", response_model=WarmupStatus)
+def get_rare_pattern_warmup_status(db: Session = Depends(get_db), current_user: CurrentUser = Depends(ALL_ROLES)):
+    """Phase 5B Step 3: "warming up (day X of 7, Y of N incidents)" -
+    read-only, scoped to the caller's own tenant only (same rule as every
+    other query in this router)."""
+    return WarmupStatus(**warmup_status(db, current_user.tenant_key))
 
 
 @router.get("/incidents", response_model=IncidentsPage)

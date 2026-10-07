@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from .fingerprint import RULESET_VERSION, compute_fingerprint
 from .models import agent_role_tags, fingerprints, incidents
+from .rarity import evaluate_rare_pattern
 
 
 def close_eligible_incidents(
@@ -81,6 +82,10 @@ def close_eligible_incidents(
             )
             closed_at = datetime.datetime.now(datetime.timezone.utc)
 
+            # Phase 5B Step 3: evaluated BEFORE the occurrence row below is
+            # inserted, so "how many times before this one" is still true.
+            rare = evaluate_rare_pattern(db, ch_client, clickhouse_database, row["tenant_key"], fingerprint_key)
+
             # ClickHouse before the PostgreSQL commit - see module docstring.
             ch_client.insert(
                 "fingerprint_occurrences",
@@ -93,6 +98,9 @@ def close_eligible_incidents(
                 incidents.update().where(incidents.c.id == incident_id).values(
                     state="closed", closed_at=closed_at,
                     fingerprint_key=fingerprint_key, ruleset_version=RULESET_VERSION,
+                    rare_pattern_flag=rare is not None,
+                    rare_pattern_occurrence_count=rare["occurrence_count"] if rare else None,
+                    rare_pattern_reason=rare["reason"] if rare else None,
                 )
             )
             db.execute(
