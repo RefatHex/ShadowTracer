@@ -8,7 +8,7 @@ from sqlalchemy import (
     Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint,
     Integer, MetaData, SmallInteger, String, Table, Text, UniqueConstraint, func, text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 metadata = MetaData()
 
@@ -114,4 +114,24 @@ tenant_alert_settings = Table(
     Column("rare_alert_warmup_min_incidents", Integer, nullable=False, server_default="30"),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
+sequence_progress = Table(
+    "sequence_progress", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_key", String(64), nullable=False),
+    Column("sequence_id", String(100), nullable=False),
+    Column("agent_id", String(255), nullable=False),
+    Column("key_type", String(20), nullable=False),
+    Column("key_value", String(255), nullable=False),
+    Column("current_step", Integer, nullable=False, server_default="0"),
+    Column("first_step_at", DateTime(timezone=True), nullable=False),
+    Column("last_step_at", DateTime(timezone=True), nullable=False),
+    Column("step_matches", JSONB, nullable=False, server_default="[]"),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint(
+        "tenant_key", "sequence_id", "agent_id", "key_type", "key_value",
+        name="sequence_progress_identity_unique",
+    ),
+    CheckConstraint("key_type IN ('source_ip', 'user')", name="sequence_progress_key_type_check"),
 )

@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from .models import incident_alerts, incidents
+from .sequences import evaluate_sequences
 
 DEFAULT_SESSION_GAP_SECONDS = 600
 DEFAULT_MAX_SPAN_SECONDS = 4 * 3600
@@ -93,13 +94,25 @@ def process_event(
     session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
     max_span_seconds: int = DEFAULT_MAX_SPAN_SECONDS,
     cap: int = CAPPED_VALUES_LIMIT,
+    sequences: list | None = None,
+    ch_client=None,
+    clickhouse_database: str | None = None,
 ) -> CorrelationResult:
     """One alert, one transaction. Safe to call twice for the same alert
     (a Kafka replay): the second call is a no-op past the idempotency
     check (incident_alerts' unique constraint), never a duplicate
     membership row or a double-counted incident. Caller commits Kafka
     offsets only after this returns without raising - see
-    run_correlator.py."""
+    run_correlator.py.
+
+    Phase 5B Step 4: sequences/ch_client/clickhouse_database are optional
+    - omitted (None), sequence detection is simply not evaluated for this
+    call (existing tests that don't care about it need no changes).
+    Passed, shadowtracer_correlate.sequences.evaluate_sequences runs
+    INSIDE this same transaction, right after the idempotency check below
+    - so sequence progress commits or rolls back atomically with the
+    incident/membership write it's based on, same "never in memory"
+    reasoning as everything else here."""
     key_and_basis = correlation_key_and_basis(event)
     if key_and_basis is None:
         return CorrelationResult(status="unkeyable", incident_id=None)
@@ -167,6 +180,9 @@ def process_event(
             # Replay of an alert already counted in this incident - the
             # whole point of the idempotency key. Nothing else to do.
             return CorrelationResult(status="duplicate", incident_id=incident_id)
+
+        if sequences and ch_client is not None:
+            evaluate_sequences(db, ch_client, clickhouse_database, sequences, event.tenant_id, event, alert_time)
 
         current = db.execute(
             select(incidents).where(incidents.c.id == incident_id).with_for_update()

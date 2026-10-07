@@ -6,10 +6,13 @@ ShadowTracer checkout ships."""
 
 import os
 
+import yaml
+
 from shadowtracer_ingest import ruleset
 
 RULESET_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ruleset", "rules")
 MITRE_JSON = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ruleset", "mitre", "enterprise-attack.json")
+SEQUENCES_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "correlate", "sequences")
 
 
 def test_real_ruleset_directory_exists_and_has_rule_files():
@@ -92,3 +95,25 @@ def test_attack_coverage_map_resolves_tactics_for_a_known_technique():
     assert len(coverage["T1110"]["rule_ids"]) > 0
     # the excluded templated placeholder must never appear as a coverage key
     assert "$(threat.software.id)" not in coverage
+
+
+def test_every_sequence_yaml_uses_only_real_rule_groups():
+    """Phase 5B Step 1/4: every rule group named in any sequence YAML
+    (shadowtracer/correlate/sequences/*.yaml) must exist in the real
+    ruleset's own groups - never invented. Fails loudly (naming the
+    offending sequence/group) if one doesn't, rather than silently
+    letting a step that can never match ship."""
+    assert os.path.isdir(SEQUENCES_DIR), f"expected sequence definitions at {SEQUENCES_DIR}"
+    yaml_files = [f for f in os.listdir(SEQUENCES_DIR) if f.endswith((".yaml", ".yml"))]
+    assert len(yaml_files) >= 3, "Phase 5B Step 4 calls for a curated set of 3 to 5 sequences"
+
+    real_groups = ruleset.all_rule_groups(RULESET_DIR)
+    invented = []
+    for name in yaml_files:
+        with open(os.path.join(SEQUENCES_DIR, name)) as f:
+            seq = yaml.safe_load(f)
+        for step_group in seq["steps"]:
+            if step_group not in real_groups:
+                invented.append(f"{seq['id']} ({name}): step group {step_group!r} does not exist in the real ruleset")
+
+    assert not invented, "\n".join(invented)

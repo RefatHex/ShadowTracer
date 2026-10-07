@@ -1,0 +1,16 @@
+# Phase 5B Step 4: a burst of failed SSH logins followed by a successful
+# one from the same source - the spec's own worked example ("a
+# failed-login burst followed by a success from the same IP"). Rule
+# groups confirmed against the real ruleset (ruleset/rules/0095-sshd_rules.xml,
+# rule 5710 is "authentication_failed", rule 5715 is "authentication_success") -
+# shadowtracer/ingest/tests/test_ruleset.py's sequence-group validation
+# test fails loudly if either name ever stops existing in the real ruleset.
+id: ssh_brute_force_then_success
+description: >
+  A failed SSH authentication followed by a successful one from the same
+  source IP against the same agent - classic "guessed it eventually".
+window_seconds: 600
+key: source_ip
+steps:
+  - authentication_failed
+  - authentication_success

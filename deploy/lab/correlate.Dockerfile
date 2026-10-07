@@ -11,6 +11,7 @@ COPY shadowtracer/correlate/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY shadowtracer/correlate/shadowtracer_correlate ./shadowtracer_correlate
 COPY shadowtracer/correlate/run_correlator.py shadowtracer/correlate/run_closer.py ./
+COPY shadowtracer/correlate/sequences ./sequences
 COPY shadowtracer/ingest/shadowtracer_ingest /ingest/shadowtracer_ingest
 
 # Unlike ingest.Dockerfile's shipper/writer split, both commands this

@@ -1,0 +1,15 @@
+# Rule groups confirmed against the real ruleset: "invalid_login" (rule
+# 5710 - the same "attempt to login using a non-existent user" rule this
+# project's own normalizer bugfix regression test anchors on) and
+# "authentication_success" (rule 5715).
+id: ssh_invalid_user_then_success
+description: >
+  Username-enumeration-style attempts (non-existent users) followed by a
+  successful login from the same source IP against the same agent -
+  distinct from ssh_brute_force_then_success, which only covers valid
+  usernames with wrong passwords.
+window_seconds: 600
+key: source_ip
+steps:
+  - invalid_login
+  - authentication_success

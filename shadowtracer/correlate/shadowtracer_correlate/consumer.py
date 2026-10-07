@@ -40,6 +40,7 @@ from sqlalchemy.orm import sessionmaker
 
 from .correlator import DEFAULT_MAX_SPAN_SECONDS, DEFAULT_SESSION_GAP_SECONDS, UnparseableEvent, process_event
 from .metrics import Metrics
+from .sequences import load_sequences
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +60,19 @@ def run(
     session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
     max_span_seconds: int = DEFAULT_MAX_SPAN_SECONDS,
     ch_client=None,
+    clickhouse_database: str | None = None,
+    sequences_dir: str | None = None,
 ):
     """ch_client is optional (None is fine, e.g. in tests that don't care
     about dead-letter counts) - a dead-lettered event still always goes to
     the Kafka dead-letter topic either way; ch_client only adds the
-    queryable-per-tenant-count side of send_to_dead_letter."""
+    queryable-per-tenant-count side of send_to_dead_letter.
+
+    Phase 5B Step 4: sequences_dir/clickhouse_database are optional too -
+    omitted, sequence detection is simply not evaluated (ch_client alone
+    isn't enough; see process_event's own docstring for why both are
+    required together)."""
+    sequences = load_sequences(sequences_dir) if sequences_dir else None
     consumer = Consumer({
         "bootstrap.servers": bootstrap_servers,
         "group.id": group_id,
@@ -125,7 +134,10 @@ def run(
             while True:
                 db = Session()
                 try:
-                    result = process_event(db, event, session_gap_seconds, max_span_seconds)
+                    result = process_event(
+                        db, event, session_gap_seconds, max_span_seconds,
+                        sequences=sequences, ch_client=ch_client, clickhouse_database=clickhouse_database,
+                    )
                 except UnparseableEvent:
                     db.close()
                     logger.warning("alert %s has a permanently malformed field - dead-lettering, not retrying", event.alert_id)

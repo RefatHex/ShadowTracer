@@ -208,3 +208,37 @@ ENGINE = ReplicatedMergeTree('/clickhouse/tables/__KEEPER_PREFIX__{shard}/dead_l
 PARTITION BY toYYYYMM(failed_at)
 ORDER BY (tenant_id, failed_at)
 TTL toDateTime(failed_at) + INTERVAL 30 DAY;
+
+-- Phase 5B Step 4: one row per completed sequence firing - the HISTORY
+-- counterpart to Postgres's sequence_progress (the only MUTABLE
+-- tracking state - "how far along is this one right now"). step_matches
+-- is a JSON array of {step_index, node, alert_id, matched_at} - "so the
+-- analyst can see why" a sequence fired, per the spec's own requirement.
+-- completing_alert_id (the final step's "node:alert_id", the one value
+-- guaranteed unique per real completion, since that alert can only ever
+-- be processed once - incident_alerts' own unique constraint) is what
+-- read queries uniqExact() over, not count() - the same
+-- insert-before-commit, retry-tolerant pattern fingerprint_occurrences
+-- already established (see that table's own header): a crash between
+-- this insert and the Postgres commit that resets sequence_progress
+-- produces, at worst, a duplicate row with the SAME completing_alert_id
+-- on retry, which uniqExact collapses correctly.
+CREATE TABLE IF NOT EXISTS __DATABASE__.sequence_firings ON CLUSTER lab_cluster
+(
+    tenant_id           LowCardinality(String),
+    sequence_id         LowCardinality(String),
+    agent_id            String,
+    key_type            LowCardinality(String),
+    key_value           String,
+    fired_at            DateTime64(3),
+    step_matches        String CODEC(ZSTD(3)),
+    completing_alert_id String
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/__KEEPER_PREFIX__{shard}/sequence_firings', '{replica}')
+PARTITION BY toYYYYMM(fired_at)
+ORDER BY (tenant_id, sequence_id, fired_at);
+
+-- Console rule: always read firing counts as
+--   SELECT tenant_id, sequence_id, uniqExact(completing_alert_id) AS firings
+--   FROM __DATABASE__.sequence_firings GROUP BY tenant_id, sequence_id
+-- never a plain count() - see this table's own header.
