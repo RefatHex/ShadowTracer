@@ -29,6 +29,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from .campaigns import link_campaign
 from .fingerprint import RULESET_VERSION, compute_fingerprint
 from .models import agent_role_tags, fingerprints, incidents
 from .rarity import evaluate_rare_pattern
@@ -108,6 +109,16 @@ def close_eligible_incidents(
                 .values(tenant_key=row["tenant_key"], fingerprint_key=fingerprint_key)
                 .on_conflict_do_nothing(index_elements=["tenant_key", "fingerprint_key"])
             )
+
+            # Phase 5B Step 5: same fingerprint + same actor (source IP
+            # first, then user) within a sliding 24h window - see
+            # campaigns.py for the full definition. No-op if this
+            # incident has neither a source IP nor a user recorded.
+            link_campaign(
+                db, row["tenant_key"], fingerprint_key, incident_id,
+                row["source_ips"], row["users"], row["first_seen"], row["last_seen"],
+            )
+
             closed_ids.append(incident_id)
 
     return closed_ids

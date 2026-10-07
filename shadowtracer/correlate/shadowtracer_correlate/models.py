@@ -135,3 +135,28 @@ sequence_progress = Table(
     ),
     CheckConstraint("key_type IN ('source_ip', 'user')", name="sequence_progress_key_type_check"),
 )
+
+campaigns = Table(
+    "campaigns", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_key", String(64), nullable=False),
+    Column("fingerprint_key", String(64), nullable=False),
+    Column("actor_type", String(20), nullable=False),
+    Column("actor_value", String(255), nullable=False),
+    Column("first_seen", DateTime(timezone=True), nullable=False),
+    Column("last_seen", DateTime(timezone=True), nullable=False),
+    Column("incident_count", Integer, nullable=False, server_default="0"),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint("actor_type IN ('source_ip', 'user')", name="campaigns_actor_type_check"),
+)
+
+campaign_incidents = Table(
+    "campaign_incidents", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("campaign_id", Integer, ForeignKey("campaigns.id"), nullable=False),
+    Column("incident_id", Integer, ForeignKey("incidents.id"), nullable=False),
+    Column("tenant_key", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    UniqueConstraint("campaign_id", "incident_id", name="campaign_incidents_identity_unique"),
+)

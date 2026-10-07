@@ -128,7 +128,8 @@ def db(engine):
     session.rollback()
     session.execute(text(
         "TRUNCATE TABLE fingerprint_verdicts, incident_alerts, incidents, "
-        "fingerprints, agent_role_tags, tenant_alert_settings, sequence_progress "
+        "fingerprints, agent_role_tags, tenant_alert_settings, sequence_progress, "
+        "campaign_incidents, campaigns "
         "RESTART IDENTITY CASCADE"
     ))
     session.commit()
