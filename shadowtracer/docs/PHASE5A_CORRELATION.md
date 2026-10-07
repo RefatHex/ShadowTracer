@@ -263,6 +263,14 @@ full ~2 minutes.
 
 ### Same attack from two different source IPs → two incidents, ONE fingerprint, occurrence count 2
 
+**HISTORICAL evidence - incident ids 19 and 24 below no longer exist** in
+the live lab; they were deleted after inspection, same as every other
+demonstration incident in this doc (see "Incident id gaps investigated"
+further down - this is one of the three id gaps explicitly accounted for
+there, not a mystery). The SQL output itself is kept verbatim as the
+original proof this scenario was run and produced the claimed result; it
+is not re-queryable against the current database.
+
 The lab's SSH containers always report `srcip=::1` for local connections
 - there's no way to get two genuinely different source IPs attacking one
 agent's sshd in this topology without external network access. Produced
@@ -296,6 +304,10 @@ attempt used an invalid timestamp format, which crashed the writer; the
 fix was applied and this is the clean re-run after it.)
 
 ### A different attack (create a local user) → a different fingerprint
+
+**HISTORICAL evidence - incident id 25 below no longer exists**, deleted
+after inspection for the same reason as ids 19/24 above - see "Incident
+id gaps investigated" further down.
 
 Produced a `useradd`-shaped alert (rule group `adduser`, MITRE
 `T1136.001`, no source IP at all - `actor_class` becomes `local`) through
@@ -355,71 +367,110 @@ two. `PASSED`.
 ### Real correlator crash: `docker kill` on a live correlate-1/correlate-2 container
 
 `deploy/lab/verify-correlator-chaos.sh` - the real-infra replacement for
-the above. Produces real alerts for a fresh agent directly to the real
-`shadowtracer.events.raw` topic, confirms the incident is open and
-growing, finds (never guesses - reads `docker-compose.yml`'s
-`KAFKA_GROUP_ID` and the correlate-1/correlate-2 services' static IPs)
-which real container currently owns that agent's partition, and
-`docker kill`s that exact container - a real `SIGKILL`, not a graceful
-stop and not a Python thread abandoned in a test process - while 4 more
-alerts are still in flight. Real run against the live lab (run twice from
-clean per the hardening task; both runs `exit 0` - this is run 2's full
-output):
+the above. What it does and doesn't assume:
+
+- **Never guesses which container to kill.** Finds a fresh agent whose
+  partition is owned by a specific, CHOSEN target container by producing
+  real alerts one at a time and reading back the partition
+  confluent_kafka's own producer actually assigned, off the real delivery
+  report (never a reimplemented/guessed hash). The owning container is
+  read from a real `kafka-consumer-groups.sh --describe --group
+  shadowtracer-correlate` (the correlator's own group - from
+  `docker-compose.yml`'s `KAFKA_GROUP_ID`, never assumed), mapped to a
+  container name via the correlate-1/correlate-2 services' static IPs
+  (also read from `docker-compose.yml`, not hardcoded blind). Prints the
+  agent id, partition, and owning container explicitly, before the kill,
+  and asserts the lookup actually found something.
+- **Runs the full cycle once targeting correlate-1 and once targeting
+  correlate-2** (a round of 3 runs per invocation, alternating
+  correlate-1/correlate-2/correlate-1) - not relying on a random agent id
+  happening to land on both containers across invocations by luck.
+- **Produces one continuous steady-rate stream** (5 alerts/sec) and
+  issues `docker kill` on the real owner mid-stream, with no batch-gap
+  pause.
+- **Measures real failover time** (docker kill issued → the incident's
+  `alert_count` first moves again), 3 times per invocation.
+- **Scrapes the surviving container's own `/metrics`** (`alerts_duplicate`
+  - the exact counter `consumer.py` increments on the idempotency path)
+  before and after, for a real redelivery-dedup count.
+
+**A real measurement bug was found and fixed building this, and is
+reported here rather than hidden**: the first version issued the kill via
+a non-blocking `subprocess.Popen` and checked for "resumption" on the
+very same loop iteration with zero delay - racing the still-alive victim
+finishing the message it had already dequeued, before `SIGKILL` had
+actually been delivered. That version measured failover times of
+0.00s/0.20s/0.20s, which is not plausible for a rebalance-gated recovery
+and was in fact wrong: it was timing the dying consumer's own last gasp,
+not the survivor's resumption. Fixed by making the kill `subprocess.run`
+(blocking - only returns once dockerd confirms `SIGKILL` was delivered)
+and capturing the baseline alert count only *after* that confirmation, so
+the victim is unconditionally dead before any count is read - any
+subsequent increase can only be the survivor's. Real numbers after the
+fix, two full clean runs (6 total kill cycles, `exit 0` both times):
 
 ```
-=== 1. Correlator consumer group partition split (real, 2 correlators) ===
-GROUP                  TOPIC                   PARTITION  ... HOST            CLIENT-ID
-shadowtracer-correlate shadowtracer.events.raw 13         ... /172.28.0.42    rdkafka
-shadowtracer-correlate shadowtracer.events.raw 12         ... /172.28.0.42    rdkafka
-...(12 rows total for /172.28.0.42 = correlate-1)...
-shadowtracer-correlate shadowtracer.events.raw 11         ... /172.28.0.43    rdkafka
-shadowtracer-correlate shadowtracer.events.raw 10         ... /172.28.0.43    rdkafka
-...(12 rows total for /172.28.0.43 = correlate-2)...
-PASS: correlate-1 (172.28.0.42) owns 12 partitions
-PASS: correlate-2 (172.28.0.43) owns 12 partitions
-PASS: total owned = 24
-
-=== 2. Chaos: kill the correlator owning a real, growing incident's partition ===
-agent chaos-agent-chaos1791375562's events land on partition 5
-partition 5 is currently owned by 172.28.0.43
-will kill shadowtracer-lab-correlate-2-1 (owns partition 5)
-PASS: incident exists and is growing before the kill (alert_count >= 1)
-PASS: incident grew to 4 alerts before the kill
-killing shadowtracer-lab-correlate-2-1 now (docker kill, not a graceful stop)...
-
-=== 3. Rebalance: survivor must pick up all 24 partitions ===
-PASS: survivor owns all 24 partitions after the kill
-
-=== 4. The incident survives and keeps growing across the outage ===
---- final incident row ---
- id |          agent_id           | correlation_basis | alert_count | state 
-----+-----------------------------+-------------------+-------------+-------
- 52 | chaos-agent-chaos1791375562 | source_ip         |          10 | open
-
-PASS: exactly ONE incident for this agent (no split across the kill)
-PASS: alert_count equals every alert produced (10)
+=== Run 1 (this invocation) ===
+PROOF: agent=chaos-11791377379-try1  partition=14  owner=correlate-1 (before the kill)
+PASS: exactly ONE incident for this agent
+PASS: alert_count equals every alert produced (20)
 PASS: incident_alerts has no duplicate (tenant_key, node, alert_id)
+>>> FAILOVER TIME [1]: 47.83s
+redelivered-and-deduplicated messages (survivor's alerts_duplicate delta): 0
 
-=== 5. Restart the killed container, confirm it rejoins the group ===
-PASS: shadowtracer-lab-correlate-2-1 is healthy again after restart
-PASS: shadowtracer-lab-correlate-2-1 rejoined the group (owns >0 partitions again)
-PASS: total still 24 after rejoin
+PROOF: agent=chaos-21791377444-try3  partition=2   owner=correlate-2 (before the kill)
+>>> FAILOVER TIME [2]: 49.95s
+redelivered-and-deduplicated messages: 0
 
+PROOF: agent=chaos-31791377515-try3  partition=15  owner=correlate-1 (before the kill)
+>>> FAILOVER TIME [3]: 49.65s
+redelivered-and-deduplicated messages: 0
+VERIFY-CORRELATOR-CHAOS: PASS
+
+=== Run 2 (clean re-run) ===
+PROOF: agent=chaos-11791377633-try1  partition=7   owner=correlate-1
+>>> FAILOVER TIME [1]: 49.64s   redelivered: 0
+PROOF: agent=chaos-21791377701-try1  partition=13  owner=correlate-2
+>>> FAILOVER TIME [2]: 50.25s   redelivered: 0
+PROOF: agent=chaos-31791377769-try1  partition=11  owner=correlate-1
+>>> FAILOVER TIME [3]: 50.08s   redelivered: 0
 VERIFY-CORRELATOR-CHAOS: PASS
 ```
 
-All 4 alerts produced *after* the kill (while the group was down to one
-member) were still picked up once the rebalance completed - `alert_count`
-reached 10 (every alert produced across the whole run, before and after
-the kill), on the one incident id that existed before the kill, with zero
-duplicate `incident_alerts` rows. The rebalance also happened to restore
-a clean 12/12 split on rejoin (not required by the test, just what
-librdkafka's default assignor did with 2 members and 24 partitions).
+All 6 cycles across both runs: exactly one incident, `alert_count` equal
+to every alert produced (20 - 1 probe + 19 stream alerts), zero duplicate
+`incident_alerts` rows, both correlate-1 and correlate-2 killed as owner
+at least twice each. Every failover number clusters tightly around
+**47.8-50.3 seconds**. librdkafka's documented default
+`session.timeout.ms` is 45000ms (45s) - the broker only reassigns a dead
+member's partitions once its session expires, since `docker kill`
+(`SIGKILL`) gives the consumer no chance to send a graceful `LeaveGroup`
+first. The observed numbers (45s + ~3-5s of rebalance protocol round-trip
+and catch-up processing) are consistent with that default being the
+dominant driver. This wasn't queried from a live config dump (confluent_kafka's
+Python wrapper doesn't expose one) - it's librdkafka's well-documented
+default, corroborated here by how closely the real numbers track it. **Not
+tuned, per instruction** - this is a report, not a change.
 
-Not bundled into `smoke-test.sh` - see that script's header for why
-(real `docker kill` on a live service, ~60-90s, deliberately kept opt-in
-rather than run on every routine smoke-test invocation). Run directly:
-`cd deploy/lab && ./verify-correlator-chaos.sh`.
+**Redelivery-dedup count was 0 in all 6 cycles** - reported honestly, not
+omitted because it's a "boring" number. This doesn't mean the idempotency
+path is untested: the Kafka-replay test below
+(`test_replaying_a_kafka_range_does_not_duplicate_membership_or_change_counts`)
+exercises it directly and deterministically. In this chaos test
+specifically, the baseline alert count is captured only *after* the kill
+is confirmed delivered, which means by construction the victim is already
+dead before anything is counted - a true duplicate here would require the
+kill to have landed in the narrow window between a message's Postgres
+commit and its Kafka offset commit, which `SIGKILL`'s arbitrary timing
+relative to the consumer's own processing cycle makes possible but
+evidently didn't hit in these particular 6 runs. Zero is a real,
+unmassaged measurement, not a claim that this window can never be hit.
+
+Not bundled into `smoke-test.sh` - see that script's header for why (real
+`docker kill` on live services, ~5-6 minutes for all 3 cycles per
+invocation given the real ~50s failover wait each time, deliberately kept
+opt-in rather than run on every routine smoke-test invocation). Run
+directly: `cd deploy/lab && ./verify-correlator-chaos.sh`.
 
 ### Two correlation workers → the 24 partitions split, nothing processed twice
 
