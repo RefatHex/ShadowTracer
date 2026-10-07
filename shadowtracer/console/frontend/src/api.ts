@@ -210,3 +210,21 @@ export async function suppressFingerprint(accessToken: string, key: string): Pro
   })
   return handle<{ suppression_state: string }>(resp)
 }
+
+export interface AttackCoverageEntry {
+  tactics: string[]
+  rule_ids: string[]
+}
+
+export interface AttackCoverage {
+  label: string
+  technique_count: number
+  techniques: Record<string, AttackCoverageEntry>
+}
+
+export async function fetchAttackCoverage(accessToken: string): Promise<AttackCoverage> {
+  const resp = await fetch(`${API_BASE}/api/attack-coverage`, {
+    headers: authHeaders(accessToken), credentials: 'include',
+  })
+  return handle<AttackCoverage>(resp)
+}

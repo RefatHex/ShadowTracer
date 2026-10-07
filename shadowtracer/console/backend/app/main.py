@@ -6,6 +6,7 @@ from .db import make_session_factory
 from .logging_redact import register_secret, setup_logging
 from .routers import agents as agents_router
 from .routers import alerts as alerts_router
+from .routers import attack_coverage as attack_coverage_router
 from .routers import auth as auth_router
 from .routers import fingerprints as fingerprints_router
 from .routers import health as health_router
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(incidents_router.router)
     app.include_router(fingerprints_router.router)
     app.include_router(agents_router.router)
+    app.include_router(attack_coverage_router.router)
 
     return app
 

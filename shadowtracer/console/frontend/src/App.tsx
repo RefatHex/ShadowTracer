@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { AlertsPage } from './AlertsPage'
+import { AttackCoveragePage } from './AttackCoveragePage'
 import { AuthProvider, useAuth } from './AuthContext'
 import { FingerprintDetailPage } from './FingerprintDetailPage'
 import { FingerprintsPage } from './FingerprintsPage'
@@ -15,6 +16,7 @@ type View =
   | { name: 'incident'; id: number }
   | { name: 'fingerprints' }
   | { name: 'fingerprint'; key: string }
+  | { name: 'attack-coverage' }
 
 function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => void }) {
   const { logout } = useAuth()
@@ -22,6 +24,7 @@ function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => voi
     { label: 'Alerts', view: { name: 'alerts' } },
     { label: 'Incidents', view: { name: 'incidents' } },
     { label: 'Attack library', view: { name: 'fingerprints' } },
+    { label: 'ATT&CK coverage', view: { name: 'attack-coverage' } },
   ]
   return (
     <header className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-6 py-4">
@@ -68,6 +71,7 @@ function AppContent() {
       {view.name === 'fingerprint' && (
         <FingerprintDetailPage fingerprintKey={view.key} onBack={() => setView({ name: 'fingerprints' })} />
       )}
+      {view.name === 'attack-coverage' && <AttackCoveragePage />}
     </div>
   )
 }
