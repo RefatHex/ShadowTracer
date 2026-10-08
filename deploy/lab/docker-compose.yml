@@ -25,6 +25,10 @@ x-console-backend-env: &console-backend-env
   POSTGRES_HOST: postgres
   POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
   CLICKHOUSE_HOST: ch-clickhouse-1
+  # Dead-letter-ClickHouse incident (2026-10-08): /health/detail and
+  # /health/ready's replica check need to query EVERY replica, not just
+  # the one CLICKHOUSE_HOST above - see health.py's clickhouse_replica_health.
+  CLICKHOUSE_HOSTS: ch-clickhouse-1:8123,ch-clickhouse-2:8123
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
   CLICKHOUSE_DATABASE: shadowtracer

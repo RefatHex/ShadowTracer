@@ -294,3 +294,109 @@ def test_failover_clickhouse_skips_a_dead_host():
     )
     used = ch.insert("events", [], column_names=["tenant_id"])
     assert used == 1  # fell through to the second (working) host
+
+
+def test_writer_stays_up_when_dead_letter_clickhouse_insert_fails(
+    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines,
+):
+    """Dead-letter-ClickHouse incident (2026-10-08) hardening, at the real
+    writer.run() level: the dead_letter_events table itself is unreachable
+    (a real, atomic RENAME TABLE - never the Keeper surgery that caused
+    the real incident - restored in `finally`), while the events table
+    the writer ALSO writes to stays healthy. A permanently malformed
+    event must still not crash the writer, must still land on the Kafka
+    dead-letter topic (published before the ClickHouse attempt - see
+    dead_letter.py), must count dead_letter_ch_failures, and the good
+    event right behind it must still land in ClickHouse."""
+    import json
+    marker = uuid.uuid4().hex[:8]
+    tenant_id = f"test-{marker}"
+    good = json.loads(real_alert_lines[0])
+    good["id"] = f"{good['id']}.{marker}.good"
+    bad = json.loads(real_alert_lines[1])
+    bad["id"] = f"{bad['id']}.{marker}.bad"
+    bad["timestamp"] = "2026-10-04T05:00:118.000+0000"  # not valid ISO8601
+
+    tmp_name = f"dead_letter_events_tmp_{marker}"
+    ch_client.command(
+        f"RENAME TABLE {TEST_CLICKHOUSE_DB}.dead_letter_events TO {TEST_CLICKHOUSE_DB}.{tmp_name} ON CLUSTER lab_cluster"
+    )
+    try:
+        stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env)
+        try:
+            _produce(kafka_bootstrap, kafka_topic, [json.dumps(bad), json.dumps(good)], tenant_id=tenant_id)
+
+            deadline = time.monotonic() + 20
+            good_count = 0
+            while time.monotonic() < deadline:
+                good_count = _count_alert_ids(ch_client, [good["id"]])
+                if good_count == 1 and metrics.snapshot().get("dead_letter_ch_failures", 0) >= 1:
+                    break
+                time.sleep(0.5)
+
+            assert good_count == 1, "the good event right behind the dead-lettered one must still land in ClickHouse"
+            assert thread.is_alive(), "writer must never crash when the dead-letter ClickHouse insert fails"
+            assert metrics.snapshot().get("dead_letter_ch_failures", 0) >= 1
+
+            from confluent_kafka import Consumer
+            from shadowtracer_ingest.dead_letter import DEAD_LETTER_TOPIC
+            drain = Consumer({
+                "bootstrap.servers": kafka_bootstrap,
+                "group.id": f"test-dlt-drain-{marker}",
+                "auto.offset.reset": "earliest",
+            })
+            drain.subscribe([DEAD_LETTER_TOPIC])
+            found = None
+            drain_deadline = time.monotonic() + 15
+            while time.monotonic() < drain_deadline:
+                msg = drain.poll(1.0)
+                if msg is not None and msg.error() is None and bad["id"] in msg.value().decode():
+                    found = msg.value().decode()
+                    break
+            drain.close()
+            assert found is not None, "the Kafka dead-letter topic copy must still land even when ClickHouse fails"
+        finally:
+            stop_flag.set()
+            thread.join(timeout=5)
+            ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id = '{good['id']}'")
+    finally:
+        ch_client.command(
+            f"RENAME TABLE {TEST_CLICKHOUSE_DB}.{tmp_name} TO {TEST_CLICKHOUSE_DB}.dead_letter_events ON CLUSTER lab_cluster"
+        )
+
+
+def test_dead_letter_kafka_failure_is_never_swallowed_offset_would_not_advance():
+    """Unit-level proof of the EXACT composition writer.py's (and
+    consumer.py's) dead-letter call site uses:
+    retry_with_backoff(lambda: send_to_dead_letter(...), max_attempts=None,
+    stop_flag=stop_flag). When the Kafka dead-letter publish itself fails
+    (a real unreachable broker - send_to_dead_letter raises, never
+    swallows it - see test_dead_letter.py), this composition must keep
+    retrying rather than return normally, so the caller never reaches the
+    commit that would advance past this message with no durable record
+    anywhere. Proven by firing stop_flag mid-retry (a graceful shutdown)
+    and confirming retry_with_backoff still raises rather than returning -
+    the one case its own docstring says it should (see test_retry.py for
+    that contract in isolation)."""
+    import threading
+
+    from confluent_kafka import Producer
+
+    from shadowtracer_ingest.dead_letter import send_to_dead_letter
+    from shadowtracer_ingest.retry import retry_with_backoff
+
+    unreachable_producer = Producer({"bootstrap.servers": "127.0.0.1:1", "message.timeout.ms": 2000})
+    stop_flag = threading.Event()
+    threading.Timer(1.0, stop_flag.set).start()
+
+    try:
+        retry_with_backoff(
+            lambda: send_to_dead_letter(
+                kafka_producer=unreachable_producer, ch_client=None, tenant_key="test",
+                component="writer", source_location="x", error="x", raw_event="{}",
+            ),
+            max_attempts=None, base_delay=0.5, max_delay=1.0, stop_flag=stop_flag,
+        )
+        assert False, "must raise, never return normally, when the Kafka dead-letter publish never succeeds"
+    except RuntimeError as exc:
+        assert "did not durably succeed" in str(exc)

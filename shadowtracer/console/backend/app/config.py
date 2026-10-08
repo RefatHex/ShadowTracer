@@ -64,6 +64,11 @@ class Settings:
     lockout_window_seconds: int = 60 * 15
     shipper_metrics_urls: list[str] = field(default_factory=list)
     cors_allow_origins: list[str] = field(default_factory=list)
+    # Empty means "just clickhouse_host/port" - see clickhouse_replica_health's
+    # own fallback. Defaulted (not required) so existing direct Settings(...)
+    # construction in tests doesn't need updating for a check most of them
+    # don't exercise.
+    clickhouse_hosts: list[tuple[str, int]] = field(default_factory=list)
 
 
 def load_settings() -> Settings:
@@ -89,11 +94,21 @@ def load_settings() -> Settings:
     shipper_urls = [u for u in os.environ.get("SHIPPER_METRICS_URLS", "").split(",") if u]
     cors_origins = [o for o in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",") if o]
 
+    clickhouse_host = os.environ.get("CLICKHOUSE_HOST", "127.0.0.1")
+    clickhouse_port = int(os.environ.get("CLICKHOUSE_PORT", "8123"))
+    # Same CLICKHOUSE_HOSTS convention as run_writer.py - for the
+    # replica-health check, which needs to query every replica, not just
+    # the one check_clickhouse/dead_letter_counts_per_tenant happen to use.
+    # Defaults to the single clickhouse_host/port above if unset, so a
+    # deployment with only one configured host still works.
+    hosts_raw = os.environ.get("CLICKHOUSE_HOSTS", f"{clickhouse_host}:{clickhouse_port}")
+    clickhouse_hosts = [(h, int(p)) for h, p in (hp.split(":") for hp in hosts_raw.split(","))]
+
     return Settings(
         jwt_secret=jwt_secret,
         database_url=database_url,
-        clickhouse_host=os.environ.get("CLICKHOUSE_HOST", "127.0.0.1"),
-        clickhouse_port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
+        clickhouse_host=clickhouse_host,
+        clickhouse_port=clickhouse_port,
         clickhouse_user=_env_or_file("CLICKHOUSE_USER") or "shadowtracer",
         clickhouse_password=ch_password,
         clickhouse_database=os.environ.get("CLICKHOUSE_DATABASE", "shadowtracer"),
@@ -109,4 +124,5 @@ def load_settings() -> Settings:
         lockout_window_seconds=int(os.environ.get("LOCKOUT_WINDOW_SECONDS", str(60 * 15))),
         shipper_metrics_urls=shipper_urls,
         cors_allow_origins=cors_origins,
+        clickhouse_hosts=clickhouse_hosts,
     )

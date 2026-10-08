@@ -495,6 +495,114 @@ semicolons in ordinary sentences ("safe for dedup; a retried produce...")
 mid-render. Fixed by stripping `-- ...` line comments before splitting,
 not by scrubbing semicolons out of the prose.
 
+## Dead-letter-ClickHouse incident (2026-10-08)
+
+**Cause.** During the dead-letter preview/sha256/TTL schema migration, a
+`DROP`+recreate of `dead_letter_events` hit a stale-znode error
+("Existing table metadata in ZooKeeper differs in TTL"). Instead of
+going through ClickHouse's own DDL, this was "fixed" by hand-deleting the
+stale znode directly in Keeper (`clickhouse-keeper-client ... rmr
+'/clickhouse/tables/01/dead_letter_events'`) - this is the root cause.
+It left the table's own `/log` znode missing/corrupted, which only
+surfaced later as `zookeeper_exception: Transaction failed (No node):
+Op #0, path: /clickhouse/tables/01/dead_letter_events/log` and
+`TABLE_IS_READ_ONLY` on insert.
+
+**Discovery and impact window.** Found when the Phase 5B VERIFY replay
+consumer hit a real `TABLE_IS_READ_ONLY` error while dead-lettering -
+reported before any fix was applied, per standing project rule. Scoped
+first, read-only: `system.replicas` on both replicas, for every
+replicated table, showed only `dead_letter_events` affected - every other
+table (`events`, `events_hourly_rollup`, `fingerprint_occurrences`,
+`sequence_firings`) was healthy on both replicas. Both replicas' copies
+of `dead_letter_events` were confirmed empty (0 rows, exported to
+`deploy/lab/incident-2026-10-08-dead-letter-readonly/*.csv` before
+touching anything) - so the impact was **zero data loss and zero
+real-pipeline impact**: nothing had ever been durably lost (there was
+nothing in the table to lose), and no component other than the
+best-effort ClickHouse side of dead-lettering depends on this table.
+
+**Fix.** `SYSTEM RESTORE REPLICA dead_letter_events` on each affected
+replica, one at a time - the supported recovery for exactly this
+"metadata not found in Keeper" state, never more manual Keeper surgery.
+Verified both replicas back to `is_readonly=0` with matching row counts,
+then inserted a real row through the actual writer's dead-letter path
+(not a manual `INSERT`) and confirmed it landed on both.
+
+**Hardening.** `send_to_dead_letter` (`shadowtracer_ingest/dead_letter.py`)
+now dual-writes with an explicit durability order instead of treating
+both sinks as equals: the Kafka dead-letter topic first (the durable
+record - a failure here re-raises, and every caller retries forever with
+backoff, never committing the triggering message's offset in the
+meantime), ClickHouse second (the queryable per-tenant count - a failure
+here is caught inside the function, logged, and counted on a new
+`dead_letter_ch_failures` metric, but never propagated). Writer, shipper,
+and the correlator's consumer loop all wrap the call the same way.
+Along the way, found that `confluent_kafka`'s `produce()`/`flush()`
+alone do **not** reliably detect a broker-unreachable delivery failure -
+confirmed empirically that `flush()` can return `0` ("nothing still
+queued") even when the message actually timed out undelivered, because
+that failure is only ever reported through an `on_delivery` callback.
+Without catching that, the "retry forever on Kafka failure" guarantee
+above would have been silently broken for the exact case it exists to
+protect against - fixed by registering `on_delivery` and checking it
+alongside `flush()`'s return value.
+
+A new idempotent backfill script
+(`shadowtracer/ingest/backfill_dead_letter_events.py`) replays the Kafka
+dead-letter topic into `dead_letter_events`, so a future ClickHouse-side
+outage doesn't leave a permanent hole in the queryable copy once
+ClickHouse recovers - safe to re-run any number of times (a committed
+Kafka consumer group position plus `insert_deduplication_token`, the
+same two-layer idempotency `events` inserts already use).
+
+**Why the existing hostile-input smoke test didn't catch this.** It
+queried `dead_letter_events` only via `docker exec` into the
+`ch-clickhouse-1` container specifically, and only ever checked row
+*counts* - never `is_readonly`, never `ch-clickhouse-2`, never the Kafka
+dead-letter topic itself. A replica stuck read-only could pass this
+check indefinitely as long as whichever replica the script happened to
+query, and whatever count it happened to see, stayed consistent -
+structurally, regardless of exactly when it was last run relative to the
+migration. `smoke-test.sh` now asserts `is_readonly=0` and
+`is_session_expired=0` for every replicated table on **both** real
+ClickHouse replicas directly (a new, separate check, every run), and its
+hostile-input round-trip now also checks `ch-clickhouse-2`'s count and
+the dead-letter Kafka topic's own offset delta, not just
+`ch-clickhouse-1`'s ClickHouse count.
+
+`/health/detail` and `/health/ready` gained the same replica-health
+check (`clickhouse_replica_health` in
+`shadowtracer/console/backend/app/health.py`) - every replicated table on
+every configured ClickHouse host, feeding into `/health/ready`'s 503 so
+a stuck-read-only replica now fails readiness instead of only showing up
+in an admin-only detail view.
+
+**Lessons.**
+- Never hand-edit Keeper (manual znode deletion) to work around a schema
+  migration mismatch, even as a quick unblock - it leaves a replica's
+  coordination state inconsistent in ways that only surface later. If a
+  replicated table's ZooKeeper-recorded metadata genuinely disagrees with
+  the schema, resolve it through ClickHouse's own DDL (a real `DROP
+  TABLE ... SYNC` + recreate, or a fresh Keeper path prefix - see Phase
+  5A Step 0's `__KEEPER_PREFIX__` for why tests already do this) - never
+  through direct Keeper surgery.
+- A migration (or any DDL) touching a `ReplicatedMergeTree` table must be
+  followed by an explicit write/health check - `is_readonly=0` on every
+  replica, confirmed by the same path production traffic uses - before
+  considering the migration done. "The `CREATE TABLE` didn't error" is
+  not that check.
+
+(Unrelated side finding during this session's recovery, not part of this
+incident: the lab's whole docker-compose stack had independently gone
+down from a host/WSL2 restart; when it came back up, `wazuh-worker1`/
+`wazuh-worker2` had several daemons - `wazuh-execd`, `wazuh-authd` -
+silently fail to (re)start, leaving them `unhealthy` and blocking
+`smoke-test.sh`'s own wait loop. Fixed with a clean
+`shadowtracer-control restart` on each; noted here only because it's
+what `smoke-test.sh`'s history would otherwise show as an unrelated
+failure around the same time.)
+
 ## Open items
 
 - The shipper's offset-file bookkeeping can lag behind what's actually

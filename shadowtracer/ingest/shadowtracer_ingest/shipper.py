@@ -23,6 +23,7 @@ why:
 """
 
 import json
+import logging
 import os
 import time
 
@@ -30,10 +31,15 @@ from confluent_kafka import KafkaException, Producer
 
 from .dead_letter import send_to_dead_letter
 from .metrics import Metrics
+from .retry import retry_with_backoff
 
 BATCH_MAX_LINES = 500
 BATCH_MAX_SECONDS = 1.0
 POLL_IDLE_SECONDS = 0.5
+DEAD_LETTER_BASE_DELAY_SECONDS = 1.0
+DEAD_LETTER_MAX_DELAY_SECONDS = 30.0
+
+logger = logging.getLogger(__name__)
 
 
 def load_offsets(offset_file: str) -> dict:
@@ -190,10 +196,22 @@ def run(
                     agent_id = extract_agent_id(line)
                 except Exception as exc:  # noqa: BLE001 - any parse failure is permanent, never retried: dead-letter and move on (deeply nested JSON, invalid UTF-8, wrong types, ... none of these succeed on a retry)
                     metrics.incr("lines_failed")
-                    send_to_dead_letter(
-                        kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_id,
-                        component="shipper", source_location=f"{source.path}:{byte_offset}",
-                        error=f"{type(exc).__name__}: {exc}", raw_event=line,
+                    # send_to_dead_letter only ever raises for its Kafka-
+                    # publish half (a ClickHouse-side failure is caught
+                    # inside it) - retried forever, same as any other
+                    # transient infra failure, so this line is never left
+                    # with no durable record anywhere.
+                    retry_with_backoff(
+                        lambda: send_to_dead_letter(
+                            kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_id,
+                            component="shipper", source_location=f"{source.path}:{byte_offset}",
+                            error=f"{type(exc).__name__}: {exc}", raw_event=line, metrics=metrics,
+                        ),
+                        max_attempts=None, base_delay=DEAD_LETTER_BASE_DELAY_SECONDS,
+                        max_delay=DEAD_LETTER_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                        on_retry=lambda attempt, exc2: logger.warning(
+                            "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
+                        ),
                     )
                     continue
                 key = f"{tenant_id}:{agent_id}".encode()
@@ -219,10 +237,17 @@ def run(
                         # full_log. Permanent: this exact message will
                         # never fit no matter how many times it's retried.
                         metrics.incr("lines_failed")
-                        send_to_dead_letter(
-                            kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_id,
-                            component="shipper", source_location=f"{source.path}:{byte_offset}",
-                            error=f"{type(exc).__name__}: {exc}", raw_event=line,
+                        retry_with_backoff(
+                            lambda: send_to_dead_letter(
+                                kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_id,
+                                component="shipper", source_location=f"{source.path}:{byte_offset}",
+                                error=f"{type(exc).__name__}: {exc}", raw_event=line, metrics=metrics,
+                            ),
+                            max_attempts=None, base_delay=DEAD_LETTER_BASE_DELAY_SECONDS,
+                            max_delay=DEAD_LETTER_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            on_retry=lambda attempt, exc2: logger.warning(
+                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
+                            ),
                         )
                         break
 

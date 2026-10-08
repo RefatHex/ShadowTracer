@@ -49,10 +49,62 @@ def check_kafka(settings: Settings) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def clickhouse_replica_health(settings: Settings) -> dict:
+    """Dead-letter-ClickHouse incident (2026-10-08): a replica stuck
+    read-only or with an expired Keeper session (system.replicas'
+    is_readonly/is_session_expired) silently degrades a table's
+    durability - or a specific query's correctness, since a stale read
+    replica is still reachable - with nothing in check_clickhouse (which
+    only proves ONE host answers SELECT 1) ever noticing. Queries EVERY
+    configured host individually (clusterAllReplicas needs the `default`
+    user for inter-server auth, which the lab's user isn't - see the
+    incident's own notes) for EVERY replicated table, not just
+    dead_letter_events - the same table-by-table scope Step 1 of that
+    incident's response used, since any replicated table can suffer this
+    independently."""
+    hosts = settings.clickhouse_hosts or [(settings.clickhouse_host, settings.clickhouse_port)]
+    unhealthy = []
+    per_host = {}
+    for host, port in hosts:
+        host_key = f"{host}:{port}"
+        try:
+            client = clickhouse_connect.get_client(
+                host=host, port=port, username=settings.clickhouse_user,
+                password=settings.clickhouse_password, connect_timeout=3,
+            )
+            rows = client.query(
+                "SELECT database, table, is_readonly, is_session_expired, zookeeper_exception FROM system.replicas"
+            ).result_rows
+            client.close()
+            tables = []
+            for database, table, is_readonly, is_session_expired, zookeeper_exception in rows:
+                entry = {
+                    "database": database, "table": table,
+                    "is_readonly": bool(is_readonly), "is_session_expired": bool(is_session_expired),
+                    "zookeeper_exception": zookeeper_exception or None,
+                }
+                tables.append(entry)
+                if is_readonly or is_session_expired:
+                    unhealthy.append({"host": host_key, **entry})
+            per_host[host_key] = {"ok": True, "tables": tables}
+        except Exception as exc:  # noqa: BLE001 - an unreachable host is itself reported, not a crash
+            per_host[host_key] = {"ok": False, "error": str(exc)}
+            unhealthy.append({"host": host_key, "error": str(exc)})
+    return {"healthy": not unhealthy, "unhealthy": unhealthy, "per_host": per_host}
+
+
+def check_clickhouse_replicas(settings: Settings) -> tuple[bool, str]:
+    report = clickhouse_replica_health(settings)
+    if report["healthy"]:
+        return True, "ok"
+    return False, f"{len(report['unhealthy'])} unhealthy replica/table pair(s): {report['unhealthy']}"
+
+
 def readiness_report(db: Session, settings: Settings) -> dict:
     checks = {
         "postgres": check_postgres(db),
         "clickhouse": check_clickhouse(settings),
+        "clickhouse_replicas": check_clickhouse_replicas(settings),
         "kafka": check_kafka(settings),
     }
     all_ok = all(ok for ok, _ in checks.values())

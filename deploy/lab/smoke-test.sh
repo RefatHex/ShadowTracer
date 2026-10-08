@@ -107,6 +107,27 @@ echo "$agent_out"
 check "agent-ubuntu-1 Active" "echo \"\$agent_out\" | grep agent-ubuntu-1 | grep -q Active"
 check "agent-ubuntu-2 Active" "echo \"\$agent_out\" | grep agent-ubuntu-2 | grep -q Active"
 
+echo "--- ClickHouse replica health (dead-letter-ClickHouse incident, 2026-10-08) ---"
+# The smoke test's own hostile-input check below only ever queried
+# ch-clickhouse-1 and only ever checked row COUNTS, never is_readonly -
+# see PHASE3_DATA_PLATFORM.md's incident writeup for why that let a
+# replica stuck read-only go undetected. This checks is_readonly=0 and
+# is_session_expired=0 for EVERY replicated table on BOTH replicas
+# directly, every run, so a migration that leaves a replica in that
+# state fails the very next smoke-test run instead of silently
+# degrading durability until someone notices by accident.
+for ch_container in shadowtracer-lab-ch-clickhouse-1-1 shadowtracer-lab-ch-clickhouse-2-1; do
+    unhealthy="$(docker exec "$ch_container" clickhouse-client --query \
+        "SELECT database, table, is_readonly, is_session_expired FROM system.replicas WHERE is_readonly OR is_session_expired" 2>&1)"
+    if [ -n "$unhealthy" ]; then
+        echo "FAIL: $ch_container has unhealthy replicated table(s):"
+        echo "$unhealthy"
+        fail=1
+    else
+        echo "PASS: $ch_container - every replicated table is_readonly=0, is_session_expired=0"
+    fi
+done
+
 echo "--- console (Step 7) ---"
 if [ -f .env ]; then
     set -a; source .env; set +a
@@ -171,6 +192,23 @@ hostile_marker="hostile$(date +%s)"
 hostile_agent="hostile-agent-${hostile_marker}"
 
 dl_before="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client --query "SELECT count() FROM shadowtracer.dead_letter_events")"
+dl_before2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client --query "SELECT count() FROM shadowtracer.dead_letter_events")"
+
+dlt_watermark_sum() {
+    ../../shadowtracer/ingest/.venv/bin/python3 -c '
+from confluent_kafka import Consumer, TopicPartition
+consumer = Consumer({"bootstrap.servers": "127.0.0.1:9094", "group.id": "smoke-test-dlt-watermark"})
+topic = "shadowtracer.events.dead-letter"
+md = consumer.list_topics(topic, timeout=10).topics[topic]
+total = 0
+for p in md.partitions:
+    _, high = consumer.get_watermark_offsets(TopicPartition(topic, p), timeout=10)
+    total += high
+consumer.close()
+print(total)
+'
+}
+dlt_offset_before="$(dlt_watermark_sum)"
 
 restart_counts_before=()
 pipeline_services="shipper-worker1 shipper-worker2 writer-1 writer-2 correlate-1 correlate-2"
@@ -250,21 +288,37 @@ rm -f "$hostile_batch_file"
 
 good_count=0
 dl_after=0
+dl_after2=0
 deadline=$(( $(date +%s) + 30 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     good_count="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
         --query "SELECT count() FROM shadowtracer.events WHERE alert_id LIKE '${hostile_marker}.good.%'")"
     dl_after="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
         --query "SELECT count() FROM shadowtracer.dead_letter_events")"
-    if [ "$good_count" = "2" ] && [ "$((dl_after - dl_before))" = "12" ]; then
+    dl_after2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client \
+        --query "SELECT count() FROM shadowtracer.dead_letter_events")"
+    if [ "$good_count" = "2" ] && [ "$((dl_after - dl_before))" = "12" ] && [ "$((dl_after2 - dl_before2))" = "12" ]; then
         break
     fi
     sleep 1
 done
 
 check "both good events landed in ClickHouse" "[ \"$good_count\" = 2 ]"
-check "all 12 dead-letter writes landed (4 shipper-stage + 8 from writer+correlator each independently dead-lettering the 4 that reach Kafka)" \
+check "all 12 dead-letter writes landed on ch-clickhouse-1 (4 shipper-stage + 8 from writer+correlator each independently dead-lettering the 4 that reach Kafka)" \
     "[ \"\$((dl_after - dl_before))\" = 12 ]"
+check "all 12 dead-letter writes also landed on ch-clickhouse-2 (replica, not just the one this script used to only ever check - 2026-10-08 incident)" \
+    "[ \"\$((dl_after2 - dl_before2))\" = 12 ]"
+
+# The ClickHouse-side checks above only prove the QUERYABLE copy. Durability
+# comes from the Kafka dead-letter topic FIRST (see dead_letter.py) - this
+# confirms that copy actually landed too, not just the ClickHouse side.
+# Counted by offset delta, not by grepping for hostile_marker in the
+# payload - 4 of the 8 hostile categories (the empty object, the deeply
+# nested JSON, and invalid UTF-8) never contain the marker string at all,
+# so content-matching undercounts; the topic's own offsets don't.
+dlt_offset_after="$(dlt_watermark_sum)"
+check "all 12 dead-letter events also landed on the Kafka dead-letter topic (the durable copy, written before ClickHouse)" \
+    "[ \"\$((dlt_offset_after - dlt_offset_before))\" = 12 ]"
 
 incident_count="$(docker exec shadowtracer-lab-postgres-1 env PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
     "SELECT alert_count FROM incidents WHERE agent_id = '${hostile_agent}'" | tr -d '[:space:]')"

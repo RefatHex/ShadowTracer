@@ -228,3 +228,48 @@ def test_dead_letter_counts_per_tenant_does_not_alert_below_threshold(lab_env, t
     finally:
         client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant}'")
         client.close()
+
+
+def test_clickhouse_replica_health_all_healthy_against_real_cluster(lab_env, test_clickhouse_db):
+    """Dead-letter-ClickHouse incident (2026-10-08): against the real,
+    healthy lab cluster (both replicas), every replicated table on both
+    hosts must come back is_readonly=0/is_session_expired=0."""
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    object.__setattr__(settings, "clickhouse_hosts", [("127.0.0.1", 8123), ("127.0.0.1", 8124)])
+
+    report = health_checks.clickhouse_replica_health(settings)
+    assert report["healthy"] is True
+    assert report["unhealthy"] == []
+    assert set(report["per_host"]) == {"127.0.0.1:8123", "127.0.0.1:8124"}
+    for host_report in report["per_host"].values():
+        assert host_report["ok"] is True
+        tables = {t["table"] for t in host_report["tables"]}
+        assert "dead_letter_events" in tables
+        assert all(not t["is_readonly"] and not t["is_session_expired"] for t in host_report["tables"])
+
+
+def test_clickhouse_replica_health_reports_unreachable_host(lab_env, test_clickhouse_db):
+    """An unreachable replica (real connection failure, not a mock) must
+    be reported, not silently dropped - this is exactly the kind of
+    degraded-but-not-crashed state the real incident went undetected in."""
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    object.__setattr__(settings, "clickhouse_hosts", [("127.0.0.1", 1), ("127.0.0.1", 8123)])
+
+    report = health_checks.clickhouse_replica_health(settings)
+    assert report["healthy"] is False
+    assert report["per_host"]["127.0.0.1:1"]["ok"] is False
+    assert report["per_host"]["127.0.0.1:8123"]["ok"] is True
+    assert any(u["host"] == "127.0.0.1:1" for u in report["unhealthy"])
+
+
+def test_check_clickhouse_replicas_feeds_into_readiness_report(db, lab_env, test_clickhouse_db):
+    """/health/ready must flip to not-ready when a configured replica is
+    unreachable - not just when the single clickhouse_host/port check_clickhouse
+    already covers happens to be the broken one."""
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    object.__setattr__(settings, "clickhouse_hosts", [("127.0.0.1", 1), ("127.0.0.1", 8123)])
+
+    report = health_checks.readiness_report(db, settings)
+    assert report["ready"] is False
+    assert report["checks"]["clickhouse_replicas"]["ok"] is False
+    assert report["checks"]["clickhouse"]["ok"] is True  # the single-host check still points at the healthy one

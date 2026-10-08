@@ -4,12 +4,14 @@ import threading
 import time
 import uuid
 
-from confluent_kafka import Producer
+from confluent_kafka import Consumer, Producer
 from sqlalchemy import select
 
+from conftest import TEST_CLICKHOUSE_DB
 from shadowtracer_correlate.consumer import run
 from shadowtracer_correlate.metrics import Metrics
 from shadowtracer_correlate.models import incident_alerts, incidents
+from shadowtracer_ingest.dead_letter import DEAD_LETTER_TOPIC
 
 
 def _alert(agent_id: str, src_ip: str, alert_id: str, timestamp: str = "2026-01-01T12:00:00.000+0000") -> str:
@@ -331,3 +333,77 @@ def test_two_correlation_workers_split_partitions_nothing_processed_twice(kafka_
         thread1.join(timeout=5)
         thread2.join(timeout=5)
         admin.delete_topics([topic])
+
+
+def _drain_dead_letter_topic(kafka_bootstrap, expected_marker, timeout=15):
+    consumer = Consumer({
+        "bootstrap.servers": kafka_bootstrap,
+        "group.id": f"test-dlt-drain-{uuid.uuid4().hex[:8]}",
+        "auto.offset.reset": "earliest",
+    })
+    consumer.subscribe([DEAD_LETTER_TOPIC])
+    deadline = time.monotonic() + timeout
+    found = None
+    while time.monotonic() < deadline:
+        msg = consumer.poll(1.0)
+        if msg is not None and msg.error() is None and expected_marker in msg.value().decode():
+            found = msg.value().decode()
+            break
+    consumer.close()
+    return found
+
+
+def test_correlator_stays_up_when_dead_letter_clickhouse_insert_fails(
+    kafka_bootstrap, kafka_topic, database_url, db, ch_client,
+):
+    """Dead-letter-ClickHouse incident (2026-10-08) hardening, at the real
+    consumer.run() level: the dead_letter_events table itself is
+    unreachable (a real, atomic RENAME TABLE - never the Keeper surgery
+    that caused the real incident - restored in `finally`), while every
+    other table, including incidents/incident_alerts in Postgres and the
+    correlator's own main code path, stays healthy. A permanently
+    malformed alert must still not crash the correlator, must still land
+    on the Kafka dead-letter topic (published before the ClickHouse
+    attempt - see dead_letter.py), and must count dead_letter_ch_failures
+    - and the good alert right behind it on the same partition must still
+    process, proving the partition isn't wedged by this either."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    marker = uuid.uuid4().hex[:8]
+    agent = f"agent-{marker}"
+    bad_timestamp = _alert(agent, "9.9.9.9", f"{marker}.bad-ts", timestamp="2026-10-04T05:00:118.000+0000")
+    good = _alert(agent, "9.9.9.9", f"{marker}.good")
+
+    tmp_name = f"dead_letter_events_tmp_{marker}"
+    ch_client.command(
+        f"RENAME TABLE {TEST_CLICKHOUSE_DB}.dead_letter_events TO {TEST_CLICKHOUSE_DB}.{tmp_name} ON CLUSTER lab_cluster"
+    )
+    try:
+        stop_flag, thread, metrics = _start_consumer(kafka_bootstrap, kafka_topic, database_url, ch_client=ch_client)
+        try:
+            _produce(kafka_bootstrap, kafka_topic, [bad_timestamp, good], tenant_key=tenant)
+
+            deadline = time.monotonic() + 20
+            row = None
+            while time.monotonic() < deadline:
+                row = db.execute(
+                    select(incidents).where(incidents.c.tenant_key == tenant, incidents.c.agent_id == agent)
+                ).mappings().first()
+                if row is not None and row["alert_count"] == 1:
+                    break
+                time.sleep(0.5)
+            assert row is not None and row["alert_count"] == 1, (
+                "the good alert right behind the dead-lettered one must still land - "
+                "the ClickHouse-side failure must not wedge the partition"
+            )
+
+            assert thread.is_alive(), "correlator must never crash when the dead-letter ClickHouse insert fails"
+            found = _drain_dead_letter_topic(kafka_bootstrap, f"{marker}.bad-ts")
+            assert found is not None, "the Kafka dead-letter topic copy must still land even when ClickHouse fails"
+            assert metrics.snapshot().get("dead_letter_ch_failures", 0) >= 1
+        finally:
+            stop_flag.set()
+            thread.join(timeout=5)
+    finally:
+        ch_client.command(
+            f"RENAME TABLE {TEST_CLICKHOUSE_DB}.{tmp_name} TO {TEST_CLICKHOUSE_DB}.dead_letter_events ON CLUSTER lab_cluster"
+        )

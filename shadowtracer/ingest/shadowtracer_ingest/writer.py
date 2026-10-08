@@ -170,10 +170,22 @@ def run(
                         ev = normalize_alert(raw_line, tenant_id or "")
                     except Exception as exc:  # noqa: BLE001 - any parse/normalize failure is permanent, never retried: dead-letter and move on
                         metrics.incr("messages_failed")
-                        send_to_dead_letter(
-                            kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=tenant_id,
-                            component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
-                            error=f"{type(exc).__name__}: {exc}", raw_event=raw_line,
+                        # The dead-letter call itself only ever raises for
+                        # its Kafka-publish half (ClickHouse failures are
+                        # caught inside it) - retried forever, same as any
+                        # other transient infra failure, so this event is
+                        # never silently lost with no durable record at all.
+                        retry_with_backoff(
+                            lambda: send_to_dead_letter(
+                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=tenant_id,
+                                component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
+                                error=f"{type(exc).__name__}: {exc}", raw_event=raw_line, metrics=metrics,
+                            ),
+                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            on_retry=lambda attempt, exc2: logger.warning(
+                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
+                            ),
                         )
                         continue
                     if ev.cluster_node_fell_back:

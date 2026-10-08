@@ -49,6 +49,29 @@ PROCESS_BASE_DELAY_SECONDS = 1.0
 PROCESS_MAX_DELAY_SECONDS = 30.0
 
 
+def _dead_letter_with_retry(stop_flag, metrics, **kwargs) -> bool:
+    """Returns True once the dead-letter write succeeds durably (via the
+    Kafka dead-letter topic - send_to_dead_letter only ever raises for
+    that half, since a ClickHouse-side failure is already caught inside
+    it), retrying forever with backoff in between - same as any other
+    transient infra failure, so a permanently bad event is never left
+    with no durable record anywhere. Returns False only if stop_flag
+    fires mid-retry (graceful shutdown) - the caller must NOT commit the
+    triggering message's offset in that case, so it's genuinely
+    redelivered and retried again after restart."""
+    attempt = 0
+    while True:
+        try:
+            send_to_dead_letter(metrics=metrics, **kwargs)
+            return True
+        except Exception as exc:  # noqa: BLE001 - the Kafka publish itself failing is transient, not bad data
+            attempt += 1
+            logger.warning("dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc)
+            delay = min(PROCESS_BASE_DELAY_SECONDS * (2 ** (attempt - 1)), PROCESS_MAX_DELAY_SECONDS)
+            if stop_flag.wait(delay):
+                return False
+
+
 def run(
     bootstrap_servers: str,
     topic: str,
@@ -114,11 +137,13 @@ def run(
                 event = normalize_alert(raw_line, tenant_key or "")
             except Exception as exc:  # noqa: BLE001 - permanent, bad data: dead-letter and move on, never retried
                 metrics.incr("messages_failed")
-                send_to_dead_letter(
+                if not _dead_letter_with_retry(
+                    stop_flag, metrics,
                     kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                     component="correlator", source_location=source_location,
                     error=f"{type(exc).__name__}: {exc}", raw_event=raw_line,
-                )
+                ):
+                    continue  # shutting down mid-retry - don't commit, this message is genuinely redelivered on restart
                 consumer.commit(msg)
                 continue
 
@@ -142,11 +167,14 @@ def run(
                     db.close()
                     logger.warning("alert %s has a permanently malformed field - dead-lettering, not retrying", event.alert_id)
                     metrics.incr("messages_failed")
-                    send_to_dead_letter(
+                    if not _dead_letter_with_retry(
+                        stop_flag, metrics,
                         kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                         component="correlator", source_location=source_location,
                         error="UnparseableEvent: permanently malformed field", raw_event=raw_line,
-                    )
+                    ):
+                        result = None  # shutting down mid-retry - don't commit
+                        break
                     consumer.commit(msg)
                     result = None
                     break
