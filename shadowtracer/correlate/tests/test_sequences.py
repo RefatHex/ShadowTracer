@@ -15,8 +15,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shadowtracer_correlate.correlator import process_event  # noqa: E402
 from shadowtracer_correlate.sequences import load_sequences  # noqa: E402
 
+from conftest import TEST_CLICKHOUSE_DB as TEST_CH_DB  # noqa: E402
+
 SEQUENCES_DIR = os.path.join(os.path.dirname(__file__), "..", "sequences")
-TEST_CH_DB = "shadowtracer_test"
 SEQUENCES = load_sequences(SEQUENCES_DIR)
 BRUTE_FORCE_SEQ_ID = "ssh_brute_force_then_success"
 

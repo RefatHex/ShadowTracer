@@ -15,8 +15,9 @@ from shadowtracer_correlate.rarity import (  # noqa: E402
     DEFAULT_WARMUP_DAYS, DEFAULT_WARMUP_MIN_INCIDENTS, evaluate_rare_pattern, get_tenant_warmup_config, warmup_status,
 )
 
+from conftest import TEST_CLICKHOUSE_DB as TEST_CH_DB  # noqa: E402
+
 NOW = datetime.datetime.now(datetime.timezone.utc)
-TEST_CH_DB = "shadowtracer_test"
 
 
 def _insert_incident(db, tenant_key, created_at=None, agent_id=None):

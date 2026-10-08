@@ -28,7 +28,14 @@ INGEST_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ingest")
 _CLICKHOUSE_SCHEMA_PATH = os.path.join(INGEST_DIR, "schema", "events_schema.sql")
 
 TEST_POSTGRES_DB = "shadowtracer_test"
-TEST_CLICKHOUSE_DB = "shadowtracer_test"
+# Session-unique, not a fixed "shadowtracer_test" - found the hard way
+# (2026-10-08, see MEMORY/project_test_suite_db_race.md): a shared fixed
+# name let this suite's session-start DROP+recreate race the ingest
+# suite's own identical fixture when both ran concurrently against the
+# same real cluster. Generated once at conftest import time (= once per
+# pytest session, same as the Keeper path prefix below), dropped again at
+# session end so it doesn't orphan a database per run.
+TEST_CLICKHOUSE_DB = f"shadowtracer_test_{uuid.uuid4().hex[:8]}"
 LAB_CLICKHOUSE_DB = "shadowtracer"
 
 
@@ -138,17 +145,18 @@ def db(engine):
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_clickhouse_test_database(lab_env):
-    """Drops and recreates shadowtracer_test fresh every session, applying
-    the one schema source (schema/events_schema.sql) under a fresh Keeper
-    path prefix - see that file's header, and
-    shadowtracer/ingest/tests/conftest.py's identical fixture, for why."""
+    """Creates this session's own TEST_CLICKHOUSE_DB (already
+    session-unique - see its definition above), applying the one schema
+    source (schema/events_schema.sql) under a fresh Keeper path prefix -
+    see that file's header, and shadowtracer/ingest/tests/conftest.py's
+    identical fixture, for why - and drops it again at session end, since
+    nothing else will ever reuse this exact random name."""
     _refuse_if_pointed_at_lab_database(lab_postgres_db=lab_env["POSTGRES_DB"])
 
     admin_client = clickhouse_connect.get_client(
         host="127.0.0.1", port=8123,
         username=lab_env["CLICKHOUSE_USER"], password=lab_env["CLICKHOUSE_PASSWORD"],
     )
-    admin_client.command(f"DROP DATABASE IF EXISTS {TEST_CLICKHOUSE_DB} ON CLUSTER lab_cluster")
     keeper_prefix = f"test-{uuid.uuid4().hex[:8]}/"
     with open(_CLICKHOUSE_SCHEMA_PATH) as f:
         schema_sql = f.read().replace("__DATABASE__", TEST_CLICKHOUSE_DB).replace("__KEEPER_PREFIX__", keeper_prefix)
@@ -157,6 +165,8 @@ def _isolated_clickhouse_test_database(lab_env):
         statement = statement.strip()
         if statement:
             admin_client.command(statement)
+    yield
+    admin_client.command(f"DROP DATABASE IF EXISTS {TEST_CLICKHOUSE_DB} ON CLUSTER lab_cluster")
     admin_client.close()
 
 

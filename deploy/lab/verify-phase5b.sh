@@ -105,6 +105,20 @@ PYEOF
 
 DATABASE_URL_APP="postgresql+psycopg2://shadowtracer_app:${APP_DB_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
 
+# A dedicated throwaway tenant for every section below EXCEPT the real-lab-
+# tenant warm-up read in section 2 (deliberately real data, creates nothing -
+# see that section's own comment). No tenants/users row needed: incidents,
+# campaigns, campaign_incidents, incident_alerts, and sequence_progress all
+# have a plain tenant_key STRING column with no foreign key into `tenants`
+# (confirmed against the schema) - a real tenants row is only needed to log
+# in through the actual /auth/login API, which only the separate rare_tenant
+# below (section 2's override test) ever does. Cleanup below deletes by this
+# exact tenant_key/tenant_id across every table, in FK-safe order - no
+# agent_id LIKE patterns, which is what let a sequence-test incident's
+# campaign link slip through cleanup once already (see the cleanup section's
+# own comment, and PHASE3_DATA_PLATFORM.md's incident writeup).
+VERIFY_TENANT_KEY="verify-$(date +%s)-${RANDOM}"
+
 echo "=== Phase 5B VERIFY ==="
 echo
 echo "--- 1. Campaign linking: brute force repeated twice from one IP within 24h -> ONE campaign, 2 incidents ---"
@@ -113,16 +127,16 @@ agent="camp-agent-${marker}"
 ip_a="203.0.113.$((RANDOM % 200 + 10))"
 ip_b="203.0.113.$((RANDOM % 55 + 210))"
 
-produce_alert "$TENANT_KEY" "$agent" "$ip_a" "sshd,authentication_failed" "1"
+produce_alert "$VERIFY_TENANT_KEY" "$agent" "$ip_a" "sshd,authentication_failed" "1"
 sleep 8
 close_sweep
-id1="$(psql_query "SELECT id FROM incidents WHERE tenant_key = '$TENANT_KEY' AND agent_id = '$agent' ORDER BY id LIMIT 1")"
+id1="$(psql_query "SELECT id FROM incidents WHERE tenant_key = '$VERIFY_TENANT_KEY' AND agent_id = '$agent' ORDER BY id LIMIT 1")"
 check "incident 1 closed" "[ -n \"$id1\" ]"
 
-produce_alert "$TENANT_KEY" "$agent" "$ip_a" "sshd,authentication_failed" "2"
+produce_alert "$VERIFY_TENANT_KEY" "$agent" "$ip_a" "sshd,authentication_failed" "2"
 sleep 8
 close_sweep
-id2="$(psql_query "SELECT id FROM incidents WHERE tenant_key = '$TENANT_KEY' AND agent_id = '$agent' AND id != $id1 ORDER BY id LIMIT 1")"
+id2="$(psql_query "SELECT id FROM incidents WHERE tenant_key = '$VERIFY_TENANT_KEY' AND agent_id = '$agent' AND id != $id1 ORDER BY id LIMIT 1")"
 check "incident 2 (same IP) closed" "[ -n \"$id2\" ]"
 
 echo "--- real SQL: campaigns for incidents 1 and 2 ---"
@@ -137,10 +151,10 @@ check "same actor within 24h -> SAME campaign" "[ \"$campaign1\" = \"$campaign2\
 incident_count="$(psql_query "SELECT incident_count FROM campaigns WHERE id = $campaign1")"
 check "campaign incident_count is 2" "[ \"$incident_count\" = 2 ]"
 
-produce_alert "$TENANT_KEY" "$agent" "$ip_b" "sshd,authentication_failed" "3"
+produce_alert "$VERIFY_TENANT_KEY" "$agent" "$ip_b" "sshd,authentication_failed" "3"
 sleep 8
 close_sweep
-id3="$(psql_query "SELECT id FROM incidents WHERE tenant_key = '$TENANT_KEY' AND agent_id = '$agent' AND id NOT IN ($id1, $id2) ORDER BY id LIMIT 1")"
+id3="$(psql_query "SELECT id FROM incidents WHERE tenant_key = '$VERIFY_TENANT_KEY' AND agent_id = '$agent' AND id NOT IN ($id1, $id2) ORDER BY id LIMIT 1")"
 check "incident 3 (different IP) closed" "[ -n \"$id3\" ]"
 
 fp1="$(psql_query "SELECT fingerprint_key FROM incidents WHERE id = $id1")"
@@ -231,7 +245,7 @@ seq_marker="seq$(date +%s)"
 seq_agent="seqv-agent-${seq_marker}"
 seq_ip="203.0.113.$((RANDOM % 50 + 150))"
 
-probe_partition="$("$PY_CORRELATE" - "$KAFKA_BOOTSTRAP" "$TENANT_KEY" "${seq_agent}-probe" <<'PYEOF'
+probe_partition="$("$PY_CORRELATE" - "$KAFKA_BOOTSTRAP" "$VERIFY_TENANT_KEY" "${seq_agent}-probe" <<'PYEOF'
 import json, sys, time
 from confluent_kafka import Producer
 bootstrap, tenant, agent = sys.argv[1:4]
@@ -255,12 +269,12 @@ owner_ip="$(owner_of_partition "$probe_partition" "$(describe_group)")"
 if [ "$owner_ip" = "$C1_IP" ]; then victim_name="$C1_NAME"; victim_ip="$C1_IP"; else victim_name="$C2_NAME"; victim_ip="$C2_IP"; fi
 echo "sequence test agent's partition ($probe_partition) is owned by $victim_name"
 
-produce_alert "$TENANT_KEY" "$seq_agent" "$seq_ip" "sshd,authentication_failed" "step0"
+produce_alert "$VERIFY_TENANT_KEY" "$seq_agent" "$seq_ip" "sshd,authentication_failed" "step0"
 sleep 5
 echo "killing $victim_name (docker kill) between step 0 and step 1..."
 docker kill "$victim_name" >/dev/null
 
-produce_alert "$TENANT_KEY" "$seq_agent" "$seq_ip" "sshd,authentication_success" "step1"
+produce_alert "$VERIFY_TENANT_KEY" "$seq_agent" "$seq_ip" "sshd,authentication_success" "step1"
 
 echo "waiting for rebalance + survivor to process the completing alert (real session.timeout.ms wait, ~50s)..."
 deadline=$(( $(date +%s) + 120 ))
@@ -304,9 +318,9 @@ echo "--- replay safety: a fresh dedicated consumer group reading the whole topi
 replay_marker="replay$(date +%s)"
 replay_agent="replayv-agent-${replay_marker}"
 replay_ip="203.0.113.$((RANDOM % 50 + 1))"
-produce_alert "$TENANT_KEY" "$replay_agent" "$replay_ip" "sshd,authentication_failed" "step0"
+produce_alert "$VERIFY_TENANT_KEY" "$replay_agent" "$replay_ip" "sshd,authentication_failed" "step0"
 sleep 2
-produce_alert "$TENANT_KEY" "$replay_agent" "$replay_ip" "sshd,authentication_success" "step1"
+produce_alert "$VERIFY_TENANT_KEY" "$replay_agent" "$replay_ip" "sshd,authentication_success" "step1"
 
 deadline=$(( $(date +%s) + 30 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -357,32 +371,28 @@ check "replaying the whole topic from a fresh group does not fire it twice" "[ \
 
 echo
 echo "--- cleanup: removing this run's VERIFY data ---"
-# Every DELETE here that targets "this run's incidents" uses the SAME
-# 4-pattern agent_id filter, not an independently-maintained subset of
-# it - found the hard way (2026-10-08, this same run): campaign_incidents'
-# filter had only 2 of the 4 patterns, missing a sequence-test incident's
-# campaign link, which made the later incidents DELETE hit a real FK
-# violation and roll back this whole batch (psql -c runs multi-statement
-# as one transaction - same failure shape as the earlier
-# refresh_tokens/users FK-order bug, a different FK this time). Orphaned
-# `campaigns` rows (both the camp-agent test's shared one and the
-# solo ones auto-created for every other closed incident) are deleted by
-# what's LEFT in campaign_incidents after that, not by listing actor_value
-# IPs - a list that silently drifts out of sync is exactly what broke here.
+# By tenant_key/tenant_id alone, across every table, in FK-safe order -
+# never by agent_id name pattern. A name-pattern filter has to be kept in
+# sync, independently, at every DELETE that uses one - found the hard way
+# (2026-10-08, this same run, before this rewrite): campaign_incidents'
+# pattern list had only 2 of the 4 prefixes incidents' own DELETE used,
+# missing a sequence-test incident's campaign link, which made the
+# incidents DELETE hit a real FK violation and roll back this whole batch
+# (psql -c runs multi-statement as one transaction). A tenant_key is exact
+# and generated fresh every run (VERIFY_TENANT_KEY, rare_tenant_key) - no
+# list to drift out of sync, and no risk of ever touching the real lab
+# tenant's own campaigns (the previous version's campaigns DELETE scoped
+# by tenant_key IN ($TENANT_KEY, ...) came uncomfortably close to that).
 psql_exec "
 DELETE FROM campaign_incidents WHERE incident_id IN (
-  SELECT id FROM incidents WHERE agent_id LIKE 'camp-agent-%' OR agent_id LIKE 'rare-agent-%'
-  OR agent_id LIKE 'seqv-agent-%' OR agent_id LIKE 'replayv-agent-%'
+  SELECT id FROM incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')
 );
 DELETE FROM incident_alerts WHERE incident_id IN (
-  SELECT id FROM incidents WHERE agent_id LIKE 'camp-agent-%' OR agent_id LIKE 'rare-agent-%'
-  OR agent_id LIKE 'seqv-agent-%' OR agent_id LIKE 'replayv-agent-%'
+  SELECT id FROM incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')
 );
-DELETE FROM incidents WHERE agent_id LIKE 'camp-agent-%' OR agent_id LIKE 'rare-agent-%'
-  OR agent_id LIKE 'seqv-agent-%' OR agent_id LIKE 'replayv-agent-%';
-DELETE FROM campaigns WHERE tenant_key IN ('$TENANT_KEY', '$rare_tenant_key')
-  AND id NOT IN (SELECT DISTINCT campaign_id FROM campaign_incidents);
-DELETE FROM sequence_progress WHERE agent_id LIKE 'seqv-agent-%' OR agent_id LIKE 'replayv-agent-%';
+DELETE FROM incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
+DELETE FROM campaigns WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
+DELETE FROM sequence_progress WHERE tenant_key = '$VERIFY_TENANT_KEY';
 DELETE FROM tenant_alert_settings WHERE tenant_key = '$rare_tenant_key';
 DELETE FROM refresh_tokens WHERE user_id IN (
   SELECT id FROM users WHERE tenant_id = (SELECT id FROM tenants WHERE tenant_key = '$rare_tenant_key')
@@ -390,9 +400,38 @@ DELETE FROM refresh_tokens WHERE user_id IN (
 DELETE FROM users WHERE tenant_id = (SELECT id FROM tenants WHERE tenant_key = '$rare_tenant_key');
 DELETE FROM tenants WHERE tenant_key = '$rare_tenant_key';
 " >/dev/null
-cutoff="$(date -u -d '15 minutes ago' '+%Y-%m-%d %H:%M:%S')"
-ch_query "ALTER TABLE shadowtracer.sequence_firings DELETE WHERE (agent_id LIKE 'seqv-agent-%' OR agent_id LIKE 'replayv-agent-%') AND fired_at >= toDateTime64('$cutoff', 3)"
-ch_query "ALTER TABLE shadowtracer.events DELETE WHERE (agent_id LIKE 'camp-agent-%' OR agent_id LIKE 'rare-agent-%' OR agent_id LIKE 'seqv-agent-%' OR agent_id LIKE 'replayv-agent-%') AND time >= toDateTime64('$cutoff', 3)"
+ch_query "ALTER TABLE shadowtracer.sequence_firings DELETE WHERE tenant_id = '$VERIFY_TENANT_KEY'"
+ch_query "ALTER TABLE shadowtracer.events DELETE WHERE tenant_id IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')"
+
+echo "--- proving cleanup left zero rows for this run's tenants ---"
+leftover_pg="$(psql_query "
+SELECT
+  (SELECT count(*) FROM incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
+  (SELECT count(*) FROM campaigns WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
+  (SELECT count(*) FROM campaign_incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
+  (SELECT count(*) FROM incident_alerts WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
+  (SELECT count(*) FROM sequence_progress WHERE tenant_key = '$VERIFY_TENANT_KEY') +
+  (SELECT count(*) FROM tenant_alert_settings WHERE tenant_key = '$rare_tenant_key') +
+  (SELECT count(*) FROM tenants WHERE tenant_key = '$rare_tenant_key')
+")"
+check "zero leftover Postgres rows for this run's tenant(s)" "[ \"$leftover_pg\" = 0 ]"
+
+# ALTER TABLE ... DELETE is an asynchronous mutation in ClickHouse - found
+# the hard way, this same rewrite: querying right after issuing it can
+# still see the old rows until the mutation actually runs. Poll instead
+# of asserting once.
+leftover_ch=-1
+deadline=$(( $(date +%s) + 30 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    leftover_ch="$(ch_query "
+    SELECT
+      (SELECT count() FROM shadowtracer.events WHERE tenant_id IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
+      (SELECT count() FROM shadowtracer.sequence_firings WHERE tenant_id = '$VERIFY_TENANT_KEY')
+    ")"
+    [ "$leftover_ch" = 0 ] && break
+    sleep 2
+done
+check "zero leftover ClickHouse rows for this run's tenant(s)" "[ \"$leftover_ch\" = 0 ]"
 
 echo "---"
 if [ "$fail" -eq 0 ]; then

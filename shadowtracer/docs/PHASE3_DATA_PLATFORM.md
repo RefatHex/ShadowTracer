@@ -517,10 +517,42 @@ table (`events`, `events_hourly_rollup`, `fingerprint_occurrences`,
 `sequence_firings`) was healthy on both replicas. Both replicas' copies
 of `dead_letter_events` were confirmed empty (0 rows, exported to
 `deploy/lab/incident-2026-10-08-dead-letter-readonly/*.csv` before
-touching anything) - so the impact was **zero data loss and zero
-real-pipeline impact**: nothing had ever been durably lost (there was
-nothing in the table to lose), and no component other than the
-best-effort ClickHouse side of dead-lettering depends on this table.
+touching anything) at the moment of discovery - **but that emptiness is
+itself a consequence of the migration, not evidence nothing had ever
+been dead-lettered**: the `DROP`+recreate above discarded whatever rows
+`dead_letter_events` already held, including the original Phase 3
+hostile-input test's own rows from 2026-10-04. Those ClickHouse-side
+rows are genuinely gone (the table they lived in no longer exists in the
+form it was written to); their Kafka dead-letter topic copies survived
+independently and are still on the topic today.
+
+Identified the exact message the VERIFY replay consumer got stuck on:
+the one-off consumer group `verify-replay-1791385211` (created
+2026-10-07, read-only against `shadowtracer.events.raw` from earliest)
+shows committed offset 74 on partition 17 with the rest of that
+partition (up to log-end offset 399) never consumed - i.e. it crashed
+processing offset 74 and never advanced past it. That message is
+`hostile1791131955.good.missing-ts` (a deliberately timestamp-less event
+from an earlier hostile-input smoke-test run, agent
+`hostile-agent-hostile1791131955`) - `normalize_alert` fails on it
+(`KeyError: 'timestamp'`), which is exactly the permanent-bad-data path
+`send_to_dead_letter` exists for. Its Kafka dead-letter topic copy
+**does exist** - three records for
+`source_location=shadowtracer.events.raw:17:74` are on the topic
+(`deploy/lab/incident-2026-10-08-dead-letter-readonly/kafka_dead_letter_topic_full_dump.jsonl`):
+two from the original 2026-10-04 hostile-input run (`writer` and
+`correlator`, old schema), and one from the VERIFY replay itself
+(`correlator`, `failed_at: 2026-10-07T15:00:15Z`, new preview/sha256
+schema) - matching the replay consumer group's own creation time. **Not
+lost**: the Kafka publish (step 1 of `send_to_dead_letter`'s ordering)
+succeeded before the crash; only the subsequent ClickHouse insert (step
+2) hit the then-read-only table and raised uncaught in the
+pre-hardening code, killing the one-off replay consumer thread before it
+could commit offset 74 or continue past it. The live production
+`shadowtracer-writer`/`shadowtracer-correlate` consumer groups were
+never stuck this way - confirming, independently of the scoping above,
+**zero real-pipeline impact**: the only casualty was this throwaway
+verification consumer.
 
 **Fix.** `SYSTEM RESTORE REPLICA dead_letter_events` on each affected
 replica, one at a time - the supported recovery for exactly this
@@ -556,15 +588,21 @@ ClickHouse recovers - safe to re-run any number of times (a committed
 Kafka consumer group position plus `insert_deduplication_token`, the
 same two-layer idempotency `events` inserts already use).
 
-**Why the existing hostile-input smoke test didn't catch this.** It
-queried `dead_letter_events` only via `docker exec` into the
-`ch-clickhouse-1` container specifically, and only ever checked row
-*counts* - never `is_readonly`, never `ch-clickhouse-2`, never the Kafka
-dead-letter topic itself. A replica stuck read-only could pass this
-check indefinitely as long as whichever replica the script happened to
-query, and whatever count it happened to see, stayed consistent -
-structurally, regardless of exactly when it was last run relative to the
-migration. `smoke-test.sh` now asserts `is_readonly=0` and
+**Why the existing hostile-input smoke test didn't catch this.** Both
+reasons originally suspected turned out true, confirmed by the timeline
+above rather than guessed: the smoke test's hostile-input run that
+produced the 2026-10-04 dead-letter rows predates the migration/incident
+by three days, and was never re-run in between - so its passing result
+from that day says nothing about the state the migration later broke;
+there is no run in between for it to have caught. Separately, and true
+regardless of timing: it queried `dead_letter_events` only via `docker
+exec` into the `ch-clickhouse-1` container specifically, and only ever
+checked row *counts* - never `is_readonly`, never `ch-clickhouse-2`,
+never the Kafka dead-letter topic itself. Even a same-day re-run could
+have passed by coincidence (whichever replica it happened to query, and
+whatever count it happened to see, staying consistent) without ever
+checking the one thing that was actually broken. `smoke-test.sh` now
+asserts `is_readonly=0` and
 `is_session_expired=0` for every replicated table on **both** real
 ClickHouse replicas directly (a new, separate check, every run), and its
 hostile-input round-trip now also checks `ch-clickhouse-2`'s count and
@@ -602,6 +640,41 @@ silently fail to (re)start, leaving them `unhealthy` and blocking
 `shadowtracer-control restart` on each; noted here only because it's
 what `smoke-test.sh`'s history would otherwise show as an unrelated
 failure around the same time.)
+
+**Follow-up: two more real bugs found closing this out.** Proving the
+ingest and correlate test suites could run concurrently (they couldn't
+yet - see [[project_test_suite_db_race]]) surfaced the first: both
+suites' `conftest.py` independently `DROP DATABASE IF EXISTS
+shadowtracer_test ... RECREATE` against the same real cluster under the
+same hardcoded name - running them at the same time let one suite's
+session-start DROP race the other's, producing a `test_shipper.py`
+failure that had nothing to do with the code under test. Fixed by
+generating a session-unique `shadowtracer_test_<token>` name per suite
+(same pattern as the Keeper path prefix already used for the same
+reason) and dropping it at session end so it doesn't orphan a database
+per run; `shadowtracer/console/backend`'s conftest got the identical fix
+for consistency, though it wasn't part of the concurrency being proved.
+Fixing this also exposed a second, independent bug: `test_rarity.py`,
+`test_sequences.py`, and `test_campaigns.py` each had their own
+hardcoded `TEST_CH_DB`/`CH_DB = "shadowtracer_test"` literal, never
+sourced from conftest's constant - invisible while both strings happened
+to match, and silently pointing at the wrong (now nonexistent-by-that-
+name) database once conftest's value became dynamic. Fixed by importing
+conftest's `TEST_CLICKHOUSE_DB` instead of re-declaring it.
+
+Separately, `verify-phase5b.sh`'s cleanup (the FK-order bug fixed above)
+was rewritten again: campaign/sequence-test data now runs under one
+dedicated throwaway `VERIFY_TENANT_KEY` per run (no `tenants`/`users`
+row needed - `incidents`/`campaigns`/etc. have a plain `tenant_key`
+string column with no foreign key into `tenants`) instead of the real
+lab tenant, and cleanup deletes by `tenant_key`/`tenant_id` alone across
+every table, in FK-safe order - never by `agent_id` name pattern, which
+is what let the sequence-test incident's campaign link slip through
+cleanup in the first place. The script now also directly proves zero
+leftover rows for its tenant(s) in both Postgres and ClickHouse after
+cleanup (not just that the DELETEs didn't error) - the ClickHouse side
+needed a short poll, since `ALTER TABLE ... DELETE` is an asynchronous
+mutation there, not an immediate one.
 
 ## Open items
 

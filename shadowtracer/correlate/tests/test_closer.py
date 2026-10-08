@@ -5,6 +5,7 @@ import uuid
 
 from sqlalchemy import select
 
+from conftest import TEST_CLICKHOUSE_DB
 from shadowtracer_correlate.closer import close_eligible_incidents
 from shadowtracer_correlate.closer_loop import run as run_closer_loop
 from shadowtracer_correlate.metrics import Metrics
@@ -33,7 +34,7 @@ def test_quiet_incident_past_session_gap_gets_closed_with_a_fingerprint(db, ch_c
     tenant = f"t-{uuid.uuid4().hex[:8]}"
     incident_id = _insert_quiet_incident(db, tenant, "agent-a", last_seen_ago_seconds=700)
 
-    closed = close_eligible_incidents(db, ch_client, "shadowtracer_test", session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
+    closed = close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
 
     assert incident_id in closed
     row = db.execute(select(incidents).where(incidents.c.id == incident_id)).mappings().one()
@@ -57,7 +58,7 @@ def test_incident_within_session_gap_is_not_closed(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
     incident_id = _insert_quiet_incident(db, tenant, "agent-b", last_seen_ago_seconds=30)
 
-    closed = close_eligible_incidents(db, ch_client, "shadowtracer_test", session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
+    closed = close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
 
     assert incident_id not in closed
     row = db.execute(select(incidents).where(incidents.c.id == incident_id)).mappings().one()
@@ -73,7 +74,7 @@ def test_same_attack_two_source_ips_two_incidents_one_fingerprint(db, ch_client)
     db.execute(incidents.update().where(incidents.c.id == id2).values(source_ips=["1.1.1.1"]))
     db.commit()
 
-    closed = close_eligible_incidents(db, ch_client, "shadowtracer_test", session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
+    closed = close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
     assert set(closed) >= {id1, id2}
 
     rows = db.execute(select(incidents).where(incidents.c.id.in_([id1, id2]))).mappings().all()
@@ -94,7 +95,7 @@ def test_a_different_attack_gets_a_different_fingerprint(db, ch_client):
     db.execute(incidents.update().where(incidents.c.id == local_user_id).values(source_ips=[], mitre_ids=["T1136.001"]))
     db.commit()
 
-    close_eligible_incidents(db, ch_client, "shadowtracer_test", session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
+    close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
 
     rows = db.execute(select(incidents).where(incidents.c.id.in_([ssh_id, local_user_id]))).mappings().all()
     fingerprint_keys = {r["fingerprint_key"] for r in rows}
@@ -123,11 +124,11 @@ def test_two_closer_replicas_never_close_the_same_incident_twice(db, ch_client, 
         worker_ch = clickhouse_connect.get_client(
             host="127.0.0.1", port=8123,
             username=lab_env["CLICKHOUSE_USER"], password=lab_env["CLICKHOUSE_PASSWORD"],
-            database="shadowtracer_test",
+            database=TEST_CLICKHOUSE_DB,
         )
         try:
             results[worker_name] = close_eligible_incidents(
-                worker_db, worker_ch, "shadowtracer_test", session_gap_seconds=600, internal_ranges=INTERNAL_RANGES,
+                worker_db, worker_ch, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES,
             )
         finally:
             worker_ch.close()
@@ -167,7 +168,7 @@ def test_closer_loop_is_actually_running_and_draining_not_just_callable(db, ch_c
             database_url=database_url,
             clickhouse_host="127.0.0.1", clickhouse_port=8123,
             clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
-            clickhouse_database="shadowtracer_test",
+            clickhouse_database=TEST_CLICKHOUSE_DB,
             session_gap_seconds=600, internal_ranges=INTERNAL_RANGES,
             metrics=metrics, stop_flag=stop_flag, poll_interval_seconds=1,
             started_flag=started_flag,

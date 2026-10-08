@@ -11,11 +11,11 @@ import uuid
 
 from sqlalchemy import select
 
+from conftest import TEST_CLICKHOUSE_DB as CH_DB
 from shadowtracer_correlate.closer import close_eligible_incidents
 from shadowtracer_correlate.models import campaign_incidents, campaigns, incidents
 
 INTERNAL_RANGES = ["10.0.0.0/8"]
-CH_DB = "shadowtracer_test"
 
 
 def _insert_incident(db, tenant, agent, first_seen, last_seen, source_ips=None, users=None, alert_count=10):

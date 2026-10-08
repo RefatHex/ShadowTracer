@@ -28,7 +28,15 @@ ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "
 # schema/events_schema.sql) - there is no env var for it to drift out of
 # sync with.
 LAB_CLICKHOUSE_DB = "shadowtracer"
-TEST_CLICKHOUSE_DB = "shadowtracer_test"
+# Session-unique, not a fixed "shadowtracer_test" - found the hard way
+# (2026-10-08, see MEMORY/project_test_suite_db_race.md): a shared fixed
+# name let this suite's session-start DROP+recreate race the correlate
+# suite's own identical fixture when both ran concurrently against the
+# same real cluster, causing a spurious failure with nothing to do with
+# the code under test. Generated once at conftest import time (= once per
+# pytest session, same as the Keeper path prefix below), dropped again at
+# session end so it doesn't orphan a database per run.
+TEST_CLICKHOUSE_DB = f"shadowtracer_test_{uuid.uuid4().hex[:8]}"
 
 
 def _load_env() -> dict:
@@ -65,22 +73,25 @@ def lab_env():
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_clickhouse_test_database(lab_env):
-    """Drops and recreates shadowtracer_test fresh at the start of every
-    test session, then applies the one schema source
-    (schema/events_schema.sql via clickhouse_schema.apply_schema) under a
-    fresh Keeper path prefix - see that module and schema file for why."""
+    """Creates this session's own TEST_CLICKHOUSE_DB (already
+    session-unique - see its definition above), applies the one schema
+    source (schema/events_schema.sql via clickhouse_schema.apply_schema)
+    under a fresh Keeper path prefix, and drops it again at session end -
+    nothing else will ever reuse this exact random name, so without this
+    teardown every run would orphan a database forever."""
     _refuse_if_pointed_at_lab_clickhouse_database()
 
     admin_client = clickhouse_connect.get_client(
         host="127.0.0.1", port=8123,
         username=lab_env["CLICKHOUSE_USER"], password=lab_env["CLICKHOUSE_PASSWORD"],
     )
-    admin_client.command(f"DROP DATABASE IF EXISTS {TEST_CLICKHOUSE_DB} ON CLUSTER lab_cluster")
     # A fresh, never-before-used Keeper path prefix every session - see
     # the schema file's header for why a fixed path would race this same
     # DROP's asynchronous Keeper cleanup.
     keeper_prefix = f"test-{uuid.uuid4().hex[:8]}/"
     apply_schema(admin_client, database=TEST_CLICKHOUSE_DB, keeper_prefix=keeper_prefix)
+    yield
+    admin_client.command(f"DROP DATABASE IF EXISTS {TEST_CLICKHOUSE_DB} ON CLUSTER lab_cluster")
     admin_client.close()
 
 
