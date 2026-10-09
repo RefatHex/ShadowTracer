@@ -33,6 +33,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest"))
 from shadowtracer_ingest.dead_letter import send_to_dead_letter  # noqa: E402
 from shadowtracer_ingest.normalizer import normalize_alert  # noqa: E402
+from shadowtracer_ingest.tenants import TenantCache  # noqa: E402
 
 from confluent_kafka import Consumer, Producer
 from sqlalchemy import create_engine
@@ -107,6 +108,10 @@ def run(
     engine = create_engine(database_url, pool_pre_ping=True)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers})
+    # Phase 5C Step 0: a forged/stale/deleted tenant_key must never create
+    # silent orphaned incidents - see tenants.py's own docstring for why
+    # this is a periodically-refreshed cache, not a query per message.
+    tenant_cache = TenantCache(engine)
 
     if started_flag is not None:
         started_flag.set()
@@ -132,6 +137,22 @@ def run(
             # dead-lettered there.
             raw_line = msg.value().decode("utf-8", errors="replace")
             source_location = f"{msg.topic()}:{msg.partition()}:{msg.offset()}"
+
+            # Phase 5C Step 0: checked before normalize_alert, same
+            # permanent-bad-data path - never retried, since this
+            # tenant_key isn't about to start existing mid-retry any more
+            # than a bad timestamp is.
+            if not tenant_cache.is_known(tenant_key or ""):
+                metrics.incr("messages_failed")
+                if not _dead_letter_with_retry(
+                    stop_flag, metrics,
+                    kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
+                    component="correlator", source_location=source_location,
+                    error="unknown_tenant", raw_event=raw_line,
+                ):
+                    continue  # shutting down mid-retry - don't commit, this message is genuinely redelivered on restart
+                consumer.commit(msg)
+                continue
 
             try:
                 event = normalize_alert(raw_line, tenant_key or "")

@@ -7,6 +7,9 @@ Env vars:
   CLICKHOUSE_HOSTS ("host1:port1,host2:port2", tried in order - failover
     across replicas, see _FailoverClickHouse)
   CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, CLICKHOUSE_DATABASE, METRICS_PORT
+  POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, APP_DB_PASSWORD - Phase 5C
+    Step 0's tenant-existence check (tenants.py); same role/convention as
+    the correlator's own run_correlator.py.
 """
 
 import logging
@@ -32,6 +35,12 @@ for hp in hosts_raw.split(","):
     host, port = hp.split(":")
     clickhouse_hosts.append((host, int(port)))
 
+database_url = (
+    f"postgresql+psycopg2://shadowtracer_app:{os.environ['APP_DB_PASSWORD']}"
+    f"@{os.environ.get('POSTGRES_HOST', '127.0.0.1')}:{os.environ.get('POSTGRES_PORT', '5432')}"
+    f"/{os.environ.get('POSTGRES_DB', 'shadowtracer')}"
+)
+
 writer.run(
     bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9094"),
     topic=os.environ.get("KAFKA_TOPIC", "shadowtracer.events.raw"),
@@ -40,6 +49,7 @@ writer.run(
     clickhouse_user=os.environ["CLICKHOUSE_USER"],
     clickhouse_password=os.environ["CLICKHOUSE_PASSWORD"],
     clickhouse_database=os.environ.get("CLICKHOUSE_DATABASE", "shadowtracer"),
+    database_url=database_url,
     metrics=metrics,
     stop_flag=stop_flag,
 )

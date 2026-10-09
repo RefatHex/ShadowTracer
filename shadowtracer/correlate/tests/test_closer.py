@@ -5,7 +5,7 @@ import uuid
 
 from sqlalchemy import select
 
-from conftest import TEST_CLICKHOUSE_DB
+from conftest import TEST_CLICKHOUSE_DB, insert_tenant
 from shadowtracer_correlate.closer import close_eligible_incidents
 from shadowtracer_correlate.closer_loop import run as run_closer_loop
 from shadowtracer_correlate.metrics import Metrics
@@ -32,6 +32,7 @@ def _insert_quiet_incident(db, tenant, agent, last_seen_ago_seconds, rule_groups
 
 def test_quiet_incident_past_session_gap_gets_closed_with_a_fingerprint(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     incident_id = _insert_quiet_incident(db, tenant, "agent-a", last_seen_ago_seconds=700)
 
     closed = close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
@@ -56,6 +57,7 @@ def test_quiet_incident_past_session_gap_gets_closed_with_a_fingerprint(db, ch_c
 
 def test_incident_within_session_gap_is_not_closed(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     incident_id = _insert_quiet_incident(db, tenant, "agent-b", last_seen_ago_seconds=30)
 
     closed = close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
@@ -67,6 +69,7 @@ def test_incident_within_session_gap_is_not_closed(db, ch_client):
 
 def test_same_attack_two_source_ips_two_incidents_one_fingerprint(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     id1 = _insert_quiet_incident(db, tenant, "agent-c", last_seen_ago_seconds=700)
     id2 = _insert_quiet_incident(db, tenant, "agent-c", last_seen_ago_seconds=700)
     # Give them different source IPs directly (simulating two separate
@@ -90,6 +93,7 @@ def test_same_attack_two_source_ips_two_incidents_one_fingerprint(db, ch_client)
 
 def test_a_different_attack_gets_a_different_fingerprint(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     ssh_id = _insert_quiet_incident(db, tenant, "agent-d", last_seen_ago_seconds=700, rule_groups=["sshd", "authentication_failed"])
     local_user_id = _insert_quiet_incident(db, tenant, "agent-e", last_seen_ago_seconds=700, rule_groups=["authentication", "syscheck"])
     db.execute(incidents.update().where(incidents.c.id == local_user_id).values(source_ips=[], mitre_ids=["T1136.001"]))
@@ -112,6 +116,7 @@ def test_two_closer_replicas_never_close_the_same_incident_twice(db, ch_client, 
     import clickhouse_connect
 
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     incident_id = _insert_quiet_incident(db, tenant, "agent-race", last_seen_ago_seconds=700)
 
     engine = create_engine(database_url)
@@ -157,6 +162,7 @@ def test_closer_loop_is_actually_running_and_draining_not_just_callable(db, ch_c
     in a thread and insert a quiet incident, exactly like a real
     deployment would."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     incident_id = _insert_quiet_incident(db, tenant, "agent-loop", last_seen_ago_seconds=700)
 
     metrics = Metrics()

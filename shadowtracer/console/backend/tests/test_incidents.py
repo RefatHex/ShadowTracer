@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from conftest import insert_tenant
 from app import incidents as incidents_logic
 from app.models import fingerprint_verdicts, fingerprints, incidents, users
 
@@ -41,6 +42,7 @@ def _make_closed_incident(db, tenant_key, fingerprint_key=None):
 
 def test_apply_triage_acknowledge_updates_status_no_verdict_recorded(db, tenant_id):
     tenant_key = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_key)
     analyst = _make_user(db, tenant_id)
     incident_id, fingerprint_key = _make_closed_incident(db, tenant_key)
 
@@ -66,6 +68,7 @@ def test_viewer_cannot_triage_is_enforced_at_the_route_not_here():
 
 def test_five_false_positives_from_one_analyst_does_not_propose_suppression(db, tenant_id):
     tenant_key = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_key)
     analyst = _make_user(db, tenant_id)
     fingerprint_key = uuid.uuid4().hex
 
@@ -83,6 +86,7 @@ def test_five_false_positives_from_one_analyst_does_not_propose_suppression(db, 
 
 def test_five_false_positives_from_two_analysts_proposes_suppression_not_active(db, tenant_id):
     tenant_key = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_key)
     analyst_a = _make_user(db, tenant_id)
     analyst_b = _make_user(db, tenant_id)
     fingerprint_key = uuid.uuid4().hex
@@ -103,6 +107,7 @@ def test_five_false_positives_from_two_analysts_proposes_suppression_not_active(
 
 def test_admin_approves_suppression_proposed_to_active(db, tenant_id):
     tenant_key = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_key)
     _, fingerprint_key = _make_closed_incident(db, tenant_key)
     db.execute(
         fingerprints.update().where(fingerprints.c.tenant_key == tenant_key, fingerprints.c.fingerprint_key == fingerprint_key)
@@ -122,6 +127,7 @@ def test_admin_approves_suppression_proposed_to_active(db, tenant_id):
 
 def test_cannot_approve_suppression_that_was_never_proposed(db, tenant_id):
     tenant_key = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_key)
     _, fingerprint_key = _make_closed_incident(db, tenant_key)  # suppression_state defaults to 'none'
 
     with pytest.raises(incidents_logic.InvalidSuppressionTransition):
@@ -130,6 +136,7 @@ def test_cannot_approve_suppression_that_was_never_proposed(db, tenant_id):
 
 def test_expired_active_suppression_reverts_to_proposed(db, tenant_id):
     tenant_key = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_key)
     _, fingerprint_key = _make_closed_incident(db, tenant_key)
     past = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
     db.execute(
@@ -151,6 +158,7 @@ def test_expired_active_suppression_reverts_to_proposed(db, tenant_id):
 
 def test_unexpired_active_suppression_stays_active(db, tenant_id):
     tenant_key = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_key)
     _, fingerprint_key = _make_closed_incident(db, tenant_key)
     future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)
     db.execute(

@@ -7,17 +7,18 @@ import datetime
 
 import clickhouse_connect
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from .. import incidents as incidents_logic
 from ..audit import append_entry
 from ..config import Settings
 from ..deps import get_db, get_settings
-from ..models import incident_alerts, incidents
+from ..models import incident_alerts, incidents, tenant_alert_settings
 from ..rarity import warmup_status
-from ..rbac import ALL_ROLES, ANALYST_OR_ABOVE, CurrentUser
+from ..rbac import ADMIN_ONLY, ALL_ROLES, ANALYST_OR_ABOVE, CurrentUser
 
 router = APIRouter(prefix="/api", tags=["incidents"])
 
@@ -44,7 +45,7 @@ class IncidentSummary(BaseModel):
     # Phase 5B Step 3: a flag, never a replacement for the incident - every
     # other field above is populated exactly as before regardless of this.
     rare_pattern_flag: bool
-    rare_pattern_occurrence_count: int | None
+    prior_occurrences: int | None
     rare_pattern_reason: str | None
 
 
@@ -120,6 +121,44 @@ def get_rare_pattern_warmup_status(db: Session = Depends(get_db), current_user: 
     """Phase 5B Step 3: "warming up (day X of 7, Y of N incidents)" -
     read-only, scoped to the caller's own tenant only (same rule as every
     other query in this router)."""
+    return WarmupStatus(**warmup_status(db, current_user.tenant_key))
+
+
+class WarmupOverrideRequest(BaseModel):
+    warmup_days: int = Field(ge=0)
+    warmup_min_incidents: int = Field(ge=0)
+
+
+@router.put("/rare-pattern-warmup-override", response_model=WarmupStatus)
+def set_rare_pattern_warmup_override(
+    body: WarmupOverrideRequest, db: Session = Depends(get_db), current_user: CurrentUser = Depends(ADMIN_ONLY),
+):
+    """Phase 5C Step 0: admin-only and audited - this is a per-tenant
+    override of WHEN rare-pattern alerting starts trusting a tenant's
+    history at all (see rarity.py's warmup_status), not a cosmetic
+    setting; loosening it changes which incidents get flagged rare."""
+    db.execute(
+        pg_insert(tenant_alert_settings)
+        .values(
+            tenant_key=current_user.tenant_key,
+            rare_alert_warmup_days=body.warmup_days,
+            rare_alert_warmup_min_incidents=body.warmup_min_incidents,
+        )
+        .on_conflict_do_update(
+            index_elements=["tenant_key"],
+            set_={
+                "rare_alert_warmup_days": body.warmup_days,
+                "rare_alert_warmup_min_incidents": body.warmup_min_incidents,
+                "updated_at": func.now(),
+            },
+        )
+    )
+    append_entry(
+        db, actor=str(current_user.user_id), tenant_id=current_user.tenant_id,
+        action="rare_pattern_warmup_override_changed",
+        target=f"warmup_days={body.warmup_days}:warmup_min_incidents={body.warmup_min_incidents}",
+        outcome="success",
+    )
     return WarmupStatus(**warmup_status(db, current_user.tenant_key))
 
 

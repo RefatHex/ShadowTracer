@@ -10,8 +10,16 @@ from backfill_dead_letter_events import backfill
 
 
 def _publish_envelope(producer, topic, **overrides):
+    # source_location defaults to something unique per call, not a fixed
+    # "x:0" - dead_letter_events is a ReplicatedReplacingMergeTree keyed on
+    # (tenant_id, component, source_location) now (Phase 5C Step 0), so two
+    # genuinely different messages sharing a hardcoded source_location
+    # would collide as "the same identity" and one could replace the
+    # other - exactly the backfill idempotency this test wants to prove,
+    # just not an accident between two UNRELATED messages that happen to
+    # share a hardcoded location.
     envelope = {
-        "tenant_key": "test", "component": "shipper", "source_location": "x:0",
+        "tenant_key": "test", "component": "shipper", "source_location": f"x:{uuid.uuid4().hex[:8]}",
         "error": "boom", "raw_event_preview": "{}", "raw_event_size": 2,
         "raw_event_sha256": "0" * 64, "failed_at": "2026-10-08T00:00:00+00:00",
     }

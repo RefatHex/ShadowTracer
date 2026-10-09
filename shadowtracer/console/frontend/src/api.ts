@@ -41,7 +41,7 @@ export interface IncidentSummary {
   triage_status: string
   fingerprint_key: string | null
   rare_pattern_flag: boolean
-  rare_pattern_occurrence_count: number | null
+  prior_occurrences: number | null
   rare_pattern_reason: string | null
 }
 

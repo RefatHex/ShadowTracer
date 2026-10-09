@@ -13,6 +13,8 @@ from shadowtracer_correlate import correlator  # noqa: E402
 from shadowtracer_correlate.correlator import (  # noqa: E402
     correlation_key_and_basis, process_event,
 )
+
+from conftest import insert_tenant  # noqa: E402
 from shadowtracer_correlate.models import incident_alerts, incidents  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
@@ -81,6 +83,7 @@ def test_unkeyable_event_has_no_correlation_key():
 
 def test_ssh_brute_force_within_session_gap_is_one_incident(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = "agent-brute"
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -102,6 +105,7 @@ def test_ssh_brute_force_within_session_gap_is_one_incident(db):
 
 def test_two_different_source_ips_make_two_incidents(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = "agent-multi-ip"
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -115,6 +119,7 @@ def test_two_different_source_ips_make_two_incidents(db):
 
 def test_alert_outside_session_gap_starts_a_new_incident(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = "agent-gap"
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -131,6 +136,7 @@ def test_alert_outside_session_gap_starts_a_new_incident(db):
 
 def test_replay_is_idempotent_no_duplicate_membership_or_count_change(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = "agent-replay"
     now = datetime.datetime.now(datetime.timezone.utc)
     ev = _event(tenant=tenant, agent_id=agent, src_ip="4.4.4.4", alert_id="fixed-alert-id", time=now)
@@ -153,6 +159,7 @@ def test_replay_is_idempotent_no_duplicate_membership_or_count_change(db):
 
 def test_out_of_order_alert_still_joins_and_extends_first_seen(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = "agent-ooo"
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -175,6 +182,7 @@ def test_out_of_order_alert_still_joins_and_extends_first_seen(db):
 
 def test_max_span_caps_a_long_running_low_rate_attack_into_a_new_incident(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = "agent-longrun"
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -201,6 +209,7 @@ def test_capped_distinct_values_on_a_single_incident(db):
     varying `users` field accumulates as a side observation on that one
     incident, capped."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = "agent-scan2"
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -223,6 +232,7 @@ def test_capped_distinct_values_on_a_single_incident(db):
 
 def test_rule_ids_rule_groups_and_mitre_ids_accumulate_without_duplicates(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = "agent-accum"
     now = datetime.datetime.now(datetime.timezone.utc)
 

@@ -11,7 +11,7 @@ import uuid
 
 from sqlalchemy import select
 
-from conftest import TEST_CLICKHOUSE_DB as CH_DB
+from conftest import TEST_CLICKHOUSE_DB as CH_DB, insert_tenant
 from shadowtracer_correlate.closer import close_eligible_incidents
 from shadowtracer_correlate.models import campaign_incidents, campaigns, incidents
 
@@ -52,6 +52,7 @@ def test_two_incidents_same_actor_same_fingerprint_within_24h_one_campaign_two_i
     """Brute force from one IP, repeated twice inside 24h -> ONE campaign,
     2 incidents."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     ip = "203.0.113.10"
     base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
@@ -87,6 +88,7 @@ def test_same_fingerprint_different_actor_is_a_separate_campaign(db, ch_client):
     identity (the literal IP) is a materially different concept from the
     fingerprint's actor_class bucket."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
 
@@ -118,6 +120,7 @@ def test_same_actor_same_fingerprint_25h_apart_not_linked(db, ch_client):
     """Same actor, same fingerprint, 25h apart -> NOT linked. Tests the
     window edge explicitly: 23h (above) links, 25h does not."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     ip = "203.0.113.33"
     base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
@@ -147,6 +150,7 @@ def test_same_actor_same_fingerprint_25h_apart_not_linked(db, ch_client):
 def test_incident_with_no_source_ip_falls_back_to_user(db, ch_client):
     """Actor definition: source IP first, then user."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
 
@@ -162,6 +166,7 @@ def test_incident_with_no_source_ip_falls_back_to_user(db, ch_client):
 
 def test_incident_with_neither_source_ip_nor_user_gets_no_campaign(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
 
@@ -182,6 +187,7 @@ def test_campaign_membership_is_idempotent_on_replay(db, ch_client):
     from shadowtracer_correlate.campaigns import link_campaign
 
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     ip = "203.0.113.44"
     base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)

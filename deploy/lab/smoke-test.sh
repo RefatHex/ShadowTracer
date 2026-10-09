@@ -316,7 +316,22 @@ check "all 12 dead-letter writes also landed on ch-clickhouse-2 (replica, not ju
 # payload - 4 of the 8 hostile categories (the empty object, the deeply
 # nested JSON, and invalid UTF-8) never contain the marker string at all,
 # so content-matching undercounts; the topic's own offsets don't.
-dlt_offset_after="$(dlt_watermark_sum)"
+#
+# Polled, not a single snapshot - found running this script several times
+# in quick succession (2026-10-09): a single dlt_offset_after read right
+# after the ClickHouse-side loop exits can occasionally observe the delta
+# a beat before Kafka's own replication/ISR catches up under back-to-back
+# load, a transient false FAIL with nothing wrong - the ClickHouse count
+# above, taken at the same moment, was already correct every time this
+# happened. Same fix shape as the other eventual-consistency polls in this
+# script and verify-phase5b.sh.
+dlt_offset_after=-1
+dlt_deadline=$(( $(date +%s) + 20 ))
+while [ "$(date +%s)" -lt "$dlt_deadline" ]; do
+    dlt_offset_after="$(dlt_watermark_sum)"
+    [ "$((dlt_offset_after - dlt_offset_before))" = 12 ] && break
+    sleep 2
+done
 check "all 12 dead-letter events also landed on the Kafka dead-letter topic (the durable copy, written before ClickHouse)" \
     "[ \"\$((dlt_offset_after - dlt_offset_before))\" = 12 ]"
 

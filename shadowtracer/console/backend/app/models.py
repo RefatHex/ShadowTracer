@@ -82,7 +82,7 @@ audit_log = Table(
 incidents = Table(
     "incidents", metadata,
     Column("id", Integer, primary_key=True),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("correlation_key", String(512), nullable=False),
     Column("correlation_basis", String(20), nullable=False),
     Column("agent_id", String(255), nullable=False),
@@ -106,7 +106,7 @@ incidents = Table(
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     # Phase 5B Step 3: a flag, never a replacement for the incident itself.
     Column("rare_pattern_flag", Boolean, nullable=False, server_default=text("false")),
-    Column("rare_pattern_occurrence_count", Integer, nullable=True),
+    Column("prior_occurrences", Integer, nullable=True),
     Column("rare_pattern_reason", Text, nullable=True),
 )
 
@@ -114,7 +114,7 @@ incident_alerts = Table(
     "incident_alerts", metadata,
     Column("id", Integer, primary_key=True),
     Column("incident_id", Integer, ForeignKey("incidents.id"), nullable=False),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("node", String(255), nullable=False),
     Column("alert_id", String(255), nullable=False),
     Column("alert_time", DateTime(timezone=True), nullable=False),
@@ -124,7 +124,7 @@ incident_alerts = Table(
 
 fingerprints = Table(
     "fingerprints", metadata,
-    Column("tenant_key", String(64), primary_key=True),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
     Column("fingerprint_key", String(64), primary_key=True),
     Column("label", String(255), nullable=True),
     Column("notes", Text, nullable=True),
@@ -137,7 +137,7 @@ fingerprints = Table(
 fingerprint_verdicts = Table(
     "fingerprint_verdicts", metadata,
     Column("id", Integer, primary_key=True),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("fingerprint_key", String(64), nullable=False),
     Column("incident_id", Integer, ForeignKey("incidents.id"), nullable=False),
     Column("analyst_user_id", Integer, ForeignKey("users.id"), nullable=False),
@@ -151,7 +151,7 @@ fingerprint_verdicts = Table(
 
 agent_role_tags = Table(
     "agent_role_tags", metadata,
-    Column("tenant_key", String(64), primary_key=True),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
     Column("agent_id", String(255), primary_key=True),
     Column("role_tag", String(100), nullable=True),
     Column("os_family", String(50), nullable=True),
@@ -160,7 +160,7 @@ agent_role_tags = Table(
 
 tenant_alert_settings = Table(
     "tenant_alert_settings", metadata,
-    Column("tenant_key", String(64), primary_key=True),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
     Column("rare_alert_warmup_days", Integer, nullable=False, server_default="7"),
     Column("rare_alert_warmup_min_incidents", Integer, nullable=False, server_default="30"),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),

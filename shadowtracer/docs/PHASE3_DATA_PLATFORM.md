@@ -676,6 +676,84 @@ cleanup (not just that the DELETEs didn't error) - the ClickHouse side
 needed a short poll, since `ALTER TABLE ... DELETE` is an asynchronous
 mutation there, not an immediate one.
 
+## Phase 5C Step 0: tenant integrity, dead-letter dedup, rarity cleanup
+
+**Tenant integrity.** Every tenant-scoped Postgres table (`incidents`,
+`incident_alerts`, `fingerprints`, `fingerprint_verdicts`,
+`agent_role_tags`, `tenant_alert_settings`, `sequence_progress`,
+`campaigns`, `campaign_incidents`) carried `tenant_key` as a plain string
+with no FK into `tenants` - a forged, stale, or already-deleted
+tenant_key could silently create orphaned rows. Added FKs on all nine
+(`tenant_key -> tenants.tenant_key`, a unique non-PK column, so each FK
+needed an explicit column list rather than the bare `tenants.id` most
+other FKs here use). The writer and correlator now both check tenant
+existence before processing (`shadowtracer_ingest/tenants.py`'s
+`TenantCache` - a periodically-refreshed set, not a Postgres round trip
+per message) and dead-letter with `error="unknown_tenant"` on a miss,
+same permanent-bad-data path as a bad timestamp. The writer gained a
+real Postgres dependency it didn't have before (ClickHouse+Kafka only,
+until now).
+
+Applying the FK migration surfaced the actual orphans already sitting in
+the real lab: investigating them traced back to a real bug in
+`verify-phase5b.sh`'s own "replay safety" section, which read the entire
+`shadowtracer.events.raw` topic from absolute earliest (7-day retention,
+1471+ messages accumulated across every past session) instead of just
+the run's own freshly-produced messages - every run was silently
+re-processing every past run's test traffic, recreating incidents for
+tenants whose cleanup had already run. This is also the dominant source
+of what turned out to be the real lab tenant's entire incident count
+(451+ at last count, confirmed 100% test/verification traffic - chaos
+tests, hostile-input smoke tests, and repeated VERIFY runs, zero genuine
+production activity): every `verify-phase5b.sh` run inflated it further.
+Fixed by pre-seeding the replay consumer group's committed offsets to a
+watermark snapshot taken immediately before producing its own test
+messages, so it only ever replays what this run itself produced.
+Orphaned rows and the real tenant's accumulated test-incident history
+were cleaned up directly; a retroactive bulk-delete of the real tenant's
+remaining historical test incidents was attempted but blocked by the
+session's own safety tooling (a mass-delete classifier) - left for the
+user to decide on, not forced through.
+
+**Dead-letter dedup.** `dead_letter_events` was a plain
+`ReplicatedMergeTree` with no identity concept at all - a replay that
+re-dead-letters the same message (same component, same
+`topic:partition:offset`-shaped `source_location`) inserted a genuine
+duplicate row, inflating `/health/detail`'s dead-letter counts every
+time. Changed to `ReplicatedReplacingMergeTree` keyed on `(tenant_id,
+component, source_location)` with `failed_at` as the version column -
+the same dedup idiom `events` already uses for the same reason. Applied
+to the real lab via a real `DROP TABLE ... SYNC` + `CREATE TABLE` (never
+Keeper surgery - the lesson from the incident above), losing only the
+day's own test/debug rows, nothing of lasting value.
+`dead_letter_counts_per_tenant` now counts `uniqExact(source_location)`
+instead of a plain `count()`, correct immediately rather than only after
+a background merge - same fix `events_hourly_rollup` needed (Phase 3
+follow-up 1), for the same underlying reason.
+
+Found a second, narrow timing flake while verifying this: `smoke-test.sh`'s
+own Kafka-side dead-letter check (added in the prior incident response)
+took one watermark snapshot right after its ClickHouse-side loop
+confirmed completion - reliable with any normal gap between runs, but
+occasionally a beat early when `smoke-test.sh` is run several times in
+tight succession (observed once, not reproduced on either side of it).
+Made it poll like the other eventual-consistency checks in this script
+instead of asserting a single snapshot; confirmed fixed by reproducing
+the tight-succession condition twice in a row afterward, both clean.
+
+**Rarity/warm-up cleanup.** `rare_pattern_occurrence_count` never
+actually counted anything beyond 0 - `evaluate_rare_pattern` only ever
+flags on `prior_count == 0` ("never seen before"), a strict boolean, not
+a threshold comparison. Renamed to `prior_occurrences` (column, API
+response field, TS type, UI string) via a real migration; the existing
+boundary tests (0 -> flagged, exactly 1 -> not) already covered the only
+real threshold in this logic, plus one more added for several prior
+occurrences, confirming "not flagged" holds generally, not just at
+exactly 1. `tenant_alert_settings` had no write endpoint at all before
+this - added one (`PUT /api/rare-pattern-warmup-override`), admin-only
+and audited, same pattern as `agents.py`'s existing role-tag endpoint
+(upsert + `append_entry` in the same transaction).
+
 ## Open items
 
 - The shipper's offset-file bookkeeping can lag behind what's actually

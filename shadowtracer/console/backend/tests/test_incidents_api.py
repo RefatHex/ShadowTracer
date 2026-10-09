@@ -97,7 +97,7 @@ def _token_for(client, db, tenant_pg_id, email, role="viewer"):
 
 def _make_incident(
     db, tenant_key, agent_id="agent-1", alert_count=10, fingerprint_key=None, state="open",
-    rare_pattern_flag=False, rare_pattern_occurrence_count=None, rare_pattern_reason=None,
+    rare_pattern_flag=False, prior_occurrences=None, rare_pattern_reason=None,
 ):
     now = datetime.datetime.now(datetime.timezone.utc)
     incident_id = db.execute(
@@ -105,7 +105,7 @@ def _make_incident(
             tenant_key=tenant_key, correlation_key=f"{agent_id}|srcip:8.8.8.8", correlation_basis="source_ip",
             agent_id=agent_id, first_seen=now, last_seen=now, alert_count=alert_count, max_level=5,
             state=state, fingerprint_key=fingerprint_key,
-            rare_pattern_flag=rare_pattern_flag, rare_pattern_occurrence_count=rare_pattern_occurrence_count,
+            rare_pattern_flag=rare_pattern_flag, prior_occurrences=prior_occurrences,
             rare_pattern_reason=rare_pattern_reason,
         ).returning(incidents.c.id)
     ).scalar_one()
@@ -266,13 +266,68 @@ def test_warmup_status_respects_per_tenant_override(client, db, tenant):
     assert body["warmup_min_incidents"] == 1
 
 
+def test_warmup_override_is_admin_only_and_audited(client, db, tenant):
+    """Phase 5C Step 0: loosening/tightening warm-up changes which
+    incidents get a rare-pattern flag at all - same bar as any other
+    tenant-wide alerting config change, so it's admin-only and audited,
+    same pattern as agents.py's role-tag endpoint."""
+    tenant_id, tenant_key = tenant
+    analyst_token = _token_for(client, db, tenant_id, f"analyst-{uuid.uuid4().hex[:8]}@example.com", role="analyst")
+    admin_token = _token_for(client, db, tenant_id, f"admin-{uuid.uuid4().hex[:8]}@example.com", role="admin")
+
+    forbidden = client.put(
+        "/api/rare-pattern-warmup-override", json={"warmup_days": 0, "warmup_min_incidents": 1},
+        headers={"Authorization": f"Bearer {analyst_token}"},
+    )
+    assert forbidden.status_code == 403
+
+    resp = client.put(
+        "/api/rare-pattern-warmup-override", json={"warmup_days": 0, "warmup_min_incidents": 1},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["warmup_days"] == 0
+    assert resp.json()["warmup_min_incidents"] == 1
+
+    row = db.execute(
+        tenant_alert_settings.select().where(tenant_alert_settings.c.tenant_key == tenant_key)
+    ).mappings().one()
+    assert row["rare_alert_warmup_days"] == 0
+    assert row["rare_alert_warmup_min_incidents"] == 1
+
+    audit_rows = db.execute(
+        audit_log.select().where(audit_log.c.action == "rare_pattern_warmup_override_changed")
+    ).mappings().all()
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["outcome"] == "success"
+    assert audit_rows[0]["tenant_id"] == tenant_id
+    assert "warmup_days=0" in audit_rows[0]["target"]
+
+    # Calling it again (an update, not an insert) must overwrite in place,
+    # not add a second row - and audit the second change too.
+    resp2 = client.put(
+        "/api/rare-pattern-warmup-override", json={"warmup_days": 3, "warmup_min_incidents": 5},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp2.status_code == 200
+    rows_after = db.execute(
+        tenant_alert_settings.select().where(tenant_alert_settings.c.tenant_key == tenant_key)
+    ).mappings().all()
+    assert len(rows_after) == 1
+    assert rows_after[0]["rare_alert_warmup_days"] == 3
+    audit_rows_after = db.execute(
+        audit_log.select().where(audit_log.c.action == "rare_pattern_warmup_override_changed")
+    ).mappings().all()
+    assert len(audit_rows_after) == 2
+
+
 def test_rare_pattern_flag_surfaces_in_list_and_detail(client, db, tenant):
     """A rare-pattern flag is additive - the incident appears in the list
     and detail exactly as any other would, with the flag/count/reason
     alongside everything else, never hiding or replacing anything."""
     tenant_id, tenant_key = tenant
     incident_id = _make_incident(
-        db, tenant_key, rare_pattern_flag=True, rare_pattern_occurrence_count=0,
+        db, tenant_key, rare_pattern_flag=True, prior_occurrences=0,
         rare_pattern_reason="Never seen before for this tenant - this is the first occurrence of this fingerprint.",
     )
     token = _token_for(client, db, tenant_id, f"viewer-{uuid.uuid4().hex[:8]}@example.com")
@@ -281,7 +336,7 @@ def test_rare_pattern_flag_surfaces_in_list_and_detail(client, db, tenant):
     assert list_resp.status_code == 200
     item = next(i for i in list_resp.json()["incidents"] if i["id"] == incident_id)
     assert item["rare_pattern_flag"] is True
-    assert item["rare_pattern_occurrence_count"] == 0
+    assert item["prior_occurrences"] == 0
 
     detail_resp = client.get(f"/api/incidents/{incident_id}", headers={"Authorization": f"Bearer {token}"})
     assert detail_resp.status_code == 200

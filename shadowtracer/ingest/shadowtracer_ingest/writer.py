@@ -37,11 +37,13 @@ import time
 
 import clickhouse_connect
 from confluent_kafka import Consumer, Producer
+from sqlalchemy import create_engine
 
 from .dead_letter import send_to_dead_letter
 from .metrics import Metrics
 from .normalizer import normalize_alert
 from .retry import retry_with_backoff
+from .tenants import TenantCache
 
 INSERT_BASE_DELAY_SECONDS = 1.0
 INSERT_MAX_DELAY_SECONDS = 30.0
@@ -111,6 +113,7 @@ def run(
     clickhouse_user: str,
     clickhouse_password: str,
     clickhouse_database: str,
+    database_url: str,
     metrics: Metrics,
     stop_flag,
     started_flag=None,
@@ -125,6 +128,10 @@ def run(
 
     ch = _FailoverClickHouse(clickhouse_hosts, clickhouse_user, clickhouse_password, clickhouse_database)
     dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers})
+    # Phase 5C Step 0: a forged/stale/deleted tenant_key must never create
+    # silent orphaned ClickHouse rows - see tenants.py's own docstring for
+    # why this is a periodically-refreshed cache, not a query per message.
+    tenant_cache = TenantCache(create_engine(database_url, pool_pre_ping=True))
 
     if started_flag is not None:
         started_flag.set()
@@ -166,6 +173,26 @@ def run(
                     # replaced bytes fail JSON parsing naturally below and
                     # get dead-lettered there instead.
                     raw_line = msg.value().decode("utf-8", errors="replace")
+                    # Phase 5C Step 0: a forged/stale/deleted tenant_key must
+                    # never create silent orphaned ClickHouse rows - checked
+                    # before normalize_alert, same permanent-bad-data path
+                    # (never retried: this tenant_key isn't about to start
+                    # existing mid-retry any more than a bad timestamp is).
+                    if not tenant_cache.is_known(tenant_id or ""):
+                        metrics.incr("messages_failed")
+                        retry_with_backoff(
+                            lambda: send_to_dead_letter(
+                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=tenant_id,
+                                component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
+                                error="unknown_tenant", raw_event=raw_line, metrics=metrics,
+                            ),
+                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            on_retry=lambda attempt, exc2: logger.warning(
+                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
+                            ),
+                        )
+                        continue
                     try:
                         ev = normalize_alert(raw_line, tenant_id or "")
                     except Exception as exc:  # noqa: BLE001 - any parse/normalize failure is permanent, never retried: dead-letter and move on

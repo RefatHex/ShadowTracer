@@ -100,7 +100,7 @@ def close_eligible_incidents(
                     state="closed", closed_at=closed_at,
                     fingerprint_key=fingerprint_key, ruleset_version=RULESET_VERSION,
                     rare_pattern_flag=rare is not None,
-                    rare_pattern_occurrence_count=rare["occurrence_count"] if rare else None,
+                    prior_occurrences=rare["occurrence_count"] if rare else None,
                     rare_pattern_reason=rare["reason"] if rare else None,
                 )
             )

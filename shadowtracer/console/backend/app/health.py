@@ -215,7 +215,17 @@ def dead_letter_counts_per_tenant(settings: Settings, window_hours: int = 24) ->
     not merely non-zero - a handful of dead-lettered events is expected
     background noise (a hostile scanner, a misconfigured one-off agent),
     not something worth paging anyone over; a tenant producing hundreds
-    of them is a real signal something's actually broken upstream."""
+    of them is a real signal something's actually broken upstream.
+
+    uniqExact(source_location), not count(): dead_letter_events is a
+    ReplicatedReplacingMergeTree keyed on (tenant_id, component,
+    source_location) - see events_schema.sql's own comment - so a replay
+    that re-dead-letters the same message inserts a real duplicate row
+    that only disappears once a background merge collapses it. count()
+    would inflate on every such replay until that merge happens;
+    uniqExact over the identity is correct immediately, the same fix
+    events_hourly_rollup already needed for the same reason (Phase 3
+    follow-up 1)."""
     try:
         client = clickhouse_connect.get_client(
             host=settings.clickhouse_host, port=settings.clickhouse_port,
@@ -223,7 +233,7 @@ def dead_letter_counts_per_tenant(settings: Settings, window_hours: int = 24) ->
             database=settings.clickhouse_database, connect_timeout=3,
         )
         rows = client.query(
-            "SELECT tenant_id, component, count() AS n FROM dead_letter_events "
+            "SELECT tenant_id, component, uniqExact(source_location) AS n FROM dead_letter_events "
             "WHERE failed_at >= now() - INTERVAL {window_hours:UInt32} HOUR "
             "GROUP BY tenant_id, component ORDER BY tenant_id, component",
             parameters={"window_hours": window_hours},

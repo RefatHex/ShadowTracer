@@ -213,6 +213,16 @@ def db(engine):
     session.close()
 
 
+def insert_tenant(db, tenant_key: str) -> None:
+    """Phase 5C Step 0: tenant_key now FKs into tenants (see
+    PHASE3_DATA_PLATFORM.md) - every ad-hoc test tenant_key needs a real
+    backing row before anything references it. `db`'s own TRUNCATE ...
+    CASCADE (above) cleans this up after the test, no explicit teardown
+    needed here."""
+    db.execute(text("INSERT INTO tenants (name, tenant_key) VALUES (:k, :k)"), {"k": tenant_key})
+    db.commit()
+
+
 @pytest.fixture
 def tenant_id(db):
     from app.models import tenants

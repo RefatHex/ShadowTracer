@@ -136,11 +136,21 @@ def db(engine):
     session.execute(text(
         "TRUNCATE TABLE fingerprint_verdicts, incident_alerts, incidents, "
         "fingerprints, agent_role_tags, tenant_alert_settings, sequence_progress, "
-        "campaign_incidents, campaigns "
+        "campaign_incidents, campaigns, tenants "
         "RESTART IDENTITY CASCADE"
     ))
     session.commit()
     session.close()
+
+
+def insert_tenant(db, tenant_key: str) -> None:
+    """Phase 5C Step 0: tenant_key now FKs into tenants (see
+    PHASE3_DATA_PLATFORM.md) - every ad-hoc test tenant_key needs a real
+    backing row before anything references it. `db`'s own TRUNCATE ...
+    CASCADE (above) cleans this up after the test, no explicit teardown
+    needed here."""
+    db.execute(text("INSERT INTO tenants (name, tenant_key) VALUES (:k, :k)"), {"k": tenant_key})
+    db.commit()
 
 
 @pytest.fixture(scope="session", autouse=True)

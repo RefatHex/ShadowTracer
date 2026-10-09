@@ -9,18 +9,30 @@ kafka_topic below), so no separate "test cluster" is needed there.
 """
 
 import os
+import subprocess
 import sys
 import time
 import uuid
 
 import clickhouse_connect
+import psycopg2
 import pytest
 from confluent_kafka.admin import AdminClient, NewTopic
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shadowtracer_ingest.clickhouse_schema import apply_schema
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "lab", ".env")
+INGEST_DIR = os.path.join(os.path.dirname(__file__), "..")
+
+# Phase 5C Step 0: the writer gained a real Postgres dependency (tenants.py's
+# TenantCache) - session-unique from the start this time (not a shared fixed
+# name later fixed in a panic - see MEMORY/project_test_suite_db_race.md for
+# why the ClickHouse database name needed exactly this treatment, the hard
+# way).
+TEST_POSTGRES_DB = f"shadowtracer_test_{uuid.uuid4().hex[:8]}"
 
 # The real, production/lab ClickHouse database name - hardcoded here (not
 # read from .env) because it's a fixed constant everywhere else in this
@@ -69,6 +81,86 @@ def _refuse_if_pointed_at_lab_clickhouse_database() -> None:
 @pytest.fixture(scope="session")
 def lab_env():
     return _load_env()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_postgres_test_database(lab_env):
+    """Creates this session's own TEST_POSTGRES_DB (already
+    session-unique), runs the real Alembic migrations against it (same
+    schema/tenant_key FKs as the lab), and drops it again at session end -
+    same pattern as shadowtracer/correlate/tests/conftest.py's identical
+    fixture, which this mirrors for the writer's new tenants.py dependency."""
+    admin_conn = psycopg2.connect(
+        host="127.0.0.1", port=5432,
+        user=lab_env["POSTGRES_USER"], password=lab_env["POSTGRES_PASSWORD"],
+        dbname=lab_env["POSTGRES_DB"],
+    )
+    admin_conn.autocommit = True
+    try:
+        with admin_conn.cursor() as cur:
+            cur.execute(f"CREATE DATABASE {TEST_POSTGRES_DB}")
+    finally:
+        admin_conn.close()
+
+    migration_env = {
+        **os.environ,
+        "POSTGRES_USER": lab_env["POSTGRES_USER"],
+        "POSTGRES_PASSWORD": lab_env["POSTGRES_PASSWORD"],
+        "POSTGRES_HOST": "127.0.0.1",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_DB": TEST_POSTGRES_DB,
+        "APP_DB_PASSWORD": lab_env["APP_DB_PASSWORD"],
+    }
+    subprocess.run(
+        [os.path.join(INGEST_DIR, ".venv", "bin", "alembic"), "upgrade", "head"],
+        cwd=INGEST_DIR, env=migration_env, check=True, capture_output=True, text=True,
+    )
+    yield
+    admin_conn = psycopg2.connect(
+        host="127.0.0.1", port=5432,
+        user=lab_env["POSTGRES_USER"], password=lab_env["POSTGRES_PASSWORD"],
+        dbname=lab_env["POSTGRES_DB"],
+    )
+    admin_conn.autocommit = True
+    try:
+        with admin_conn.cursor() as cur:
+            cur.execute(f"DROP DATABASE IF EXISTS {TEST_POSTGRES_DB} WITH (FORCE)")
+    finally:
+        admin_conn.close()
+
+
+@pytest.fixture(scope="session")
+def database_url(lab_env):
+    return (
+        f"postgresql+psycopg2://{lab_env['POSTGRES_USER']}:{lab_env['POSTGRES_PASSWORD']}"
+        f"@127.0.0.1:5432/{TEST_POSTGRES_DB}"
+    )
+
+
+@pytest.fixture(scope="session")
+def pg_engine(database_url, _isolated_postgres_test_database):
+    return create_engine(database_url, pool_pre_ping=True)
+
+
+@pytest.fixture
+def pg_db(pg_engine):
+    """A real session against the isolated test database, truncated back
+    to empty after every test."""
+    Session = sessionmaker(bind=pg_engine, expire_on_commit=False)
+    session = Session()
+    yield session
+    session.rollback()
+    session.execute(text("TRUNCATE TABLE tenants RESTART IDENTITY CASCADE"))
+    session.commit()
+    session.close()
+
+
+def insert_tenant(db, tenant_key: str) -> None:
+    """Same helper as shadowtracer/correlate and shadowtracer/console/
+    backend's test suites - a real tenants row for an ad-hoc test
+    tenant_key, now required by tenants.py's FK-backed existence check."""
+    db.execute(text("INSERT INTO tenants (name, tenant_key) VALUES (:k, :k)"), {"k": tenant_key})
+    db.commit()
 
 
 @pytest.fixture(scope="session", autouse=True)

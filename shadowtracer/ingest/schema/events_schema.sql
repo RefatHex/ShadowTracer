@@ -193,6 +193,22 @@ ORDER BY (tenant_id, fingerprint_key, incident_id);
 -- full original payload (sha256 lets anyone who needs it match this row
 -- against a replayed/re-shipped copy). TTL bounds how long even the
 -- preview is kept - 30 days, this is diagnostic data, not an audit trail.
+--
+-- Phase 5C Step 0: ReplicatedReplacingMergeTree, not plain
+-- ReplicatedMergeTree - a REPLAY of the same message (same component,
+-- same source_location - which already embeds "topic:partition:offset"
+-- for the writer/correlator; the shipper's own shape, "path:byte_offset",
+-- never collides with that) must not duplicate this table's row, or
+-- /health/detail's dead-letter counts inflate every time something gets
+-- legitimately replayed. (tenant_id, component, source_location) is the
+-- identity - failed_at is the version column (ReplicatedReplacingMergeTree's
+-- 3rd constructor arg), so the LATEST attempt's timestamp wins once a
+-- merge collapses duplicates - same dedup idiom events_schema.sql's own
+-- `events` table already uses (ReplicatedReplacingMergeTree keyed on
+-- tenant_id/cluster_node/alert_id), and the exact same caveat applies:
+-- merges are lazy, so a query right after a duplicate insert can still
+-- see both rows until FINAL or a uniqExact-over-identity query - see
+-- health.py's dead_letter_counts_per_tenant for the latter.
 CREATE TABLE IF NOT EXISTS __DATABASE__.dead_letter_events ON CLUSTER lab_cluster
 (
     tenant_id         LowCardinality(String),
@@ -204,9 +220,9 @@ CREATE TABLE IF NOT EXISTS __DATABASE__.dead_letter_events ON CLUSTER lab_cluste
     raw_event_sha256  FixedString(64),
     failed_at         DateTime64(3)
 )
-ENGINE = ReplicatedMergeTree('/clickhouse/tables/__KEEPER_PREFIX__{shard}/dead_letter_events', '{replica}')
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/__KEEPER_PREFIX__{shard}/dead_letter_events', '{replica}', failed_at)
 PARTITION BY toYYYYMM(failed_at)
-ORDER BY (tenant_id, failed_at)
+ORDER BY (tenant_id, component, source_location)
 TTL toDateTime(failed_at) + INTERVAL 30 DAY;
 
 -- Phase 5B Step 4: one row per completed sequence firing - the HISTORY

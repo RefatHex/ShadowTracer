@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shadowtracer_correlate.correlator import process_event  # noqa: E402
 from shadowtracer_correlate.sequences import load_sequences  # noqa: E402
 
-from conftest import TEST_CLICKHOUSE_DB as TEST_CH_DB  # noqa: E402
+from conftest import TEST_CLICKHOUSE_DB as TEST_CH_DB, insert_tenant  # noqa: E402
 
 SEQUENCES_DIR = os.path.join(os.path.dirname(__file__), "..", "sequences")
 SEQUENCES = load_sequences(SEQUENCES_DIR)
@@ -73,6 +73,7 @@ def _firing_count(ch_client, tenant, sequence_id):
 
 def test_sequence_fires_once_for_a_real_two_step_pattern(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     ip = "203.0.113.50"
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -103,6 +104,7 @@ def test_replaying_the_completing_alert_does_not_fire_twice(db, ch_client):
     the sequence - process_event's own idempotency check must short-circuit
     before sequence evaluation ever runs a second time for it."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     ip = "203.0.113.51"
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -127,6 +129,7 @@ def test_partial_sequence_does_not_fire(db, ch_client):
     """Only step 0 has matched - must not fire, no matter how long we wait
     (within this test's timeframe)."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     ip = "203.0.113.52"
 
@@ -141,6 +144,7 @@ def test_out_of_order_step_does_not_fire(db, ch_client):
     key - must not advance or fire. A later, correctly-ordered step 0
     then step 1 must still work normally afterward."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     ip = "203.0.113.53"
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -170,6 +174,7 @@ def test_sequence_window_expiry_prevents_firing_until_a_fresh_step_zero(db, ch_c
     stale attempt. A fresh step 0 + step 1 within a new window must then
     fire normally."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     agent = f"agent-{uuid.uuid4().hex[:8]}"
     ip = "203.0.113.54"
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -201,7 +206,9 @@ def test_sequence_detection_is_per_tenant(db, ch_client):
     attack pattern - each tenant's firing count must reflect only its own
     activity."""
     tenant_a = f"t-a-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_a)
     tenant_b = f"t-b-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_b)
     agent = "agent-shared-name"
     ip = "203.0.113.55"
     now = datetime.datetime.now(datetime.timezone.utc)

@@ -2,11 +2,24 @@ import threading
 import time
 import uuid
 
+import pytest
 from confluent_kafka import Producer
 
-from conftest import TEST_CLICKHOUSE_DB
+from conftest import TEST_CLICKHOUSE_DB, insert_tenant
 from shadowtracer_ingest import writer
 from shadowtracer_ingest.metrics import Metrics
+
+
+@pytest.fixture(autouse=True)
+def _default_lab_tenant(pg_db):
+    """Most tests in this file produce under tenant_id="lab" (see
+    _produce's own default) without ever thinking about tenant existence -
+    same as the real lab's own TENANT_KEY, this just needs a real tenants
+    row to exist for that default to keep working now that the writer
+    checks (Phase 5C Step 0, tenants.py). Scoped to this file only (not
+    conftest.py) so unrelated test files never pay for the Postgres
+    fixture chain they don't need."""
+    insert_tenant(pg_db, "lab")
 
 
 def _produce(kafka_bootstrap, topic, lines, tenant_id="lab"):
@@ -19,7 +32,7 @@ def _produce(kafka_bootstrap, topic, lines, tenant_id="lab"):
     producer.flush(30)
 
 
-def _start_writer(kafka_bootstrap, topic, ch_env):
+def _start_writer(kafka_bootstrap, topic, ch_env, database_url):
     metrics = Metrics()
     stop_flag = threading.Event()
     started_flag = threading.Event()
@@ -33,6 +46,7 @@ def _start_writer(kafka_bootstrap, topic, ch_env):
             clickhouse_user=ch_env["CLICKHOUSE_USER"],
             clickhouse_password=ch_env["CLICKHOUSE_PASSWORD"],
             clickhouse_database=TEST_CLICKHOUSE_DB,
+            database_url=database_url,
             metrics=metrics,
             stop_flag=stop_flag,
             started_flag=started_flag,
@@ -50,7 +64,7 @@ def _count_alert_ids(ch_client, alert_ids):
 
 
 def test_writer_is_actually_running_and_draining_not_just_callable(
-    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines,
+    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, database_url,
 ):
     """Proves the writer's main loop is live: we never call normalize_alert
     or insert_batch directly here - we only start writer.run() in a thread
@@ -65,7 +79,7 @@ def test_writer_is_actually_running_and_draining_not_just_callable(
         alert_ids.append(alert["id"])
         lines.append(json.dumps(alert))
 
-    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env)
+    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
     try:
         _produce(kafka_bootstrap, kafka_topic, lines)
 
@@ -87,7 +101,7 @@ def test_writer_is_actually_running_and_draining_not_just_callable(
 
 
 def test_writer_restart_mid_ingest_no_loss_no_duplicates(
-    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines,
+    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, database_url,
 ):
     import json
     marker = uuid.uuid4().hex[:8]
@@ -116,7 +130,8 @@ def test_writer_restart_mid_ingest_no_loss_no_duplicates(
                 bootstrap_servers=kafka_bootstrap, topic=kafka_topic, group_id=gid,
                 clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
                 clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
-                clickhouse_database=TEST_CLICKHOUSE_DB, metrics=metrics2, stop_flag=stop2, started_flag=started2,
+                clickhouse_database=TEST_CLICKHOUSE_DB, database_url=database_url,
+                metrics=metrics2, stop_flag=stop2, started_flag=started2,
             ),
             daemon=True,
         )
@@ -144,7 +159,7 @@ def test_writer_restart_mid_ingest_no_loss_no_duplicates(
     ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in alert_ids)})")
 
 
-def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines):
+def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, database_url):
     """Phase 3 follow-up 1: reproduces the exact bug (replay inflating the
     hourly rollup even though the base table's FINAL was already correct)
     and proves both fixes - the per-partition insert_deduplication_token
@@ -174,7 +189,8 @@ def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_top
                 bootstrap_servers=kafka_bootstrap, topic=kafka_topic, group_id=group_id,
                 clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
                 clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
-                clickhouse_database=TEST_CLICKHOUSE_DB, metrics=metrics, stop_flag=stop_flag, started_flag=started_flag,
+                clickhouse_database=TEST_CLICKHOUSE_DB, database_url=database_url,
+                metrics=metrics, stop_flag=stop_flag, started_flag=started_flag,
             ),
             daemon=True,
         )
@@ -233,7 +249,7 @@ def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_top
     ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in alert_ids)})")
 
 
-def test_writer_dead_letters_bad_data_keeps_good_ones(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines):
+def test_writer_dead_letters_bad_data_keeps_good_ones(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, pg_db, database_url):
     """No single event may stop the pipeline: a batch mixing a permanently
     malformed event (one that fails normalize_alert, here via an invalid
     timestamp) with a good one must land the good one in ClickHouse,
@@ -242,6 +258,7 @@ def test_writer_dead_letters_bad_data_keeps_good_ones(kafka_bootstrap, kafka_top
     import json
     marker = uuid.uuid4().hex[:8]
     tenant_id = f"test-{marker}"
+    insert_tenant(pg_db, tenant_id)
 
     good = json.loads(real_alert_lines[0])
     good["id"] = f"{good['id']}.{marker}.good"
@@ -249,7 +266,7 @@ def test_writer_dead_letters_bad_data_keeps_good_ones(kafka_bootstrap, kafka_top
     bad["id"] = f"{bad['id']}.{marker}.bad"
     bad["timestamp"] = "2026-10-04T05:00:118.000+0000"  # seconds=118: not valid ISO8601
 
-    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env)
+    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
     try:
         _produce(kafka_bootstrap, kafka_topic, [json.dumps(good), json.dumps(bad)], tenant_id=tenant_id)
 
@@ -297,7 +314,7 @@ def test_failover_clickhouse_skips_a_dead_host():
 
 
 def test_writer_stays_up_when_dead_letter_clickhouse_insert_fails(
-    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines,
+    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, pg_db, database_url,
 ):
     """Dead-letter-ClickHouse incident (2026-10-08) hardening, at the real
     writer.run() level: the dead_letter_events table itself is unreachable
@@ -311,6 +328,7 @@ def test_writer_stays_up_when_dead_letter_clickhouse_insert_fails(
     import json
     marker = uuid.uuid4().hex[:8]
     tenant_id = f"test-{marker}"
+    insert_tenant(pg_db, tenant_id)
     good = json.loads(real_alert_lines[0])
     good["id"] = f"{good['id']}.{marker}.good"
     bad = json.loads(real_alert_lines[1])
@@ -322,7 +340,7 @@ def test_writer_stays_up_when_dead_letter_clickhouse_insert_fails(
         f"RENAME TABLE {TEST_CLICKHOUSE_DB}.dead_letter_events TO {TEST_CLICKHOUSE_DB}.{tmp_name} ON CLUSTER lab_cluster"
     )
     try:
-        stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env)
+        stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
         try:
             _produce(kafka_bootstrap, kafka_topic, [json.dumps(bad), json.dumps(good)], tenant_id=tenant_id)
 
@@ -400,3 +418,57 @@ def test_dead_letter_kafka_failure_is_never_swallowed_offset_would_not_advance()
         assert False, "must raise, never return normally, when the Kafka dead-letter publish never succeeds"
     except RuntimeError as exc:
         assert "did not durably succeed" in str(exc)
+
+
+def test_writer_dead_letters_unknown_tenant_known_tenant_still_processes(
+    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, pg_db, database_url,
+):
+    """Phase 5C Step 0: a tenant_key with no backing tenants row must be
+    dead-lettered (error="unknown_tenant"), never stored - proven
+    alongside a real, flagged-as-test tenant (created here, deleted in
+    `finally`) whose otherwise-identical event still lands normally, so
+    this isn't just "the writer dead-letters everything right now"."""
+    import json
+    marker = uuid.uuid4().hex[:8]
+    known_tenant = f"test-flagged-{marker}"
+    unknown_tenant = f"test-unknown-{marker}"  # deliberately never inserted into tenants
+    insert_tenant(pg_db, known_tenant)
+
+    known_event = json.loads(real_alert_lines[0])
+    known_event["id"] = f"{known_event['id']}.{marker}.known"
+    unknown_event = json.loads(real_alert_lines[1])
+    unknown_event["id"] = f"{unknown_event['id']}.{marker}.unknown"
+
+    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
+    try:
+        producer = Producer({"bootstrap.servers": kafka_bootstrap})
+        producer.produce(
+            kafka_topic, value=json.dumps(known_event).encode(),
+            headers=[("tenant_id", known_tenant.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json")],
+        )
+        producer.produce(
+            kafka_topic, value=json.dumps(unknown_event).encode(),
+            headers=[("tenant_id", unknown_tenant.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json")],
+        )
+        producer.flush(30)
+
+        deadline = time.monotonic() + 20
+        known_count = dl_count = 0
+        while time.monotonic() < deadline:
+            known_count = _count_alert_ids(ch_client, [known_event["id"]])
+            dl_count = ch_client.query(
+                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{unknown_tenant}' AND error = 'unknown_tenant'"
+            ).result_rows[0][0]
+            if known_count == 1 and dl_count == 1:
+                break
+            time.sleep(0.5)
+
+        assert known_count == 1, "the known (flagged-test) tenant's event must still land in ClickHouse"
+        assert dl_count == 1, "the unknown tenant's event must be dead-lettered with error=unknown_tenant"
+        assert _count_alert_ids(ch_client, [unknown_event["id"]]) == 0, "the unknown tenant's event must never be stored"
+        assert thread.is_alive(), "writer must never crash on an unknown tenant"
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+        ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id = '{known_event['id']}'")
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{unknown_tenant}'")

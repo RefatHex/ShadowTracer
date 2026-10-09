@@ -15,7 +15,7 @@ from shadowtracer_correlate.rarity import (  # noqa: E402
     DEFAULT_WARMUP_DAYS, DEFAULT_WARMUP_MIN_INCIDENTS, evaluate_rare_pattern, get_tenant_warmup_config, warmup_status,
 )
 
-from conftest import TEST_CLICKHOUSE_DB as TEST_CH_DB  # noqa: E402
+from conftest import TEST_CLICKHOUSE_DB as TEST_CH_DB, insert_tenant  # noqa: E402
 
 NOW = datetime.datetime.now(datetime.timezone.utc)
 
@@ -52,6 +52,7 @@ def test_get_tenant_warmup_config_falls_back_to_defaults_when_no_row(db):
 
 def test_get_tenant_warmup_config_uses_the_per_tenant_override(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     _set_warmup_config(db, tenant, days=1, min_incidents=2)
     days, min_incidents = get_tenant_warmup_config(db, tenant)
     assert (days, min_incidents) == (1, 2)
@@ -59,6 +60,7 @@ def test_get_tenant_warmup_config_uses_the_per_tenant_override(db):
 
 def test_warmup_status_incomplete_with_no_incidents_at_all(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     status = warmup_status(db, tenant)
     assert status["complete"] is False
     assert status["incident_count"] == 0
@@ -72,6 +74,7 @@ def test_warmup_status_incomplete_enough_incidents_but_not_enough_days(db):
     elapsed since the earliest one. Both conditions must hold; one alone
     isn't enough."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     _set_warmup_config(db, tenant, days=7, min_incidents=2)
     _insert_incident(db, tenant, created_at=NOW)
     _insert_incident(db, tenant, created_at=NOW)
@@ -83,6 +86,7 @@ def test_warmup_status_incomplete_enough_incidents_but_not_enough_days(db):
 
 def test_warmup_status_incomplete_enough_days_but_not_enough_incidents(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     _set_warmup_config(db, tenant, days=1, min_incidents=5)
     old = NOW - datetime.timedelta(days=10)
     _insert_incident(db, tenant, created_at=old)
@@ -94,6 +98,7 @@ def test_warmup_status_incomplete_enough_days_but_not_enough_incidents(db):
 
 def test_warmup_status_complete_when_both_conditions_hold(db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     _set_warmup_config(db, tenant, days=1, min_incidents=2)
     old = NOW - datetime.timedelta(days=10)
     _insert_incident(db, tenant, created_at=old)
@@ -107,6 +112,7 @@ def test_fresh_tenant_during_warmup_never_gets_a_rare_flag(db, ch_client):
     never produce a rare-pattern flag, even for a fingerprint that has
     genuinely never been seen before."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     _insert_incident(db, tenant, created_at=NOW)  # 1 incident, 0 days - nowhere near default warmup
     result = evaluate_rare_pattern(db, ch_client, TEST_CH_DB, tenant, f"fp-{uuid.uuid4().hex}")
     assert result is None
@@ -114,6 +120,7 @@ def test_fresh_tenant_during_warmup_never_gets_a_rare_flag(db, ch_client):
 
 def test_past_warmup_never_seen_fingerprint_gets_a_rare_flag_with_correct_count(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     _set_warmup_config(db, tenant, days=1, min_incidents=1)
     _insert_incident(db, tenant, created_at=NOW - datetime.timedelta(days=10))
 
@@ -128,6 +135,7 @@ def test_past_warmup_never_seen_fingerprint_gets_a_rare_flag_with_correct_count(
 
 def test_past_warmup_already_seen_fingerprint_does_not_get_a_rare_flag(db, ch_client):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     _set_warmup_config(db, tenant, days=1, min_incidents=1)
     _insert_incident(db, tenant, created_at=NOW - datetime.timedelta(days=10))
 
@@ -143,12 +151,34 @@ def test_past_warmup_already_seen_fingerprint_does_not_get_a_rare_flag(db, ch_cl
     assert result is None
 
 
+def test_past_warmup_fingerprint_seen_several_times_does_not_get_a_rare_flag(db, ch_client):
+    """Boundary test, the other side of occurrence_count==0: rarity isn't
+    "not flagged only at exactly 1 prior occurrence and flagged again
+    above that" - any prior occurrence at all (here, several) must not
+    flag, the same as exactly one does in the test above."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    _set_warmup_config(db, tenant, days=1, min_incidents=1)
+    _insert_incident(db, tenant, created_at=NOW - datetime.timedelta(days=10))
+
+    fingerprint_key = f"fp-{uuid.uuid4().hex}"
+    ch_client.insert(
+        "fingerprint_occurrences",
+        [[tenant, fingerprint_key, i, NOW, 5] for i in range(1, 4)],
+        column_names=["tenant_id", "fingerprint_key", "incident_id", "closed_at", "alert_count"],
+    )
+
+    result = evaluate_rare_pattern(db, ch_client, TEST_CH_DB, tenant, fingerprint_key)
+    assert result is None
+
+
 def test_suppressed_fingerprint_never_gets_a_rare_flag(db, ch_client):
     """suppression_state 'active' must suppress the rare FLAG only - this
     test only proves the flag doesn't fire; the incident/data visibility
     guarantee is structural (the flag is additive, nothing reads it to
     decide whether to show the incident at all - see closer.py)."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     _set_warmup_config(db, tenant, days=1, min_incidents=1)
     _insert_incident(db, tenant, created_at=NOW - datetime.timedelta(days=10))
 
@@ -167,7 +197,9 @@ def test_rarity_is_strictly_per_tenant_not_cross_tenant(db, ch_client):
     has. Tenant B's evaluation must still flag it as rare - tenant A's
     history must have zero effect on tenant B's result."""
     tenant_a = f"t-a-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_a)
     tenant_b = f"t-b-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_b)
     shared_fingerprint = f"fp-{uuid.uuid4().hex}"  # same fingerprint_key value for both tenants
 
     _set_warmup_config(db, tenant_a, days=1, min_incidents=1)

@@ -12,10 +12,20 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 metadata = MetaData()
 
+# Stub, not the real definition (that's shadowtracer/console/backend/app/
+# models.py's tenants, owned by the backend's auth tables) - just enough
+# columns for the tenant_key FKs below to resolve within this file's own
+# MetaData. This process never creates/alters/reads this table directly.
+tenants = Table(
+    "tenants", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("tenant_key", String(64), nullable=False, unique=True),
+)
+
 incidents = Table(
     "incidents", metadata,
     Column("id", Integer, primary_key=True),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("correlation_key", String(512), nullable=False),
     Column("correlation_basis", String(20), nullable=False),
     Column("agent_id", String(255), nullable=False),
@@ -38,7 +48,7 @@ incidents = Table(
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("rare_pattern_flag", Boolean, nullable=False, server_default=text("false")),
-    Column("rare_pattern_occurrence_count", Integer, nullable=True),
+    Column("prior_occurrences", Integer, nullable=True),
     Column("rare_pattern_reason", Text, nullable=True),
     CheckConstraint("state IN ('open', 'closed')", name="incidents_state_check"),
     CheckConstraint(
@@ -55,7 +65,7 @@ incident_alerts = Table(
     "incident_alerts", metadata,
     Column("id", Integer, primary_key=True),
     Column("incident_id", Integer, ForeignKey("incidents.id"), nullable=False),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("node", String(255), nullable=False),
     Column("alert_id", String(255), nullable=False),
     Column("alert_time", DateTime(timezone=True), nullable=False),
@@ -65,7 +75,7 @@ incident_alerts = Table(
 
 fingerprints = Table(
     "fingerprints", metadata,
-    Column("tenant_key", String(64), primary_key=True),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
     Column("fingerprint_key", String(64), primary_key=True),
     Column("label", String(255), nullable=True),
     Column("notes", Text, nullable=True),
@@ -82,7 +92,7 @@ fingerprints = Table(
 fingerprint_verdicts = Table(
     "fingerprint_verdicts", metadata,
     Column("id", Integer, primary_key=True),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("fingerprint_key", String(64), nullable=False),
     Column("incident_id", Integer, ForeignKey("incidents.id"), nullable=False),
     Column("analyst_user_id", Integer, ForeignKey("users.id"), nullable=False),
@@ -100,7 +110,7 @@ fingerprint_verdicts = Table(
 
 agent_role_tags = Table(
     "agent_role_tags", metadata,
-    Column("tenant_key", String(64), primary_key=True),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
     Column("agent_id", String(255), primary_key=True),
     Column("role_tag", String(100), nullable=True),
     Column("os_family", String(50), nullable=True),
@@ -109,7 +119,7 @@ agent_role_tags = Table(
 
 tenant_alert_settings = Table(
     "tenant_alert_settings", metadata,
-    Column("tenant_key", String(64), primary_key=True),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
     Column("rare_alert_warmup_days", Integer, nullable=False, server_default="7"),
     Column("rare_alert_warmup_min_incidents", Integer, nullable=False, server_default="30"),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
@@ -119,7 +129,7 @@ tenant_alert_settings = Table(
 sequence_progress = Table(
     "sequence_progress", metadata,
     Column("id", Integer, primary_key=True),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("sequence_id", String(100), nullable=False),
     Column("agent_id", String(255), nullable=False),
     Column("key_type", String(20), nullable=False),
@@ -139,7 +149,7 @@ sequence_progress = Table(
 campaigns = Table(
     "campaigns", metadata,
     Column("id", Integer, primary_key=True),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("fingerprint_key", String(64), nullable=False),
     Column("actor_type", String(20), nullable=False),
     Column("actor_value", String(255), nullable=False),
@@ -156,7 +166,7 @@ campaign_incidents = Table(
     Column("id", Integer, primary_key=True),
     Column("campaign_id", Integer, ForeignKey("campaigns.id"), nullable=False),
     Column("incident_id", Integer, ForeignKey("incidents.id"), nullable=False),
-    Column("tenant_key", String(64), nullable=False),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     UniqueConstraint("campaign_id", "incident_id", name="campaign_incidents_identity_unique"),
 )

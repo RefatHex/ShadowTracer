@@ -235,7 +235,7 @@ rare_flag="$(echo "$rare_incidents" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)['incidents']
 row = next(i for i in items if i['id'] == $rare_incident_id)
-print(row['rare_pattern_flag'], row['rare_pattern_occurrence_count'])
+print(row['rare_pattern_flag'], row['prior_occurrences'])
 ")"
 check "never-seen fingerprint gets a rare flag with occurrence count 0" "[ \"$rare_flag\" = 'True 0' ]"
 
@@ -314,10 +314,37 @@ done
 check "$victim_name rejoined the consumer group" "[ \"$rejoined_count\" -gt 0 ]"
 
 echo
-echo "--- replay safety: a fresh dedicated consumer group reading the whole topic from earliest must not double-fire ---"
+echo "--- replay safety: a fresh dedicated consumer group reading from this run's own messages must not double-fire ---"
 replay_marker="replay$(date +%s)"
 replay_agent="replayv-agent-${replay_marker}"
 replay_ip="203.0.113.$((RANDOM % 50 + 1))"
+replay_group="verify-replay-$(date +%s)"
+
+# Snapshot every partition's current end offset BEFORE producing anything,
+# so the replay below only ever sees this run's own 2 messages - never the
+# topic's full multi-day history. Found the hard way (2026-10-08): the
+# previous version used auto.offset.reset=earliest against the real,
+# 7-day-retention shadowtracer.events.raw topic, which every run of this
+# script has been producing to - replaying from absolute earliest
+# reprocesses EVERY past run's alerts too, recreating incidents (and their
+# campaigns/fingerprints) for tenants whose cleanup already ran, including
+# the real lab tenant's own historical test traffic. See
+# PHASE3_DATA_PLATFORM.md's follow-up entry.
+"$PY_CORRELATE" - "$KAFKA_BOOTSTRAP" "$replay_group" <<'PYEOF'
+import sys
+from confluent_kafka import Consumer, TopicPartition
+bootstrap, group_id = sys.argv[1:3]
+consumer = Consumer({"bootstrap.servers": bootstrap, "group.id": group_id})
+md = consumer.list_topics("shadowtracer.events.raw", timeout=10).topics["shadowtracer.events.raw"]
+offsets = [
+    TopicPartition("shadowtracer.events.raw", p, consumer.get_watermark_offsets(TopicPartition("shadowtracer.events.raw", p), timeout=10)[1])
+    for p in md.partitions
+]
+consumer.commit(offsets=offsets, asynchronous=False)
+consumer.close()
+print(f"pre-seeded {group_id} at current end offsets, {len(offsets)} partitions")
+PYEOF
+
 produce_alert "$VERIFY_TENANT_KEY" "$replay_agent" "$replay_ip" "sshd,authentication_failed" "step0"
 sleep 2
 produce_alert "$VERIFY_TENANT_KEY" "$replay_agent" "$replay_ip" "sshd,authentication_success" "step1"
@@ -330,15 +357,15 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 check "fresh sequence fires once on first processing" "[ \"$first_fire\" = 1 ]"
 
-echo "starting a temporary, isolated consumer group to replay the ENTIRE topic from earliest (never the live shadowtracer-correlate group - this doesn't touch its offsets at all)..."
-"$PY_CORRELATE" - "$DATABASE_URL_APP" "$CLICKHOUSE_USER" "$CLICKHOUSE_PASSWORD" <<'PYEOF'
+echo "starting a temporary, isolated consumer group (pre-seeded to this run's own messages, not the whole topic) to replay and confirm it doesn't double-fire - never the live shadowtracer-correlate group, this doesn't touch its offsets at all..."
+"$PY_CORRELATE" - "$DATABASE_URL_APP" "$CLICKHOUSE_USER" "$CLICKHOUSE_PASSWORD" "$replay_group" <<'PYEOF'
 import sys, threading, time, traceback
 sys.path.insert(0, "../../shadowtracer/correlate")
 from shadowtracer_correlate.consumer import run
 from shadowtracer_correlate.metrics import Metrics
 import clickhouse_connect
 
-database_url, ch_user, ch_password = sys.argv[1:4]
+database_url, ch_user, ch_password, group_id = sys.argv[1:5]
 ch = clickhouse_connect.get_client(host="127.0.0.1", port=8123, username=ch_user, password=ch_password, database="shadowtracer")
 stop_flag = threading.Event()
 started_flag = threading.Event()
@@ -347,7 +374,7 @@ def _run():
     try:
         run(
             bootstrap_servers="127.0.0.1:9094", topic="shadowtracer.events.raw",
-            group_id=f"verify-replay-{int(time.time())}", database_url=database_url,
+            group_id=group_id, database_url=database_url,
             metrics=Metrics(), stop_flag=stop_flag, started_flag=started_flag,
             ch_client=ch, clickhouse_database="shadowtracer",
             sequences_dir="../../shadowtracer/correlate/sequences",
@@ -360,14 +387,14 @@ t = threading.Thread(target=_run, daemon=True)
 t.start()
 if not started_flag.wait(timeout=10):
     print("REPLAY CONSUMER NEVER STARTED", file=sys.stderr)
-time.sleep(60)  # let it drain the whole real topic's history once
+time.sleep(15)  # this run's own 2 messages only now (pre-seeded offsets above), not the whole topic
 stop_flag.set()
 t.join(timeout=10)
 print("replay consumer drained")
 PYEOF
 
 replay_fire_count="$(ch_query "SELECT uniqExact(completing_alert_id) FROM shadowtracer.sequence_firings WHERE agent_id = '$replay_agent'")"
-check "replaying the whole topic from a fresh group does not fire it twice" "[ \"$replay_fire_count\" = 1 ]"
+check "replaying this run's own messages from a fresh, pre-seeded group does not fire it twice" "[ \"$replay_fire_count\" = 1 ]"
 
 echo
 echo "--- cleanup: removing this run's VERIFY data ---"
@@ -393,6 +420,8 @@ DELETE FROM incident_alerts WHERE incident_id IN (
 DELETE FROM incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
 DELETE FROM campaigns WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
 DELETE FROM sequence_progress WHERE tenant_key = '$VERIFY_TENANT_KEY';
+DELETE FROM fingerprint_verdicts WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
+DELETE FROM fingerprints WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
 DELETE FROM tenant_alert_settings WHERE tenant_key = '$rare_tenant_key';
 DELETE FROM refresh_tokens WHERE user_id IN (
   SELECT id FROM users WHERE tenant_id = (SELECT id FROM tenants WHERE tenant_key = '$rare_tenant_key')
@@ -411,6 +440,8 @@ SELECT
   (SELECT count(*) FROM campaign_incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
   (SELECT count(*) FROM incident_alerts WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
   (SELECT count(*) FROM sequence_progress WHERE tenant_key = '$VERIFY_TENANT_KEY') +
+  (SELECT count(*) FROM fingerprint_verdicts WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
+  (SELECT count(*) FROM fingerprints WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
   (SELECT count(*) FROM tenant_alert_settings WHERE tenant_key = '$rare_tenant_key') +
   (SELECT count(*) FROM tenants WHERE tenant_key = '$rare_tenant_key')
 ")"

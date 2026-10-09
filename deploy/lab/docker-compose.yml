@@ -70,6 +70,11 @@ x-writer-env: &writer-env
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
   CLICKHOUSE_DATABASE: shadowtracer
+  # Phase 5C Step 0: tenant-existence check (tenants.py) - a real Postgres
+  # dependency the writer didn't have before.
+  POSTGRES_HOST: postgres
+  POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
   # run_writer.py's own default (9102) differs from the shipper's (9101) -
   # the image's HEALTHCHECK always checks 9101 unless told otherwise, so
   # this must be explicit or the writer never reports healthy.

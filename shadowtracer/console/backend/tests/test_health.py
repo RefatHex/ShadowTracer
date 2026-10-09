@@ -230,6 +230,37 @@ def test_dead_letter_counts_per_tenant_does_not_alert_below_threshold(lab_env, t
         client.close()
 
 
+def test_dead_letter_counts_per_tenant_does_not_inflate_on_a_replayed_duplicate(lab_env, test_clickhouse_db):
+    """Phase 5C Step 0: dead_letter_events is a ReplicatedReplacingMergeTree
+    keyed on (tenant_id, component, source_location) - a replay that
+    re-dead-letters the SAME message for the SAME reason inserts a real
+    duplicate row (merges are lazy), which the OLD plain count() would
+    have double-counted here immediately. uniqExact(source_location) must
+    still report 1, with no merge/FINAL needed."""
+    import uuid
+
+    import clickhouse_connect
+
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    client = clickhouse_connect.get_client(
+        host="127.0.0.1", port=8123, username=lab_env["CLICKHOUSE_USER"],
+        password=lab_env["CLICKHOUSE_PASSWORD"], database=test_clickhouse_db,
+    )
+    try:
+        same_row = ("writer", "shadowtracer.events.raw:3:42", "KeyError: 'timestamp'", "{}")
+        _insert_dead_letter_rows(client, tenant, [same_row])
+        _insert_dead_letter_rows(client, tenant, [same_row])  # the replay: identical component+source_location
+
+        report = health_checks.dead_letter_counts_per_tenant(settings)
+        assert "error" not in report
+        assert report["by_tenant"][tenant]["total"] == 1, "a replayed duplicate must not inflate the count"
+        assert report["by_tenant"][tenant]["by_component"] == {"writer": 1}
+    finally:
+        client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant}'")
+        client.close()
+
+
 def test_clickhouse_replica_health_all_healthy_against_real_cluster(lab_env, test_clickhouse_db):
     """Dead-letter-ClickHouse incident (2026-10-08): against the real,
     healthy lab cluster (both replicas), every replicated table on both

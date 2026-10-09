@@ -7,7 +7,7 @@ import uuid
 from confluent_kafka import Consumer, Producer
 from sqlalchemy import select
 
-from conftest import TEST_CLICKHOUSE_DB
+from conftest import TEST_CLICKHOUSE_DB, insert_tenant
 from shadowtracer_correlate.consumer import run
 from shadowtracer_correlate.metrics import Metrics
 from shadowtracer_correlate.models import incident_alerts, incidents
@@ -69,6 +69,7 @@ def test_correlator_is_actually_running_and_draining_not_just_callable(kafka_boo
     directly here - we only start consumer.run() in a thread and produce
     to Kafka, exactly like a real deployment would."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     alert_ids = [f"{marker}.{i}" for i in range(5)]
@@ -105,6 +106,7 @@ def test_a_permanently_malformed_alert_is_skipped_not_wedging_the_partition(kafk
     bad alert followed by 3 good ones on the same partition/agent must
     not lose the 3 good ones."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     bad = _alert(agent, "9.9.9.9", f"{marker}.bad", timestamp="2026-10-04T05:00:118.000+0000")
@@ -141,6 +143,7 @@ def test_bad_data_is_dead_lettered_not_silently_dropped(kafka_bootstrap, kafka_t
     dead_letter_events, not just bump a counter - someone needs to be able
     to find and inspect what got dropped."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     missing_timestamp = json.loads(_alert(agent, "9.9.9.9", f"{marker}.missing-ts"))
@@ -188,6 +191,7 @@ def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kaf
     split into two, since all state lives in Postgres, not the worker's
     memory."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     group_id = f"test-correlate-kill-{marker}"
@@ -236,6 +240,7 @@ def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kaf
 
 def test_replaying_a_kafka_range_does_not_duplicate_membership_or_change_counts(kafka_bootstrap, kafka_topic, database_url, db):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     group_id = f"test-correlate-replay-{marker}"
@@ -293,6 +298,7 @@ def test_two_correlation_workers_split_partitions_nothing_processed_twice(kafka_
     time.sleep(1)
 
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     marker = uuid.uuid4().hex[:8]
     group_id = f"test-correlate-split-{marker}"
     n_agents = 8
@@ -368,6 +374,7 @@ def test_correlator_stays_up_when_dead_letter_clickhouse_insert_fails(
     - and the good alert right behind it on the same partition must still
     process, proving the partition isn't wedged by this either."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     bad_timestamp = _alert(agent, "9.9.9.9", f"{marker}.bad-ts", timestamp="2026-10-04T05:00:118.000+0000")
@@ -407,3 +414,64 @@ def test_correlator_stays_up_when_dead_letter_clickhouse_insert_fails(
         ch_client.command(
             f"RENAME TABLE {TEST_CLICKHOUSE_DB}.{tmp_name} TO {TEST_CLICKHOUSE_DB}.dead_letter_events ON CLUSTER lab_cluster"
         )
+
+
+def test_correlator_dead_letters_unknown_tenant_known_tenant_still_processes(
+    kafka_bootstrap, kafka_topic, database_url, db, ch_client, lab_env,
+):
+    """Phase 5C Step 0: a tenant_key with no backing tenants row must be
+    dead-lettered (error="unknown_tenant"), never create an incident -
+    proven alongside a real, flagged-as-test tenant (created here, cleaned
+    up by `db`'s own teardown) whose otherwise-identical alert still
+    lands normally, so this isn't just "the correlator dead-letters
+    everything right now"."""
+    import clickhouse_connect
+
+    known_tenant = f"test-flagged-{uuid.uuid4().hex[:8]}"
+    unknown_tenant = f"test-unknown-{uuid.uuid4().hex[:8]}"  # deliberately never inserted into tenants
+    insert_tenant(db, known_tenant)
+    marker = uuid.uuid4().hex[:8]
+    known_agent = f"agent-known-{marker}"
+    unknown_agent = f"agent-unknown-{marker}"
+
+    # A separate client from the one handed to the consumer thread below -
+    # clickhouse_connect's HTTP client tracks an active session internally
+    # and raises "concurrent queries within the same session" if the same
+    # client object is used from two threads at once (found the hard way
+    # writing this test): this test's own polling loop must never share
+    # the consumer's client.
+    poll_client = clickhouse_connect.get_client(
+        host="127.0.0.1", port=8123, username=lab_env["CLICKHOUSE_USER"],
+        password=lab_env["CLICKHOUSE_PASSWORD"], database=TEST_CLICKHOUSE_DB,
+    )
+
+    stop_flag, thread, metrics = _start_consumer(kafka_bootstrap, kafka_topic, database_url, ch_client=ch_client)
+    try:
+        _produce(kafka_bootstrap, kafka_topic, [_alert(known_agent, "9.9.9.9", f"{marker}.known")], tenant_key=known_tenant)
+        _produce(kafka_bootstrap, kafka_topic, [_alert(unknown_agent, "9.9.9.9", f"{marker}.unknown")], tenant_key=unknown_tenant)
+
+        deadline = time.monotonic() + 20
+        row = dl_count = None
+        while time.monotonic() < deadline:
+            row = db.execute(
+                select(incidents).where(incidents.c.tenant_key == known_tenant, incidents.c.agent_id == known_agent)
+            ).mappings().first()
+            dl_count = poll_client.query(
+                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{unknown_tenant}' AND error = 'unknown_tenant'"
+            ).result_rows[0][0]
+            if row is not None and row["alert_count"] == 1 and dl_count == 1:
+                break
+            time.sleep(0.5)
+
+        assert row is not None and row["alert_count"] == 1, "the known (flagged-test) tenant's alert must still create an incident"
+        assert dl_count == 1, "the unknown tenant's alert must be dead-lettered with error=unknown_tenant"
+        unknown_row = db.execute(
+            select(incidents).where(incidents.c.tenant_key == unknown_tenant)
+        ).mappings().first()
+        assert unknown_row is None, "the unknown tenant's alert must never create an incident"
+        assert thread.is_alive(), "correlator must never crash on an unknown tenant"
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+        poll_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{unknown_tenant}'")
+        poll_client.close()

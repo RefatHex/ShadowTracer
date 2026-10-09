@@ -112,3 +112,41 @@ def test_dead_letter_preview_truncation_still_applies_when_clickhouse_is_broken(
     found = _drain_dead_letter_topic(kafka_bootstrap, marker)
     assert found is not None
     assert len(found.encode()) < 10_000, "the envelope must still be capped, not the full 100KB raw_event"
+
+
+def test_replaying_the_same_dead_letter_does_not_duplicate_the_row(kafka_bootstrap, lab_env, ch_client):
+    """Phase 5C Step 0: dead_letter_events is a ReplicatedReplacingMergeTree
+    keyed on (tenant_id, component, source_location) - see
+    events_schema.sql's own comment. Calling send_to_dead_letter twice for
+    the SAME message (a real replay: the same component dead-lettering the
+    same topic:partition:offset again) must not leave two rows for it.
+    uniqExact(source_location) is correct immediately (the same fix
+    health.py's dead_letter_counts_per_tenant needed); a plain count()
+    only becomes correct after a merge, forced here with OPTIMIZE ... FINAL
+    so the test doesn't depend on background merge timing."""
+    tenant_key = f"test-{uuid.uuid4().hex[:8]}"
+    source_location = f"shadowtracer.events.raw:3:{uuid.uuid4().hex[:8]}"
+
+    for _ in range(2):
+        send_to_dead_letter(
+            kafka_producer=None, ch_client=ch_client, tenant_key=tenant_key,
+            component="writer", source_location=source_location,
+            error="KeyError: 'timestamp'", raw_event="{}",
+        )
+
+    try:
+        immediate = ch_client.query(
+            "SELECT uniqExact(source_location) FROM dead_letter_events "
+            "WHERE tenant_id = {t:String} AND component = 'writer'",
+            parameters={"t": tenant_key},
+        ).result_rows[0][0]
+        assert immediate == 1, "uniqExact must be correct immediately, before any merge"
+
+        ch_client.command("OPTIMIZE TABLE dead_letter_events FINAL")
+        after_merge = ch_client.query(
+            "SELECT count() FROM dead_letter_events WHERE tenant_id = {t:String} AND component = 'writer'",
+            parameters={"t": tenant_key},
+        ).result_rows[0][0]
+        assert after_merge == 1, "a forced merge must collapse the replayed duplicate down to one row"
+    finally:
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_key}'")
