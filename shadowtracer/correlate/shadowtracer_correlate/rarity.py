@@ -11,6 +11,12 @@ warmup_min_incidents incidents, both per-tenant configurable
 to be checked against real tenant volume, not a measured value (see
 docs/specs/PHASE5B.md's addendum).
 
+Phase 5C Step 0 follow-up: "rare" here means NOVEL, not statistically
+infrequent - the flag means "first seen for this tenant" (prior_count at
+or below rare_alert_prior_occurrence_threshold, per-tenant configurable,
+defaulting to 0 - i.e. strictly "never seen before", unchanged from the
+original behavior for every tenant that hasn't set an override).
+
 A rare-pattern alert is a FLAG on the incident, with the occurrence count
 and the reason - never a replacement for the incident, which exists and
 stays fully visible regardless. A suppressed fingerprint (suppression_state
@@ -31,6 +37,7 @@ from .models import fingerprints, incidents, tenant_alert_settings
 
 DEFAULT_WARMUP_DAYS = 7
 DEFAULT_WARMUP_MIN_INCIDENTS = 30
+DEFAULT_PRIOR_OCCURRENCE_THRESHOLD = 0
 
 
 def get_tenant_warmup_config(db, tenant_key: str) -> tuple:
@@ -43,6 +50,16 @@ def get_tenant_warmup_config(db, tenant_key: str) -> tuple:
     if row is None:
         return DEFAULT_WARMUP_DAYS, DEFAULT_WARMUP_MIN_INCIDENTS
     return row[0], row[1]
+
+
+def get_tenant_prior_occurrence_threshold(db, tenant_key: str) -> int:
+    row = db.execute(
+        select(tenant_alert_settings.c.rare_alert_prior_occurrence_threshold)
+        .where(tenant_alert_settings.c.tenant_key == tenant_key)
+    ).first()
+    if row is None:
+        return DEFAULT_PRIOR_OCCURRENCE_THRESHOLD
+    return row[0]
 
 
 def warmup_status(db, tenant_key: str) -> dict:
@@ -95,11 +112,19 @@ def evaluate_rare_pattern(db, ch_client, clickhouse_database: str, tenant_key: s
         parameters={"tenant_id": tenant_key, "fingerprint_key": fingerprint_key},
     ).result_rows[0][0]
 
-    if prior_count != 0:
-        return None  # seen before for this tenant - not rare by this definition
+    threshold = get_tenant_prior_occurrence_threshold(db, tenant_key)
+    if prior_count > threshold:
+        return None  # seen more than this tenant's configured threshold before - not novel by this definition
 
+    if threshold == 0:
+        reason = "First seen for this tenant - this is the first occurrence of this fingerprint."
+    else:
+        reason = (
+            f"First seen for this tenant within the configured threshold "
+            f"(seen {prior_count} time(s) before, threshold {threshold})."
+        )
     return {
         "flag": True,
         "occurrence_count": prior_count,
-        "reason": "Never seen before for this tenant - this is the first occurrence of this fingerprint.",
+        "reason": reason,
     }

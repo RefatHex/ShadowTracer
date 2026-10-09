@@ -10,6 +10,24 @@ A small, periodically-refreshed cache, not a query per message: a
 Postgres round trip per event would be wasteful, and a brand-new tenant
 (created seconds ago) must still be recognized promptly, not only after
 some long TTL - REFRESH_INTERVAL_SECONDS balances the two.
+
+How the cache actually behaves for a BRAND-NEW tenant (asked and
+answered precisely, not just "it's cached"): `is_known()` only triggers
+a refresh on a MISS when the cache is already stale (hasn't refreshed in
+the last REFRESH_INTERVAL_SECONDS). A new tenant's very first events can
+therefore be dead-lettered as "unknown_tenant" for anywhere from 0
+seconds up to just under REFRESH_INTERVAL_SECONDS after its tenants row
+is created - and that upper bound only holds if SOME check (any
+tenant_key, not necessarily this one) happens to land during that
+window and force a refresh; under genuinely idle traffic the cache can
+go longer without refreshing at all, so there is no hard ceiling, only
+"no worse than REFRESH_INTERVAL_SECONDS after the next check that
+happens to find the cache stale." This is a real, expected gap, not a
+bug - and it is exactly what `backfill_dead_letter_events.py`'s sibling
+script, `replay_unknown_tenant_dead_letters.py`, exists to close: once
+the tenant genuinely exists, re-drive its dead-lettered events back
+through the normal pipeline rather than leaving them stuck in
+dead_letter_events forever.
 """
 
 import threading

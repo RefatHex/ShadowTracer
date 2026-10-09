@@ -74,7 +74,7 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
       </p>
       {incident.rare_pattern_flag && (
         <p className="mb-4 rounded bg-purple-50 dark:bg-purple-900/30 px-3 py-2 text-sm text-purple-800 dark:text-purple-300">
-          Rare pattern (seen {incident.prior_occurrences} time(s) before for this tenant):{' '}
+          First seen for this tenant (seen {incident.prior_occurrences} time(s) before):{' '}
           {incident.rare_pattern_reason}
         </p>
       )}

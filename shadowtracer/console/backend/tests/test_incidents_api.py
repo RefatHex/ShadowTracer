@@ -282,18 +282,21 @@ def test_warmup_override_is_admin_only_and_audited(client, db, tenant):
     assert forbidden.status_code == 403
 
     resp = client.put(
-        "/api/rare-pattern-warmup-override", json={"warmup_days": 0, "warmup_min_incidents": 1},
+        "/api/rare-pattern-warmup-override",
+        json={"warmup_days": 0, "warmup_min_incidents": 1, "prior_occurrence_threshold": 2},
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
     assert resp.json()["warmup_days"] == 0
     assert resp.json()["warmup_min_incidents"] == 1
+    assert resp.json()["prior_occurrence_threshold"] == 2
 
     row = db.execute(
         tenant_alert_settings.select().where(tenant_alert_settings.c.tenant_key == tenant_key)
     ).mappings().one()
     assert row["rare_alert_warmup_days"] == 0
     assert row["rare_alert_warmup_min_incidents"] == 1
+    assert row["rare_alert_prior_occurrence_threshold"] == 2
 
     audit_rows = db.execute(
         audit_log.select().where(audit_log.c.action == "rare_pattern_warmup_override_changed")
@@ -328,7 +331,7 @@ def test_rare_pattern_flag_surfaces_in_list_and_detail(client, db, tenant):
     tenant_id, tenant_key = tenant
     incident_id = _make_incident(
         db, tenant_key, rare_pattern_flag=True, prior_occurrences=0,
-        rare_pattern_reason="Never seen before for this tenant - this is the first occurrence of this fingerprint.",
+        rare_pattern_reason="First seen for this tenant - this is the first occurrence of this fingerprint.",
     )
     token = _token_for(client, db, tenant_id, f"viewer-{uuid.uuid4().hex[:8]}@example.com")
 
@@ -342,4 +345,4 @@ def test_rare_pattern_flag_surfaces_in_list_and_detail(client, db, tenant):
     assert detail_resp.status_code == 200
     body = detail_resp.json()
     assert body["rare_pattern_flag"] is True
-    assert "Never seen before" in body["rare_pattern_reason"]
+    assert "First seen for this tenant" in body["rare_pattern_reason"]

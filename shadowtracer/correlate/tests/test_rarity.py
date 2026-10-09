@@ -12,7 +12,8 @@ from sqlalchemy import insert
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shadowtracer_correlate.models import fingerprints, incidents, tenant_alert_settings  # noqa: E402
 from shadowtracer_correlate.rarity import (  # noqa: E402
-    DEFAULT_WARMUP_DAYS, DEFAULT_WARMUP_MIN_INCIDENTS, evaluate_rare_pattern, get_tenant_warmup_config, warmup_status,
+    DEFAULT_WARMUP_DAYS, DEFAULT_WARMUP_MIN_INCIDENTS, evaluate_rare_pattern,
+    get_tenant_prior_occurrence_threshold, get_tenant_warmup_config, warmup_status,
 )
 
 from conftest import TEST_CLICKHOUSE_DB as TEST_CH_DB, insert_tenant  # noqa: E402
@@ -35,10 +36,11 @@ def _insert_incident(db, tenant_key, created_at=None, agent_id=None):
     return result.scalar_one()
 
 
-def _set_warmup_config(db, tenant_key, days, min_incidents):
+def _set_warmup_config(db, tenant_key, days, min_incidents, prior_occurrence_threshold=0):
     db.execute(
         insert(tenant_alert_settings).values(
             tenant_key=tenant_key, rare_alert_warmup_days=days, rare_alert_warmup_min_incidents=min_incidents,
+            rare_alert_prior_occurrence_threshold=prior_occurrence_threshold,
         )
     )
     db.commit()
@@ -130,7 +132,7 @@ def test_past_warmup_never_seen_fingerprint_gets_a_rare_flag_with_correct_count(
     assert result is not None
     assert result["flag"] is True
     assert result["occurrence_count"] == 0
-    assert "Never seen before" in result["reason"]
+    assert "First seen for this tenant" in result["reason"]
 
 
 def test_past_warmup_already_seen_fingerprint_does_not_get_a_rare_flag(db, ch_client):
@@ -170,6 +172,44 @@ def test_past_warmup_fingerprint_seen_several_times_does_not_get_a_rare_flag(db,
 
     result = evaluate_rare_pattern(db, ch_client, TEST_CH_DB, tenant, fingerprint_key)
     assert result is None
+
+
+def test_get_tenant_prior_occurrence_threshold_falls_back_to_zero_when_no_row(db):
+    assert get_tenant_prior_occurrence_threshold(db, f"t-{uuid.uuid4().hex[:8]}") == 0
+
+
+def test_per_tenant_prior_occurrence_threshold_is_configurable(db, ch_client):
+    """Phase 5C Step 0 follow-up: "rare" means NOVEL, not strictly
+    "never seen" - a tenant can configure how many prior occurrences
+    still count as novel (default 0, unchanged). With threshold=2: seen
+    exactly 2 times before -> still flagged ("first seen" within the
+    configured threshold); seen 3 times -> not."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    _set_warmup_config(db, tenant, days=1, min_incidents=1, prior_occurrence_threshold=2)
+    _insert_incident(db, tenant, created_at=NOW - datetime.timedelta(days=10))
+    assert get_tenant_prior_occurrence_threshold(db, tenant) == 2
+
+    at_threshold = f"fp-{uuid.uuid4().hex}"
+    ch_client.insert(
+        "fingerprint_occurrences",
+        [[tenant, at_threshold, i, NOW, 5] for i in range(1, 3)],  # exactly 2 prior occurrences
+        column_names=["tenant_id", "fingerprint_key", "incident_id", "closed_at", "alert_count"],
+    )
+    result_at = evaluate_rare_pattern(db, ch_client, TEST_CH_DB, tenant, at_threshold)
+    assert result_at is not None
+    assert result_at["flag"] is True
+    assert result_at["occurrence_count"] == 2
+    assert "First seen for this tenant" in result_at["reason"]
+
+    above_threshold = f"fp-{uuid.uuid4().hex}"
+    ch_client.insert(
+        "fingerprint_occurrences",
+        [[tenant, above_threshold, i, NOW, 5] for i in range(1, 4)],  # 3 prior occurrences
+        column_names=["tenant_id", "fingerprint_key", "incident_id", "closed_at", "alert_count"],
+    )
+    result_above = evaluate_rare_pattern(db, ch_client, TEST_CH_DB, tenant, above_threshold)
+    assert result_above is None
 
 
 def test_suppressed_fingerprint_never_gets_a_rare_flag(db, ch_client):

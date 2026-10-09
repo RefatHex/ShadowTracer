@@ -163,6 +163,7 @@ tenant_alert_settings = Table(
     Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
     Column("rare_alert_warmup_days", Integer, nullable=False, server_default="7"),
     Column("rare_alert_warmup_min_incidents", Integer, nullable=False, server_default="30"),
+    Column("rare_alert_prior_occurrence_threshold", Integer, nullable=False, server_default="0"),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )

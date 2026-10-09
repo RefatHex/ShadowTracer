@@ -17,7 +17,7 @@ from ..audit import append_entry
 from ..config import Settings
 from ..deps import get_db, get_settings
 from ..models import incident_alerts, incidents, tenant_alert_settings
-from ..rarity import warmup_status
+from ..rarity import get_tenant_prior_occurrence_threshold, warmup_status
 from ..rbac import ADMIN_ONLY, ALL_ROLES, ANALYST_OR_ABOVE, CurrentUser
 
 router = APIRouter(prefix="/api", tags=["incidents"])
@@ -114,6 +114,18 @@ class WarmupStatus(BaseModel):
     warmup_days: int
     incident_count: int
     warmup_min_incidents: int
+    # Phase 5C Step 0 follow-up: "rare" means NOVEL here - flagged when
+    # prior_count <= this, defaulting to 0 (strictly "first seen for this
+    # tenant"). Per-tenant configurable the same way warmup_days/
+    # warmup_min_incidents are.
+    prior_occurrence_threshold: int
+
+
+def _warmup_status_response(db: Session, tenant_key: str) -> WarmupStatus:
+    return WarmupStatus(
+        **warmup_status(db, tenant_key),
+        prior_occurrence_threshold=get_tenant_prior_occurrence_threshold(db, tenant_key),
+    )
 
 
 @router.get("/rare-pattern-warmup-status", response_model=WarmupStatus)
@@ -121,12 +133,13 @@ def get_rare_pattern_warmup_status(db: Session = Depends(get_db), current_user: 
     """Phase 5B Step 3: "warming up (day X of 7, Y of N incidents)" -
     read-only, scoped to the caller's own tenant only (same rule as every
     other query in this router)."""
-    return WarmupStatus(**warmup_status(db, current_user.tenant_key))
+    return _warmup_status_response(db, current_user.tenant_key)
 
 
 class WarmupOverrideRequest(BaseModel):
     warmup_days: int = Field(ge=0)
     warmup_min_incidents: int = Field(ge=0)
+    prior_occurrence_threshold: int = Field(ge=0, default=0)
 
 
 @router.put("/rare-pattern-warmup-override", response_model=WarmupStatus)
@@ -135,20 +148,23 @@ def set_rare_pattern_warmup_override(
 ):
     """Phase 5C Step 0: admin-only and audited - this is a per-tenant
     override of WHEN rare-pattern alerting starts trusting a tenant's
-    history at all (see rarity.py's warmup_status), not a cosmetic
-    setting; loosening it changes which incidents get flagged rare."""
+    history at all (see rarity.py's warmup_status) and of what counts as
+    "first seen" (prior_occurrence_threshold) - not a cosmetic setting;
+    loosening either changes which incidents get flagged."""
     db.execute(
         pg_insert(tenant_alert_settings)
         .values(
             tenant_key=current_user.tenant_key,
             rare_alert_warmup_days=body.warmup_days,
             rare_alert_warmup_min_incidents=body.warmup_min_incidents,
+            rare_alert_prior_occurrence_threshold=body.prior_occurrence_threshold,
         )
         .on_conflict_do_update(
             index_elements=["tenant_key"],
             set_={
                 "rare_alert_warmup_days": body.warmup_days,
                 "rare_alert_warmup_min_incidents": body.warmup_min_incidents,
+                "rare_alert_prior_occurrence_threshold": body.prior_occurrence_threshold,
                 "updated_at": func.now(),
             },
         )
@@ -156,10 +172,13 @@ def set_rare_pattern_warmup_override(
     append_entry(
         db, actor=str(current_user.user_id), tenant_id=current_user.tenant_id,
         action="rare_pattern_warmup_override_changed",
-        target=f"warmup_days={body.warmup_days}:warmup_min_incidents={body.warmup_min_incidents}",
+        target=(
+            f"warmup_days={body.warmup_days}:warmup_min_incidents={body.warmup_min_incidents}:"
+            f"prior_occurrence_threshold={body.prior_occurrence_threshold}"
+        ),
         outcome="success",
     )
-    return WarmupStatus(**warmup_status(db, current_user.tenant_key))
+    return _warmup_status_response(db, current_user.tenant_key)
 
 
 @router.get("/incidents", response_model=IncidentsPage)

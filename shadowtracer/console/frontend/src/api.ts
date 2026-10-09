@@ -51,6 +51,9 @@ export interface WarmupStatus {
   warmup_days: number
   incident_count: number
   warmup_min_incidents: number
+  // "rare" means NOVEL here - flagged when prior occurrences <= this,
+  // defaulting to 0 (strictly "first seen for this tenant").
+  prior_occurrence_threshold: number
 }
 
 export interface IncidentsPage {

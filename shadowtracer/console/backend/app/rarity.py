@@ -13,6 +13,17 @@ from .models import incidents, tenant_alert_settings
 
 DEFAULT_WARMUP_DAYS = 7
 DEFAULT_WARMUP_MIN_INCIDENTS = 30
+DEFAULT_PRIOR_OCCURRENCE_THRESHOLD = 0
+
+
+def get_tenant_prior_occurrence_threshold(db, tenant_key: str) -> int:
+    row = db.execute(
+        select(tenant_alert_settings.c.rare_alert_prior_occurrence_threshold)
+        .where(tenant_alert_settings.c.tenant_key == tenant_key)
+    ).first()
+    if row is None:
+        return DEFAULT_PRIOR_OCCURRENCE_THRESHOLD
+    return row[0]
 
 
 def warmup_status(db, tenant_key: str) -> dict:

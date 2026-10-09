@@ -754,6 +754,57 @@ this - added one (`PUT /api/rare-pattern-warmup-override`), admin-only
 and audited, same pattern as `agents.py`'s existing role-tag endpoint
 (upsert + `append_entry` in the same transaction).
 
+## Phase 5C Step 0, three more follow-ups
+
+**Tenant lookup is cached, not per-event.** `TenantCache.is_known()`
+(`shadowtracer_ingest/tenants.py`) only refreshes on a miss when the
+cache is already stale (hasn't refreshed in `REFRESH_INTERVAL_SECONDS`,
+15s) - a brand-new tenant's very first events can be dead-lettered as
+`unknown_tenant` for anywhere from 0 seconds up to just under that
+window, with no hard ceiling under genuinely idle traffic (documented
+precisely in the module's own docstring now, not just "it's cached").
+Added `replay_unknown_tenant_dead_letters.py`: a one-shot, idempotent
+script that re-drives `unknown_tenant` dead-letters back onto the raw
+topic once their tenant genuinely exists, leaving still-unknown ones
+uncommitted (not skipped) for a future run to pick up, relying on the
+events table's own identity-based dedup (`alert_id`) to make a redundant
+re-replay harmless. One real limitation it can't work around: the
+4KB `raw_event_preview` cap means a truncated event's full content is
+gone - detected (`raw_event_size` vs. the preview's own length) and
+skipped as genuinely unrecoverable, not silently replayed as corrupted
+JSON. Tested end-to-end through a real `writer.run()`.
+
+**"Rare" means novel, now explicitly, and configurably.**
+`evaluate_rare_pattern` flagged on `prior_count == 0` with no way to
+loosen it; added `rare_alert_prior_occurrence_threshold` to
+`tenant_alert_settings` (default 0 - every existing tenant's behavior is
+unchanged) so a tenant can flag "seen at most N times before" instead of
+strictly never-seen, without a code change. Relabeled the user-facing
+text from "Rare pattern"/"Never seen before" to "First seen for this
+tenant" throughout (API reason string, UI, this doc) - "rare" implied a
+statistical measure this was never actually computing. Exposed via the
+same admin-only, audited override endpoint as warm-up
+(`prior_occurrence_threshold` alongside `warmup_days`/
+`warmup_min_incidents`).
+
+**dead_letter_events backfilled after being recreated**, and a concrete
+demonstration of why `ReplicatedReplacingMergeTree` needs `FINAL`/
+`argMax`/`uniqExact`, never a plain query, for anything beyond "has a
+merge happened to run": ran `backfill_dead_letter_events.py` against the
+real lab (609 of 655 Kafka dead-letter messages backfilled; 46 skipped,
+all pre-dating the preview/sha256 envelope schema from the original
+incident - `backfill` correctly skips what it can't parse rather than
+crashing or inserting garbage). Immediately after, `count()` read 448
+while `uniqExact((tenant_id, component, source_location))` read 376 on
+the exact same table at the exact same moment - only converging to 376
+after a forced `OPTIMIZE TABLE ... FINAL`. `smoke-test.sh`'s own
+dead-letter counts (still plain `count()`, missed in the first dedup
+pass) are now `uniqExact` too, same idiom as `health.py`. No view in
+this codebase lists individual dead-letter rows today, but
+`dead_letter_counts_per_tenant`'s own docstring now carries the FINAL
+and argMax query shapes for whenever one is built, so that choice isn't
+left to be rediscovered the hard way a third time.
+
 ## Open items
 
 - The shipper's offset-file bookkeeping can lag behind what's actually

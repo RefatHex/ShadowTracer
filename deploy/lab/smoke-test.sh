@@ -191,8 +191,18 @@ echo "--- hostile input: no single event may stop the pipeline ---"
 hostile_marker="hostile$(date +%s)"
 hostile_agent="hostile-agent-${hostile_marker}"
 
-dl_before="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client --query "SELECT count() FROM shadowtracer.dead_letter_events")"
-dl_before2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client --query "SELECT count() FROM shadowtracer.dead_letter_events")"
+# uniqExact(identity), never count(): dead_letter_events is a
+# ReplicatedReplacingMergeTree (Phase 5C Step 0) - it only collapses
+# duplicate (tenant_id, component, source_location) rows at MERGE time,
+# so a plain count() can overcount until a background merge (or an
+# explicit OPTIMIZE ... FINAL) catches up. Confirmed for real running
+# this same query before vs. after a forced OPTIMIZE ... FINAL on this
+# exact table: count() read 448, uniqExact read 376 - only converged to
+# 376 after the merge. Same idiom health.py's dead_letter_counts_per_tenant
+# already uses, for the same reason.
+DLT_COUNT_QUERY="SELECT uniqExact((tenant_id, component, source_location)) FROM shadowtracer.dead_letter_events"
+dl_before="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client --query "$DLT_COUNT_QUERY")"
+dl_before2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client --query "$DLT_COUNT_QUERY")"
 
 dlt_watermark_sum() {
     ../../shadowtracer/ingest/.venv/bin/python3 -c '
@@ -294,9 +304,9 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     good_count="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
         --query "SELECT count() FROM shadowtracer.events WHERE alert_id LIKE '${hostile_marker}.good.%'")"
     dl_after="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
-        --query "SELECT count() FROM shadowtracer.dead_letter_events")"
+        --query "$DLT_COUNT_QUERY")"
     dl_after2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client \
-        --query "SELECT count() FROM shadowtracer.dead_letter_events")"
+        --query "$DLT_COUNT_QUERY")"
     if [ "$good_count" = "2" ] && [ "$((dl_after - dl_before))" = "12" ] && [ "$((dl_after2 - dl_before2))" = "12" ]; then
         break
     fi

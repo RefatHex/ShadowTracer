@@ -225,7 +225,31 @@ def dead_letter_counts_per_tenant(settings: Settings, window_hours: int = 24) ->
     would inflate on every such replay until that merge happens;
     uniqExact over the identity is correct immediately, the same fix
     events_hourly_rollup already needed for the same reason (Phase 3
-    follow-up 1)."""
+    follow-up 1).
+
+    This function only ever COUNTS - nothing in this codebase lists
+    individual dead_letter_events rows today. If one is ever added (an
+    admin view of actual dead-letter envelopes, not just counts), it must
+    use FINAL or argMax, never a plain SELECT - the same merge-timing gap
+    applies to individual rows, not just counts:
+
+        -- FINAL: simplest, forces the merge at query time.
+        SELECT * FROM dead_letter_events FINAL
+        WHERE tenant_id = {tenant:String} ORDER BY failed_at DESC LIMIT 50
+
+        -- argMax: no FINAL, scales better on a large table - picks each
+        -- identity's latest version explicitly instead.
+        SELECT tenant_id, component, source_location,
+               argMax(error, failed_at) AS error,
+               argMax(raw_event_preview, failed_at) AS raw_event_preview,
+               argMax(raw_event_size, failed_at) AS raw_event_size,
+               argMax(raw_event_sha256, failed_at) AS raw_event_sha256,
+               max(failed_at) AS failed_at
+        FROM dead_letter_events
+        WHERE tenant_id = {tenant:String}
+        GROUP BY tenant_id, component, source_location
+        ORDER BY failed_at DESC LIMIT 50
+    """
     try:
         client = clickhouse_connect.get_client(
             host=settings.clickhouse_host, port=settings.clickhouse_port,
