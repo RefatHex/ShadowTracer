@@ -182,8 +182,9 @@ def test_per_tenant_prior_occurrence_threshold_is_configurable(db, ch_client):
     """Phase 5C Step 0 follow-up: "rare" means NOVEL, not strictly
     "never seen" - a tenant can configure how many prior occurrences
     still count as novel (default 0, unchanged). With threshold=2: seen
-    exactly 2 times before -> still flagged ("first seen" within the
-    configured threshold); seen 3 times -> not."""
+    exactly 2 times before -> still flagged (reason text says "seen 2
+    times before", not "first seen" - that's reserved for prior_count==0
+    specifically); seen 3 times -> not flagged at all."""
     tenant = f"t-{uuid.uuid4().hex[:8]}"
     insert_tenant(db, tenant)
     _set_warmup_config(db, tenant, days=1, min_incidents=1, prior_occurrence_threshold=2)
@@ -200,7 +201,10 @@ def test_per_tenant_prior_occurrence_threshold_is_configurable(db, ch_client):
     assert result_at is not None
     assert result_at["flag"] is True
     assert result_at["occurrence_count"] == 2
-    assert "First seen for this tenant" in result_at["reason"]
+    # Seen > 0 times before (even within threshold) must use the second
+    # reason form, never "First seen" - that phrase is reserved for
+    # prior_count == 0 specifically, regardless of the tenant's threshold.
+    assert result_at["reason"] == "Seen 2 times before for this tenant (at or below the rare threshold of 2)"
 
     above_threshold = f"fp-{uuid.uuid4().hex}"
     ch_client.insert(

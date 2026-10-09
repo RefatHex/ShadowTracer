@@ -791,10 +791,14 @@ same admin-only, audited override endpoint as warm-up
 demonstration of why `ReplicatedReplacingMergeTree` needs `FINAL`/
 `argMax`/`uniqExact`, never a plain query, for anything beyond "has a
 merge happened to run": ran `backfill_dead_letter_events.py` against the
-real lab (609 of 655 Kafka dead-letter messages backfilled; 46 skipped,
-all pre-dating the preview/sha256 envelope schema from the original
-incident - `backfill` correctly skips what it can't parse rather than
-crashing or inserting garbage). Immediately after, `count()` read 448
+real lab (609 of 655 Kafka dead-letter messages backfilled; 46 skipped -
+old test data sitting in the dead-letter topic's own 7-day retention
+window from before the preview/sha256 envelope schema existed, with no
+`raw_event_preview` field for the current backfill script to read at
+all. These 46 could not be backfilled and are not recoverable through
+this path - there is no newer copy anywhere to fall back to, and
+`backfill` correctly skips what it can't parse rather than crashing or
+inserting garbage). Immediately after, `count()` read 448
 while `uniqExact((tenant_id, component, source_location))` read 376 on
 the exact same table at the exact same moment - only converging to 376
 after a forced `OPTIMIZE TABLE ... FINAL`. `smoke-test.sh`'s own

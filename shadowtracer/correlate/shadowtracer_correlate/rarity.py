@@ -116,13 +116,14 @@ def evaluate_rare_pattern(db, ch_client, clickhouse_database: str, tenant_key: s
     if prior_count > threshold:
         return None  # seen more than this tenant's configured threshold before - not novel by this definition
 
-    if threshold == 0:
-        reason = "First seen for this tenant - this is the first occurrence of this fingerprint."
+    # The reason text reflects prior_count itself, not whether a
+    # threshold is configured - at threshold > 0, prior_count can still
+    # legitimately be 0 (genuinely never seen), which must read the same
+    # as the threshold=0 case, not the "seen N before" one.
+    if prior_count == 0:
+        reason = "First seen for this tenant"
     else:
-        reason = (
-            f"First seen for this tenant within the configured threshold "
-            f"(seen {prior_count} time(s) before, threshold {threshold})."
-        )
+        reason = f"Seen {prior_count} times before for this tenant (at or below the rare threshold of {threshold})"
     return {
         "flag": True,
         "occurrence_count": prior_count,

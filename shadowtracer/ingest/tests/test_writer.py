@@ -472,3 +472,42 @@ def test_writer_dead_letters_unknown_tenant_known_tenant_still_processes(
         thread.join(timeout=5)
         ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id = '{known_event['id']}'")
         ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{unknown_tenant}'")
+
+
+def test_a_brand_new_tenants_first_event_sent_right_away_is_stored_not_dead_lettered(
+    kafka_bootstrap, kafka_topic, ch_client, lab_env, pg_db, database_url, real_alert_lines,
+):
+    """Phase 5C Step 0 follow-up: TenantCache refreshes immediately on a
+    miss (rate-limited to at most once per second, not the old 15s
+    window) - a tenant created THEN its first event produced with no
+    delay at all must still land normally, not get dead-lettered as
+    unknown_tenant just because the cache hadn't seen it yet."""
+    import json
+    marker = uuid.uuid4().hex[:8]
+    tenant_key = f"test-brand-new-{marker}"
+
+    event = json.loads(real_alert_lines[0])
+    event["id"] = f"{event['id']}.{marker}"
+
+    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
+    try:
+        insert_tenant(pg_db, tenant_key)
+        _produce(kafka_bootstrap, kafka_topic, [json.dumps(event)], tenant_id=tenant_key)  # no delay
+
+        deadline = time.monotonic() + 20
+        count = 0
+        while time.monotonic() < deadline:
+            count = _count_alert_ids(ch_client, [event["id"]])
+            if count == 1:
+                break
+            time.sleep(0.5)
+        assert count == 1, "a brand-new tenant's first event, sent right away, must still be stored"
+
+        dl_count = ch_client.query(
+            f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{tenant_key}' AND error = 'unknown_tenant'"
+        ).result_rows[0][0]
+        assert dl_count == 0, "must not have been dead-lettered as unknown_tenant on the way there"
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+        ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id = '{event['id']}'")

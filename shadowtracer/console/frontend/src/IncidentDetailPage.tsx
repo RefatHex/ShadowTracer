@@ -74,7 +74,12 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
       </p>
       {incident.rare_pattern_flag && (
         <p className="mb-4 rounded bg-purple-50 dark:bg-purple-900/30 px-3 py-2 text-sm text-purple-800 dark:text-purple-300">
-          First seen for this tenant (seen {incident.prior_occurrences} time(s) before):{' '}
+          {/* rare_pattern_reason is already the complete, context-aware
+              sentence ("First seen for this tenant" when prior_occurrences
+              is 0, "Seen N times before for this tenant (at or below the
+              rare threshold of T)" otherwise) - never prefix or duplicate
+              it here, that produced a self-contradicting sentence before
+              (Phase 5C Step 0 follow-up). */}
           {incident.rare_pattern_reason}
         </p>
       )}
