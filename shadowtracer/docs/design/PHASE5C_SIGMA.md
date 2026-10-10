@@ -781,3 +781,182 @@ reported, not fixed, and no commit in this revision touches `sequences.py`,
 - **One item outside 5C's scope needs separate attention:** §9's real, pre-existing
   sequence-detection ordering bug, found while investigating the load balancer. Reported
   here, not fixed.
+
+---
+
+## 11. Step 0a (approval condition): does the `id` collision reach back into 5A? (real evidence, no product changes made)
+
+**Scope, verbatim from the approval:** are any of the 22 collision groups found in §6
+present in `alerts.json` (not just `archives.json`) on the same node with different
+content; if so, quantify whether `incident_alerts`' `UNIQUE(tenant_key, node, alert_id)`
+and ClickHouse's `uniqExact(cluster_node, alert_id)` have dropped or undercounted real
+alerts, on real lab data; read what Wazuh's `id` is actually made of in 4.14.8 and cite
+file/line; propose a collision-safe identity and its migration impact. **Investigate
+only, report before changing anything** - nothing in this section changes product code,
+schema, or config beyond the lab stack itself (restarted to reproduce the condition;
+left running at the end, see "lab-tenant pollution" below).
+
+### Finding 1 — the 22 collision groups were never checked against `alerts.json`; a fresh real reproduction shows zero collisions there
+
+§6's 22 groups were found by scanning a one-off `archives.json` snapshot during the
+earlier `logall_json` re-measurement; that pass never checked whether the same `id`
+values also appear more than once in `alerts.json`. Re-tested directly:
+
+```
+$ cd deploy/lab && docker compose up -d        # stack had exited 18 min earlier, see below
+$ # enabled logall_json on both workers, restarted analysisd:
+$ docker exec shadowtracer-lab-wazuh-worker1-1 sed -i \
+    's#<logall_json>no</logall_json>#<logall_json>yes</logall_json>#' /var/ossec/etc/ossec.conf
+$ docker exec shadowtracer-lab-wazuh-worker1-1 /var/ossec/bin/shadowtracer-control restart
+$ # (same for worker2)
+$ # fired 2 real 20-connection parallel SSH invalid-user bursts against agent-ubuntu-1:
+$ docker exec shadowtracer-lab-agent-ubuntu-1-1 sh -c '
+    for i in $(seq 1 20); do
+      ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=2 "burstuser${i}@localhost" true &
+    done; wait'
+$ docker cp shadowtracer-lab-wazuh-worker2-1:/var/ossec/logs/alerts/alerts.json w2-alerts.json
+$ docker cp shadowtracer-lab-wazuh-worker2-1:/var/ossec/logs/archives/archives.json w2-archives.json
+$ # (same for worker1) - then grouped every line by its "id" field with a real Python
+$ # script (json.loads per line, not grep - the design doc's own §6 caveat about a
+$ # grep -o false-negative applies here too)
+```
+
+Result, both workers, parsed with Python (`json.loads` per line, `collections.defaultdict`
+grouping by `id`):
+
+| file | lines | distinct ids | collision groups |
+|---|---|---|---|
+| worker1 `alerts.json` (full file, includes pre-existing + new) | 86 | 86 | **0** |
+| worker2 `alerts.json` (full file, includes pre-existing + new) | 79 | 79 | **0** |
+| worker1 `archives.json` (this test window only) | 16 | 7 | 3 |
+| worker2 `archives.json` (this test window only) | 46 | 12 | 8 |
+
+Zero `alerts.json` collisions, on either node, across the full lifetime of both files in
+this lab run (165 real alert lines total) - including the exact burst shape (20 parallel
+SSH connections, same second, same agent) that produced §6's 13-line sshd collision
+group **in `archives.json`**. The corresponding `alerts.json` entries for that same burst
+(rule 5710/5712, 16 real alerts) each got a distinct `id`. Every `archives.json`
+collision group in this reproduction reflects the same two patterns §6 already
+described: manager housekeeping (`df -P`, `last -n 20`, CIS benchmark summaries) and
+non-alerting lines inside a real sshd burst (`Connection closed by invalid user ...`,
+`drop connection ... past MaxStartups` - these never individually satisfy an alert rule,
+so they only ever reach `archives.json`). **Answer to the first question: no, none of
+the collision groups appear in `alerts.json` with different content, because none of
+them appear in `alerts.json` at all.**
+
+### Finding 2 — what `id` is actually made of in 4.14.8, and why that split is not a coincidence
+
+Read directly from source (this repo vendors Wazuh 4.14.8 under `src/`, confirmed via
+`shadowtracer/docs/ALLOWLIST_WAZUH_TEXT.txt:561-567`):
+
+- The `id` field is `"<tv_sec>.<counter>"`, built by `snprintf(alert_id, 22, "%ld.%ld",
+  (long int)lf->time.tv_sec, get_global_alert_second_id())` -
+  **`src/analysisd/format/to_json.c:58`** (`alert_id` added to the JSON root at line 62).
+  This one function, `Eventinfo_to_jsonstr()` (`to_json.c:26`), formats **both**
+  alert-output and archive-output JSON - there is no separate archive formatter.
+- `counter` is a single process-wide `long` (`g_ftell_alerts`) behind an rwlock:
+  `get_global_alert_second_id()` / `set_global_alert_second_id()` -
+  **`src/analysisd/config.c:341-353`**.
+- The counter is **only ever set** in `w_writer_log_thread` (the alert-output path,
+  created exactly once: `w_create_thread(w_writer_log_thread, NULL)` at
+  **`src/analysisd/analysisd.c:1037`**), which sets it to `ftell()` of whichever real
+  alert-log stream is active - `ftell(_aflog)` if `Config.alerts_log` or
+  `Config.custom_alert_output` is on, else `ftell(_jflog)` - **immediately before**
+  writing that alert, all inside one `writer_threads_mutex` critical section
+  (**`analysisd.c:1496-1507`**). This lab's `ossec.conf` has both `alerts_log: yes` and
+  `jsonout_output: yes` (confirmed: `docker exec ... grep -n jsonout_output -A2
+  /var/ossec/etc/ossec.conf` → both `yes`), so the `ftell(_aflog)` branch is the one
+  actually exercised. Because this thread is single-instance and every real alert
+  appends a non-empty, variable-length record to that stream, `ftell()` strictly
+  increases between any two real alerts - that is the entire reason `alerts.json` ids
+  cannot collide with each other under this code path, not an incidental property of
+  the test data.
+- The archive-output path, `w_writer_thread` (created exactly once:
+  **`analysisd.c:1034`**, calling `jsonout_output_archive()` at **`analysisd.c:1480`**
+  when `Config.logall_json` is on), **never calls `set_global_alert_second_id`** -
+  confirmed by grep (`grep -n set_global_alert_second_id src/analysisd/*.c` → only
+  `analysisd.c:1500/1503/1506` inside `w_writer_log_thread`, and `testrule.c`'s unit-test
+  harness; zero hits in the archive path). Every archive-only event - anything that
+  reaches `archives.json` without itself clearing an alert rule - is formatted through
+  the same `Eventinfo_to_jsonstr()` but reads whatever counter value the **alert**
+  thread last wrote, however long ago. That stale, shared value is §6's and this
+  section's entire collision mechanism, and it is structural, not rare: `writer_queue`
+  (archives) and `writer_queue_log` (alerts) are two independent queues feeding two
+  independent single-instance threads, and only one of the two ever advances the shared
+  counter.
+
+### Finding 3 — quantified real impact on 5A's own tables: zero, today, and architecturally zero regardless of volume
+
+`shipper.py`'s `ALERTS_PATH` reads `/var/ossec/logs/alerts/alerts.json` only -
+`archives.json` is not ingested anywhere yet (that is precisely the new
+`events.archives` topic §2/§6a propose for 5C-1). Combined with Finding 1/2,
+`incident_alerts` and `events` have never had a real `(node, alert_id)` collision to
+drop, and structurally cannot while the ingestion source stays `alerts.json`-only.
+Verified on real data, same lab session, after restarting `correlate-1/2` and
+`closer-1/2` (both had crashed on a ClickHouse-not-yet-ready race from the earlier
+`docker compose up -d` - an environment startup race, unrelated to this investigation,
+fixed by `docker compose restart correlate-1 correlate-2 closer-1 closer-2`):
+
+```
+$ docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client -u shadowtracer \
+    --password '***' --query \
+    "SELECT cluster_node, count(), uniqExact(alert_id) FROM shadowtracer.events \
+     WHERE time >= now() - INTERVAL 2 MINUTE GROUP BY cluster_node"
+worker2	15	15
+
+$ docker exec shadowtracer-lab-postgres-1 psql -U shadowtracer -d shadowtracer -t -c \
+    "SELECT node, count(*), count(DISTINCT alert_id) FROM incident_alerts \
+     WHERE created_at >= now() - interval '2 minutes' GROUP BY node;"
+ worker1 |    56 |    56
+ worker2 |    79 |    79
+
+$ docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client -u shadowtracer \
+    --password '***' --query \
+    "SELECT component, count() FROM shadowtracer.dead_letter_events \
+     WHERE failed_at >= now() - INTERVAL 2 MINUTE GROUP BY component"
+(empty - zero dead-letters)
+```
+
+`count()` equals `uniqExact(alert_id)`/`count(DISTINCT alert_id)` in every row, for both
+ClickHouse (post-ReplacingMergeTree, checked both with and without `FINAL` - identical)
+and Postgres's unique constraint: nothing has ever collapsed, and nothing has been
+rejected by the constraint. This matches the full `alerts.json` scan in Finding 1
+(165/165 distinct across the whole lab lifetime, including the test bursts above).
+
+### Collision-safe identity — recommendation
+
+**No migration needed for 5A's existing identity.** `(cluster_node, alert_id)` /
+`(tenant_key, node, alert_id)` is safe today, and will stay safe for as long as the
+ingestion source is `alerts.json` only, because the *source* field is proven unique by
+Finding 2's mechanism, not by luck. The risk §6 already found and designed around
+(`(cluster.node, id)` as a candidate-narrowing filter, exact `full_log` match to
+disambiguate, §6a) is real but **scoped entirely to the new `events.archives` path**
+5C-1 proposes - it does not reach back into anything 5A built or anything already in
+`incident_alerts`/`events` today. Concretely: **do not change `incident_alerts` or
+`events`'s identity columns or constraints as part of 5C-1** - keep §6a's
+`full_log`-narrowing design for the archives side exactly as written, and apply it only
+to the new archive-sourced rows when 5C-1 builds `events.archives`.
+
+Two residual, unretested edge cases, flagged as theoretical (not reproduced, marked
+honestly rather than silently assumed away):
+- If `ossec.conf` ever ran with `alerts_log: no` and `jsonout_output: yes` alone, the
+  same single-thread/`ftell(_jflog)` argument applies (same code, same mutex) - not
+  separately tested live, since this lab's config exercises the `_aflog` branch.
+- After a manager restart, `_aflog`/`_jflog` reopen in append mode at the existing
+  file's end-of-file offset, not zero - a same-second collision would need that
+  reopened `ftell()` to exactly match a completely unrelated alert's offset from a
+  different moment. Not observed in this or the original investigation; astronomically
+  unlikely given `ftell` values are real byte offsets into a growing file, not noted as
+  a real risk.
+
+### Lab-tenant pollution (disclosed, not cleaned up here per "report before changing anything")
+
+The two 20-connection SSH bursts used to reproduce Finding 1 ran against the same shared
+lab tenant (`TENANT_KEY` in `deploy/lab/.env`) - there is no dedicated test tenant yet
+(that is §10's proposed 5C-0, not built). This is the same test-traffic-into-the-real-tenant
+pattern `deploy/lab/purge-2026-10-09-lab-tenant-test-incidents/` was already created to
+clean up once. New test incidents from this investigation are in the real lab tenant's
+`incidents`/`incident_alerts`/`fingerprint_occurrences` tables now; **left as-is**,
+since purging is a change and this section's instructions were to report findings, not
+act on them. A purge pass (same shape as the existing `purge-2026-10-09-...` backup) is
+one more argument for pulling 5C-0 forward, as §10 already proposes.
