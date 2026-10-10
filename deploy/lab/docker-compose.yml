@@ -76,6 +76,22 @@ x-shipper-env: &shipper-env
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
   CLICKHOUSE_DATABASE: shadowtracer
 
+# Phase 5C Step 0, item 3: the dedicated test manager's shipper - same
+# shape as x-shipper-env, deliberately NOT sharing it, since the one field
+# that must differ is TENANT_ID (TEST_TENANT_KEY, not TENANT_KEY) and a
+# shared anchor would make that too easy to accidentally collapse back to
+# one tenant in a future edit.
+x-shipper-test-env: &shipper-test-env
+  TENANT_ID: ${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env, see .env.example}
+  ALERTS_PATH: /var/ossec/logs/alerts/alerts.json
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_TOPIC: shadowtracer.events.raw
+  OFFSET_FILE: /offsets/offsets.json
+  CLICKHOUSE_HOST: ch-clickhouse-1
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+  CLICKHOUSE_DATABASE: shadowtracer
+
 # 2 writer replicas, same consumer group - Kafka splits the topic's
 # partitions between them (VERIFY in PHASE4_CONSOLE.md).
 x-writer-env: &writer-env
@@ -204,6 +220,34 @@ services:
       lab:
         ipv4_address: 172.28.0.12
 
+  # Phase 5C Step 0, item 3: dedicated test manager - NOT pooled behind
+  # shadowtracer-lb (only worker1/worker2 are), so only an agent explicitly
+  # pointed at this hostname (agent-ubuntu-1, below) ever lands here. Its
+  # shipper (shipper-worker-test) ships under TEST_TENANT_KEY, never
+  # TENANT_KEY - this is what keeps smoke-test.sh's real SSH-burst and
+  # hostile-input traffic out of the main lab tenant.
+  wazuh-worker-test:
+    build: *manager-build
+    image: shadowtracer-lab/manager:local
+    hostname: wazuh-worker-test
+    init: true
+    restart: unless-stopped
+    environment:
+      CLUSTER_NODE_TYPE: worker
+      CLUSTER_NODE_NAME: worker-test
+      CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
+      ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+    volumes:
+      - ./entrypoint-manager.sh:/entrypoint.sh:ro
+      - ./healthcheck-manager.sh:/healthcheck.sh:ro
+      - ./alerts-worker-test:/var/ossec/logs/alerts
+    depends_on:
+      wazuh-master:
+        condition: service_healthy
+    networks:
+      lab:
+        ipv4_address: 172.28.0.14
+
   # Agent event traffic (1514) load balancer. Kept running per the Step 2
   # spec, but agent traffic bypasses it - see the note above x-agent-env.
   shadowtracer-lb:
@@ -231,17 +275,20 @@ services:
     restart: unless-stopped
     environment:
       <<: *agent-env
-      # Phase 3 follow-up 3: through shadowtracer-lb now that the real bug
-      # (OS_IsValidIP()/isSingleHost()) is fixed - no per-agent fallback
-      # <server> needed any more, HAProxy's own health check routes around
-      # a dead worker without the agent having to do anything.
-      AGENT_MANAGER_DATA_HOST: shadowtracer-lb
+      # Phase 5C Step 0, item 3: pointed directly at the dedicated test
+      # manager, NOT shadowtracer-lb - this is the one agent smoke-test.sh's
+      # real SSH-brute-force check uses, and it must never land on worker1
+      # or worker2 (the main lab tenant's shippers) by way of the LB's
+      # non-sticky reassignment (see PHASE5C_SIGMA.md §9/§12). Enrollment
+      # still goes through wazuh-master (MANAGER_ENROLL_HOST, in
+      # *agent-env, unchanged) - only live event-data routing changes here.
+      AGENT_MANAGER_DATA_HOST: wazuh-worker-test
     volumes: &agent-config-mounts
       - ./entrypoint-agent.sh:/entrypoint.sh:ro
       - ./healthcheck-agent.sh:/healthcheck.sh:ro
     depends_on:
-      shadowtracer-lb:
-        condition: service_started
+      wazuh-worker-test:
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.21
@@ -512,6 +559,32 @@ services:
       lab:
         ipv4_address: 172.28.0.39
 
+  # Phase 5C Step 0, item 3: ships wazuh-worker-test's alerts under
+  # TEST_TENANT_KEY (x-shipper-test-env), never TENANT_KEY - the only
+  # shipper the dedicated test agent's traffic ever reaches.
+  shipper-worker-test:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ingest.Dockerfile
+    image: shadowtracer-lab/ingest:local
+    hostname: shipper-worker-test
+    command: ["python3", "run_shipper.py"]
+    restart: unless-stopped
+    environment:
+      <<: *shipper-test-env
+      MANAGER_NAME: wazuh-worker-test
+    volumes:
+      - ./alerts-worker-test:/var/ossec/logs/alerts:ro
+      - shipper-worker-test-offsets:/offsets
+    depends_on:
+      wazuh-worker-test:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      lab:
+        ipv4_address: 172.28.0.46
+
   writer-1:
     build:
       context: ../..
@@ -693,3 +766,4 @@ volumes:
   postgres-data:
   shipper-worker1-offsets:
   shipper-worker2-offsets:
+  shipper-worker-test-offsets:

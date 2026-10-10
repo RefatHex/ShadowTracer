@@ -70,8 +70,8 @@ docker compose up -d
 # known, documented glibc bug (PHASE1_FINDINGS.md Step 2) and never go
 # healthy - that's not a smoke-test regression, so --wait (which waits on
 # every service) would always time out here.
-for svc in wazuh-master wazuh-worker1 wazuh-worker2 agent-ubuntu-1 agent-ubuntu-2 \
-    shipper-worker1 shipper-worker2 writer-1 writer-2 \
+for svc in wazuh-master wazuh-worker1 wazuh-worker2 wazuh-worker-test agent-ubuntu-1 agent-ubuntu-2 \
+    shipper-worker1 shipper-worker2 shipper-worker-test writer-1 writer-2 \
     correlate-1 correlate-2 closer-1 closer-2; do
     cid="$(docker compose ps -q "$svc")"
     waited=0
@@ -133,6 +133,16 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
+# Phase 5C Step 0, item 3: baseline, checked again at the very end of this
+# script - the main lab tenant must receive zero rows from any of the test
+# traffic this script generates (the SSH burst and the hostile-input
+# batch below both now ship under TEST_TENANT_KEY, never TENANT_KEY).
+main_tenant_incidents_before=0
+if [ -n "${TENANT_KEY:-}" ]; then
+    main_tenant_incidents_before="$(docker exec shadowtracer-lab-postgres-1 env PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+        "SELECT count(*) FROM incidents WHERE tenant_key = '$TENANT_KEY'" | tr -d '[:space:]')"
+fi
+
 check "caddy reachable (TLS)" \
     "curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/health | grep -q '\"status\":\"ok\"'"
 check "console readiness (Postgres/ClickHouse/Kafka all reachable)" \
@@ -143,21 +153,25 @@ check "console readiness (Postgres/ClickHouse/Kafka all reachable)" \
 # whole point (Phase 4 Step 7). The shipper/writer are compose services now
 # (Phase 4 follow-up 2, not host processes) - this script starts nothing
 # itself; if the pipeline isn't running (or isn't healthy - checked in the
-# wait loop above), the alert simply never arrives and this fails. Needs
-# SMOKE_TEST_ADMIN_EMAIL/PASSWORD in .env for an admin user already
-# created via `python cli.py create-admin` - this script never creates one
-# itself (no default admin, Step 2).
-if [ -z "${SMOKE_TEST_ADMIN_EMAIL:-}" ] || [ -z "${SMOKE_TEST_ADMIN_PASSWORD:-}" ]; then
-    echo "SKIP: end-to-end alert test (set SMOKE_TEST_ADMIN_EMAIL/PASSWORD in .env - create that user first with: cd ../../shadowtracer/console/backend && python cli.py create-admin --tenant lab --email <email>)"
+# wait loop above), the alert simply never arrives and this fails.
+#
+# Phase 5C Step 0, item 3: agent-ubuntu-1 is pointed at the dedicated test
+# manager (wazuh-worker-test), never worker1/worker2, so this burst's real
+# alert lands in TEST_TENANT_KEY - logging in as the main lab tenant's
+# admin would never see it. Needs TEST_TENANT_ADMIN_EMAIL/PASSWORD in .env
+# for an admin already created via `python cli.py create-admin` - this
+# script never creates one itself (no default admin, Step 2).
+if [ -z "${TEST_TENANT_ADMIN_EMAIL:-}" ] || [ -z "${TEST_TENANT_ADMIN_PASSWORD:-}" ]; then
+    echo "SKIP: end-to-end alert test (set TEST_TENANT_ADMIN_EMAIL/PASSWORD in .env - create that user first with: cd ../../shadowtracer/console/backend && python cli.py create-admin --tenant shadowtracer-lab-test --email <email>)"
 else
     echo "--- end-to-end: login, SSH brute force, alert through the API ---"
     login_resp="$(curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/auth/login \
         -X POST -H "Content-Type: application/json" \
-        -d "{\"email\":\"$SMOKE_TEST_ADMIN_EMAIL\",\"password\":\"$SMOKE_TEST_ADMIN_PASSWORD\"}")"
+        -d "{\"email\":\"$TEST_TENANT_ADMIN_EMAIL\",\"password\":\"$TEST_TENANT_ADMIN_PASSWORD\"}")"
     access_token="$(echo "$login_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)"
 
     if [ -z "$access_token" ]; then
-        echo "FAIL: could not log in as $SMOKE_TEST_ADMIN_EMAIL ($login_resp)"
+        echo "FAIL: could not log in as $TEST_TENANT_ADMIN_EMAIL ($login_resp)"
         fail=1
     else
         marker="smoketest$(date +%s)"
@@ -184,10 +198,13 @@ echo "--- hostile input: no single event may stop the pipeline ---"
 # category the pipeline must survive without crashing (an invalid
 # timestamp, an out-of-range timestamp, a missing required field, a wrong
 # type, a 10 MB full_log, invalid UTF-8, deeply nested JSON, and an empty
-# object) - straight into shipper-worker1's real, tailed alerts.json, the
-# same file Wazuh itself writes to. Proves: every good event still lands
-# in ClickHouse and an incident, every bad one is dead-lettered (not
+# object) - straight into shipper-worker-test's real, tailed alerts.json,
+# the same file Wazuh itself writes to. Proves: every good event still
+# lands in ClickHouse and an incident, every bad one is dead-lettered (not
 # silently dropped, not crashing anything), and no container restarts.
+# Phase 5C Step 0, item 3: this used to inject into alerts-worker1 (the
+# main lab tenant's manager) - moved to alerts-worker-test so this script
+# never writes a single row into the main tenant's data.
 hostile_marker="hostile$(date +%s)"
 hostile_agent="hostile-agent-${hostile_marker}"
 
@@ -221,7 +238,7 @@ print(total)
 dlt_offset_before="$(dlt_watermark_sum)"
 
 restart_counts_before=()
-pipeline_services="shipper-worker1 shipper-worker2 writer-1 writer-2 correlate-1 correlate-2"
+pipeline_services="shipper-worker-test shipper-worker2 writer-1 writer-2 correlate-1 correlate-2"
 for svc in $pipeline_services; do
     cid="$(docker compose ps -q "$svc")"
     restart_counts_before+=("$(docker inspect -f '{{.RestartCount}}' "$cid")")
@@ -240,8 +257,8 @@ def good(suffix):
         "timestamp": "2026-10-04T12:00:00.000+0000",
         "rule": {"id": "5710", "level": 5, "description": "sshd failure", "groups": ["sshd"]},
         "agent": {"id": agent, "name": agent, "ip": "10.0.0.1"},
-        "manager": {"name": "wazuh-worker1"},
-        "cluster": {"node": "worker1"},
+        "manager": {"name": "wazuh-worker-test"},
+        "cluster": {"node": "worker-test"},
         "id": f"{marker}.good.{suffix}",
         "data": {"srcip": "9.9.9.9"},
         "decoder": {"name": "sshd"},
@@ -292,8 +309,8 @@ PYEOF
 printf '\xff\xfe{"bad": "invalid utf-8"}\n' >> "$hostile_batch_file"
 
 n_lines="$(wc -l < "$hostile_batch_file")"
-echo "injecting $n_lines lines (2 good + 8 hostile) into shipper-worker1's real alerts.json..."
-docker run --rm -i -v "$(pwd)/alerts-worker1:/data" busybox sh -c 'cat >> /data/alerts.json' < "$hostile_batch_file"
+echo "injecting $n_lines lines (2 good + 8 hostile) into shipper-worker-test's real alerts.json..."
+docker run --rm -i -v "$(pwd)/alerts-worker-test:/data" busybox sh -c 'cat >> /data/alerts.json' < "$hostile_batch_file"
 rm -f "$hostile_batch_file"
 
 good_count=0
@@ -362,6 +379,13 @@ for svc in $pipeline_services; do
     i=$((i + 1))
 done
 check "no pipeline container restarted" "[ \"$restart_ok\" = 1 ]"
+
+if [ -n "${TENANT_KEY:-}" ]; then
+    main_tenant_incidents_after="$(docker exec shadowtracer-lab-postgres-1 env PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+        "SELECT count(*) FROM incidents WHERE tenant_key = '$TENANT_KEY'" | tr -d '[:space:]')"
+    check "main lab tenant received zero new incidents from this run ($main_tenant_incidents_before -> $main_tenant_incidents_after)" \
+        "[ \"$main_tenant_incidents_after\" = \"$main_tenant_incidents_before\" ]"
+fi
 
 echo "---"
 if [ "$fail" -eq 0 ]; then

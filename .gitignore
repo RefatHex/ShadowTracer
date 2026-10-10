@@ -183,3 +183,4 @@ dist/
 .venv/
 deploy/lab/alerts-worker1/
 deploy/lab/alerts-worker2/
+deploy/lab/alerts-worker-test/

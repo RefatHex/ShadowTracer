@@ -97,7 +97,7 @@ produce_probe() {
     # $1 = agent id. Produces one real alert for it and prints the
     # partition confluent_kafka's producer actually assigned it to -
     # read off the real delivery report, never computed/guessed locally.
-    "$PY" - "$KAFKA_BOOTSTRAP" "$TENANT_KEY" "$1" <<'PYEOF'
+    "$PY" - "$KAFKA_BOOTSTRAP" "$TEST_TENANT_KEY" "$1" <<'PYEOF'
 import json, sys, time
 from confluent_kafka import Producer
 
@@ -192,7 +192,7 @@ run_cycle() {
 
     echo "--- steady stream of $N_STREAM alerts (kill issued mid-stream, no pause) ---"
     local stream_output
-    stream_output="$("$PY" - "$KAFKA_BOOTSTRAP" "$TENANT_KEY" "$agent" "$victim_name" "$N_STREAM" "$KILL_AFTER" "$RATE_HZ" \
+    stream_output="$("$PY" - "$KAFKA_BOOTSTRAP" "$TEST_TENANT_KEY" "$agent" "$victim_name" "$N_STREAM" "$KILL_AFTER" "$RATE_HZ" \
         127.0.0.1 5432 "$POSTGRES_USER" "$POSTGRES_PASSWORD" "$POSTGRES_DB" <<'PYEOF'
 import json, sys, time, subprocess
 import psycopg2
@@ -371,9 +371,9 @@ PYEOF
     echo "--- cleanup: removing this run's chaos-test incidents ---"
     docker exec shadowtracer-lab-postgres-1 env PGPASSWORD="$POSTGRES_PASSWORD" \
         psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
-        DELETE FROM incident_alerts WHERE tenant_key = '$TENANT_KEY'
-            AND incident_id IN (SELECT id FROM incidents WHERE tenant_key = '$TENANT_KEY' AND agent_id LIKE 'chaos-${marker}-%');
-        DELETE FROM incidents WHERE tenant_key = '$TENANT_KEY' AND agent_id LIKE 'chaos-${marker}-%';
+        DELETE FROM incident_alerts WHERE tenant_key = '$TEST_TENANT_KEY'
+            AND incident_id IN (SELECT id FROM incidents WHERE tenant_key = '$TEST_TENANT_KEY' AND agent_id LIKE 'chaos-${marker}-%');
+        DELETE FROM incidents WHERE tenant_key = '$TEST_TENANT_KEY' AND agent_id LIKE 'chaos-${marker}-%';
     " >/dev/null
 }
 
