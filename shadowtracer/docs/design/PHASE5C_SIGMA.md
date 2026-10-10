@@ -417,11 +417,15 @@ withdrawn - that was a real mistake, not a simplification.
 other.** This is a *correlation/ingestion-time* concern, strictly separate from
 fingerprinting, and it reuses an existing mechanism rather than inventing one.
 
-Checked on real paired lab events (now that `logall_json` is live for the
-re-measurement, §4): a matched event's Wazuh-internal `id` field
-(`<unix_timestamp>.<counter>`, the same field Phase 3's `(cluster.node, id)` alert
-identity decision in `DECISIONS.md` already keys off) is **identical** between its
-`alerts.json` line and its `archives.json` line - confirmed directly:
+**Withdrawn in full: `id` as an event-linking key, including the "narrow by id, then
+confirm with full_log" compromise below.** That compromise was this doc's own previous
+position - restating it before withdrawing it, rather than quietly deleting it, because
+the reasoning for why it's wrong is the useful part.
+
+The original check (now that `logall_json` is live for the re-measurement, §4) found one
+matched event where the Wazuh-internal `id` field (`<unix_timestamp>.<counter>`, the
+same field Phase 3's `(cluster.node, id)` alert identity decision in `DECISIONS.md` keys
+off) was **identical** between its `alerts.json` line and its `archives.json` line:
 
 ```
 # same underlying sshd auth-failure event, both files, same id:
@@ -429,38 +433,88 @@ alerts.json:   "id":"1791554012.107653"  rule.id=5710 groups=[syslog,sshd,...]
 archives.json: "id":"1791554012.107653"  (same event, same timestamp)
 ```
 
-**Recommendation: reuse `(cluster.node, id)` - the project's existing alert identity -
-as the event-linking key, carried through on both the `events.raw` and the new
-`events.archives` envelopes.** No new mechanism, no new schema field category - this is
-exactly the kind of reuse the first draft should have reached for instead of inventing a
-raw-event-offset concept.
+That led to a first recommendation (reuse `(cluster.node, id)` directly), then a
+revision after finding 22 real `archives.json`-internal collision groups (a burst of
+events sharing one stale `id` - see Step 0a, §11, for the confirmed root cause: the
+archive-writer thread never advances the counter the alert-writer thread does), landing
+on "`(cluster.node, id)` narrows to a candidate set, exact `full_log` match picks the
+right one."
 
-**A real caveat found while verifying this on live data - bigger than expected, and
-reported in full rather than minimized:** `id` is **not** reliably unique, and not only
-for internal housekeeping noise. Checked exhaustively against a real archives.json
-snapshot (parsed with Python, not grep, after the first attempt at this check silently
-miscounted due to a `grep -o` first-match bug): **22 distinct `id` values each cover more
-than one archive line**, and this is not limited to `monitord` batches like `df -P`/
-`last -n 20` (which do show the same pattern, e.g. 7 different filesystem lines all
-carrying `"id":"1791568437.0"`). It also happens for genuine, real **sshd** events: one
-real synthetic-load burst produced a group of **13 distinct real sshd log lines**
-(`Invalid user ...` / `Connection closed by invalid user ...`, different ports, different
-PIDs) **all sharing the single id `1791554012.106602`.** This matters more than a
-monitord-only caveat would, because a burst of related events sharing one `id` is
-*exactly* the shape a real attack (e.g. a brute-force burst) produces - precisely the
-case where Sigma/Wazuh event-linking needs to be correct.
+**That compromise is also wrong, proven on real paired data, not assumed.** Step 0a's
+follow-up (re-run here against a fresh real burst: 15 parallel SSH invalid-user
+connections against `agent-ubuntu-1`) matched every `alerts.json` line to its
+`archives.json` twin using `(cluster.node, agent.name, timestamp, full_log)` - a key with
+no `id` in it at all - then separately compared the two matched lines' `id` fields:
 
-**`(cluster.node, id)` alone is therefore a candidate-narrowing filter, not a unique join
-key, whenever events arrive in a burst.** The real data does offer a clean fix at no
-extra schema cost, though: across all 22 real collision groups found, **`full_log` was
-unique within every group - zero exact duplicates**. Recommendation: event-linking uses
-`(cluster.node, id)` to narrow to a candidate set, then an exact `full_log` string match
-to pick the specific archives-side line that corresponds to a given alerts-side line.
-Both fields already exist on both envelopes today - no new field, no offset, no identity
-added to anything that reaches `fingerprint.py`. This is real, tested-on-real-data
-behavior, not a theoretical fallback; the first pass at this caveat (an earlier version
-of this sentence) understated it as a monitord-only rare case before the fuller sshd-burst
-check above was run - correcting that here rather than quietly fixing it upstream.
+```
+$ python3 -I match.py w2-alerts.json w2-archives.json
+alerts.json lines: 92
+archives.json lines: 122
+alerts with an exact (node,agent,timestamp,full_log) match in archives: 45
+  -> id EQUAL:     24
+  -> id DIFFERENT: 21
+alerts with NO archive match on that key: 47
+
+=== examples: id DIFFERENT ===
+  alert.id=1791614565.33259  archive.id=1791614565.35868  full_log='Oct 10 06:42:44 agent-ubuntu-1 sshd[1146]: Invalid user burstuser16 from ::1 port 44774'
+  alert.id=1791614565.33781  archive.id=1791614565.35868  full_log='Oct 10 06:42:44 agent-ubuntu-1 sshd[1151]: Invalid user burstuser4 from ::1 port 44826'
+  alert.id=1791614565.38045  archive.id=1791614565.38567  full_log='Oct 10 06:42:44 agent-ubuntu-1 sshd[1152]: Invalid user burstuser12 from ::1 port 44858'
+```
+
+**Of the 45 alert/archive pairs independently confirmed to be the same real event (exact
+match on node, agent, timestamp, and the full raw log line), only 24 (53%) shared an
+`id` - 21 (47%) had two completely different `id` values for the identical event.** This
+is worse than the 22-collision-group finding: it's not just that `id` repeats across
+*different* events in a burst - the SAME event's own two copies (alert-side and
+archive-side) routinely disagree with each other. The mechanism, per §11's Finding 2,
+fully explains why: the alert-writer thread and the archive-writer thread are two
+independent single-instance threads pulling from two independent queues
+(`writer_queue_log` vs `writer_queue`); nothing serializes "write this event's alert
+copy" against "write this event's archive copy" relative to the shared counter, so
+whichever one happens to run when (which varies with scheduling, not with the event
+itself) determines the counter value baked into that copy's `id`. The one matching
+example found in the first pass (`1791554012.107653`) was a coincidence, not evidence of
+a real linkage guarantee - the 47%-mismatch rate on this burst shows the coincidence rate
+plainly. (The 47 alerts with no exact-key archive match in this snapshot are mostly
+pre-`logall_json` lines and manager-internal synthetic alerts with no raw line to
+archive, e.g. `"ossec: Agent started: ..."` - not re-audited line-by-line, flagged as an
+**assumption**, not confirmed for every one of the 47.)
+
+**Revised recommendation, with no `id` anywhere in it:**
+
+- **Archive event identity (for `events.archives`'s own row identity, replacing any use
+  of Wazuh's `id`): node + file identity + byte offset.** The shipper already tracks
+  `(inode, offset)` per tailed file today, to survive rotation correctly
+  (`shadowtracer/ingest/shadowtracer_ingest/shipper.py:60-130`, `TailSource` - its own
+  docstring: "a log rotation that replaces the file at the same path gets a new inode,
+  and resuming at the old byte offset against the new file [would be wrong]"). What's
+  dead-lettered today only carries `path:byte_offset`
+  (`shipper.py:207,243` - `source_location=f"{source.path}:{byte_offset}"`), missing the
+  inode component that same file already computes - a real gap to close, not a new
+  mechanism to build: extend `source_location` (or add a sibling field carried on the
+  Kafka envelope) to `f"{source.path}:{source.inode}:{byte_offset}"` and use that triple,
+  plus `cluster.node`, as `events.archives`'s row identity. **This part is proposed, not
+  tested** - no code reads or writes an inode-qualified identity today; marked as an
+  assumption pending implementation and a real rotation test (a manager rotating
+  `archives.json` mid-ingest, confirming the shipper's own offset file and this identity
+  agree on which file generation a given row came from).
+- **Alert-to-archive linking (how a Sigma hit and a Wazuh alert on the same raw event
+  find each other): node + agent + timestamp + hash(full_log).** Directly validated by
+  the match script above - `(cluster.node, agent.name, timestamp, full_log)` found the
+  correct twin for every one of the 45 pairs with zero ambiguity (no key collided across
+  two different real events in this test), and `full_log` is byte-identical between an
+  alert and its archive twin in every matched pair, so hashing it (rather than storing
+  the full string a second time) is a size optimization, not a weaker check - **not yet
+  tested for a hash collision specifically**, so that half is marked as an
+  **assumption** (sha256 or similar, collision risk treated as negligible, consistent
+  with how `raw_event_sha256` already treats hashing elsewhere in this codebase -
+  `shadowtracer/ingest/schema/events_schema.sql` dead-letter table). Timestamp here means
+  the Wazuh-formatted `timestamp` field (millisecond precision), not `id`'s truncated
+  `tv_sec` - confirmed present and identical between twins in every one of the 45 real
+  matched pairs above.
+- **No fingerprint impact** - this entire correction stays inside the event-linking
+  mechanism; `fingerprint.py` still never sees an `id`, an offset, or a hash, per this
+  section's opening paragraph.
 
 **(b) Fingerprint compatibility - one vocabulary from either source.** The real gap is
 narrower than the first draft implied:
@@ -491,9 +545,10 @@ narrower than the first draft implied:
   doesn't match a co-occurring Wazuh alert's, they could end up correlated into
   *different* incidents before the event-linking merge ever gets a chance to combine
   them. 5C-4 needs to either merge at a point that happens before correlation-basis
-  assignment, or treat a confirmed `(cluster.node, id)` link as an override to the normal
-  correlation basis. Flagged as a real design decision for that step, not pre-resolved
-  here.
+  assignment, or treat a confirmed `(node, agent, timestamp, full_log)` link (§6a's
+  current linking key - no longer `id`, see §6a's correction) as an override to the
+  normal correlation basis. Flagged as a real design decision for that step, not
+  pre-resolved here.
 
 **Alert shape (unchanged from the first draft, still correct):** `rule_id` (Sigma UUID),
 `title`, `level`, `mitre_ids` (normalized per above), `author` (DRL 1.1 attribution,
@@ -928,13 +983,20 @@ rejected by the constraint. This matches the full `alerts.json` scan in Finding 
 **No migration needed for 5A's existing identity.** `(cluster_node, alert_id)` /
 `(tenant_key, node, alert_id)` is safe today, and will stay safe for as long as the
 ingestion source is `alerts.json` only, because the *source* field is proven unique by
-Finding 2's mechanism, not by luck. The risk §6 already found and designed around
-(`(cluster.node, id)` as a candidate-narrowing filter, exact `full_log` match to
-disambiguate, §6a) is real but **scoped entirely to the new `events.archives` path**
-5C-1 proposes - it does not reach back into anything 5A built or anything already in
-`incident_alerts`/`events` today. Concretely: **do not change `incident_alerts` or
-`events`'s identity columns or constraints as part of 5C-1** - keep §6a's
-`full_log`-narrowing design for the archives side exactly as written, and apply it only
+Finding 2's mechanism, not by luck. The risk §6 already found and designed around (at
+the time this section was written: `(cluster.node, id)` as a candidate-narrowing
+filter, exact `full_log` match to disambiguate, §6a) is real but **scoped entirely to
+the new `events.archives` path** 5C-1 proposes - it does not reach back into anything 5A
+built or anything already in `incident_alerts`/`events` today. **Update after this
+section was written:** §6a's `id`-based narrowing filter has since been withdrawn
+entirely (not just the collision case) - a direct pair-matched test found the same real
+event's alert-side and archive-side `id` disagreeing 47% of the time even when
+correctly matched by other fields, not just colliding with unrelated events. §6a now
+uses `(node, agent, timestamp, full_log)` for linking and `(node, file identity, byte
+offset)` for archive identity, with no `id` anywhere. This section's own conclusion is
+unaffected either way: **do not change `incident_alerts` or `events`'s identity columns
+or constraints** - keep §6a's current design for the archives side exactly as written
+there, and apply it only
 to the new archive-sourced rows when 5C-1 builds `events.archives`.
 
 Two residual, unretested edge cases, flagged as theoretical (not reproduced, marked
