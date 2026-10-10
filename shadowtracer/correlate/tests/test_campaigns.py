@@ -209,3 +209,75 @@ def test_campaign_membership_is_idempotent_on_replay(db, ch_client):
         select(campaign_incidents).where(campaign_incidents.c.incident_id == id1)
     ).all()
     assert len(memberships) == 1, "re-linking the same incident must not create a duplicate membership row"
+
+
+def test_reverse_close_order_25h_apart_still_not_linked(db, ch_client):
+    """Phase 5C Step 0b: closer.py processes incidents in close-eligibility
+    order, not event-time order - the chronologically EARLIER incident can
+    close AFTER the later one already created the campaign. Before the
+    fix, the window check's signed subtraction made this always link
+    regardless of how far apart the two really were (a negative delta is
+    always <= a positive window) - this proves 25h apart still does NOT
+    link even when the later incident closes first."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    agent = f"agent-{uuid.uuid4().hex[:8]}"
+    ip = "203.0.113.60"
+    earlier = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
+    later = earlier + datetime.timedelta(hours=25)  # past the 24h window
+
+    # The LATER incident is inserted and closed FIRST.
+    id_later = _insert_incident(
+        db, tenant, agent, first_seen=later, last_seen=later + datetime.timedelta(minutes=2), source_ips=[ip],
+    )
+    closed_later = _close_one(db, ch_client)
+    assert closed_later == id_later
+    campaign_later = _campaign_for_incident(db, id_later)
+    assert campaign_later["incident_count"] == 1
+
+    # The EARLIER incident closes second - must NOT link into the campaign
+    # the later one already created, even though it's chronologically
+    # "before" that campaign's whole span.
+    id_earlier = _insert_incident(
+        db, tenant, agent, first_seen=earlier, last_seen=earlier + datetime.timedelta(minutes=2), source_ips=[ip],
+    )
+    closed_earlier = _close_one(db, ch_client)
+    assert closed_earlier == id_earlier
+    campaign_earlier = _campaign_for_incident(db, id_earlier)
+
+    assert campaign_earlier["id"] != campaign_later["id"], \
+        "25h apart, reverse close order - must NOT be the same campaign"
+    campaign_later_after = db.execute(
+        select(campaigns).where(campaigns.c.id == campaign_later["id"])
+    ).mappings().one()
+    assert campaign_later_after["incident_count"] == 1, "the first campaign must be untouched"
+
+
+def test_reverse_close_order_within_window_links_and_extends_first_seen_backward(db, ch_client):
+    """Same reverse-close-order shape as above, but within the 24h window -
+    must link, AND the campaign's first_seen must extend backward to the
+    earlier incident's own first_seen, not stay stuck at the later
+    incident's (whichever one happened to create the campaign row)."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    agent = f"agent-{uuid.uuid4().hex[:8]}"
+    ip = "203.0.113.61"
+    earlier = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
+    later = earlier + datetime.timedelta(hours=23)  # within the 24h window
+
+    id_later = _insert_incident(
+        db, tenant, agent, first_seen=later, last_seen=later + datetime.timedelta(minutes=2), source_ips=[ip],
+    )
+    closed_later = _close_one(db, ch_client)
+    campaign_later = _campaign_for_incident(db, id_later)
+
+    id_earlier = _insert_incident(
+        db, tenant, agent, first_seen=earlier, last_seen=earlier + datetime.timedelta(minutes=2), source_ips=[ip],
+    )
+    closed_earlier = _close_one(db, ch_client)
+    campaign_earlier = _campaign_for_incident(db, id_earlier)
+
+    assert campaign_earlier["id"] == campaign_later["id"], "23h apart - must link into the same campaign"
+    assert campaign_earlier["incident_count"] == 2
+    assert campaign_earlier["first_seen"] == earlier, \
+        "campaign's first_seen must extend backward to the earlier incident, not stay at the later one's"

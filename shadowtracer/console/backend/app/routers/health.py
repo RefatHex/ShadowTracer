@@ -25,14 +25,17 @@ def health_ready(response: Response, db: Session = Depends(get_db), settings=Dep
 @router.get("/health/detail")
 def health_detail(settings=Depends(get_settings), _=Depends(ADMIN_ONLY)):
     """Admin-only: shipper lag per node, writer consumer lag, last event
-    time per tenant, dead-lettered event counts per tenant, and per-host
+    time per tenant, dead-lettered event counts per tenant, per-host
     ClickHouse replica health (dead-letter-ClickHouse incident,
-    2026-10-08 - see clickhouse_replica_health's own docstring) -
-    operational detail, not something every logged-in user should see."""
+    2026-10-08 - see clickhouse_replica_health's own docstring), and
+    per-manager clock skew (Phase 5C Step 0b - see clock_skew_per_node's
+    own docstring) - operational detail, not something every logged-in
+    user should see."""
     return {
         "shipper_lag": health_checks.shipper_lag_per_node(settings),
         "writer_consumer_lag": health_checks.writer_consumer_lag(settings),
         "last_event_time_per_tenant": health_checks.last_event_time_per_tenant(settings),
         "dead_letter_counts": health_checks.dead_letter_counts_per_tenant(settings),
         "clickhouse_replica_health": health_checks.clickhouse_replica_health(settings),
+        "clock_skew_per_node": health_checks.clock_skew_per_node(settings),
     }

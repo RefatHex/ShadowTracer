@@ -226,3 +226,60 @@ def test_sequence_detection_is_per_tenant(db, ch_client):
 
     assert _firing_count(ch_client, tenant_a, BRUTE_FORCE_SEQ_ID) == 1
     assert _firing_count(ch_client, tenant_b, BRUTE_FORCE_SEQ_ID) == 0
+
+
+def test_step1_chronologically_before_step0_by_more_than_lateness_does_not_fire(db, ch_client):
+    """Phase 5C Step 0b: step 0 matches at t=now. A step-1-matching alert
+    then arrives (in CONSUMPTION order) whose own alert_time is 60s
+    BEFORE step 0's - well past the 30s default lateness window. This is
+    the out-of-order-by-event-time case (e.g. the LB moved the agent to
+    another worker and that worker's backlog is being replayed) - it
+    must be a no-op, not a false completion. A correctly-ordered step 1
+    afterward must still complete the sequence normally."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    agent = f"agent-{uuid.uuid4().hex[:8]}"
+    ip = "203.0.113.56"
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    _process(db, ch_client, _event(
+        tenant=tenant, agent_id=agent, src_ip=ip, rule_groups=["authentication_failed"], time=now,
+    ))
+
+    # Matches step_groups[1], but its alert_time is 60s BEFORE step 0's -
+    # out of order by event time, not just delayed in Kafka.
+    _process(db, ch_client, _event(
+        tenant=tenant, agent_id=agent, src_ip=ip, rule_groups=["authentication_success"],
+        time=now - datetime.timedelta(seconds=60),
+    ))
+    assert _firing_count(ch_client, tenant, BRUTE_FORCE_SEQ_ID) == 0, \
+        "an alert chronologically before the step it would complete must not fire anything"
+
+    # The real, correctly-ordered step 1 still completes it afterward.
+    _process(db, ch_client, _event(
+        tenant=tenant, agent_id=agent, src_ip=ip, rule_groups=["authentication_success"],
+        time=now + datetime.timedelta(seconds=30),
+    ))
+    assert _firing_count(ch_client, tenant, BRUTE_FORCE_SEQ_ID) == 1, \
+        "the genuinely-ordered completion must still fire after the rejected one"
+
+
+def test_step1_within_lateness_window_still_fires(db, ch_client):
+    """A step-1 alert whose alert_time is slightly BEFORE step 0's - but
+    within the 30s default lateness window (clock-skew/jitter tolerance,
+    not a real ordering violation) - must still complete the sequence."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    agent = f"agent-{uuid.uuid4().hex[:8]}"
+    ip = "203.0.113.57"
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    _process(db, ch_client, _event(
+        tenant=tenant, agent_id=agent, src_ip=ip, rule_groups=["authentication_failed"], time=now,
+    ))
+    _process(db, ch_client, _event(
+        tenant=tenant, agent_id=agent, src_ip=ip, rule_groups=["authentication_success"],
+        time=now - datetime.timedelta(seconds=10),  # within the 30s lateness tolerance
+    ))
+    assert _firing_count(ch_client, tenant, BRUTE_FORCE_SEQ_ID) == 1, \
+        "within the lateness window - must still be treated as completing the sequence"

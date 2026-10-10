@@ -1022,3 +1022,167 @@ clean up once. New test incidents from this investigation are in the real lab te
 since purging is a change and this section's instructions were to report findings, not
 act on them. A purge pass (same shape as the existing `purge-2026-10-09-...` backup) is
 one more argument for pulling 5C-0 forward, as §10 already proposes.
+
+---
+
+## 12. Step 0b: sequence ordering, event time, NTP, sticky LB
+
+**Scope, verbatim from the approval:** switch sequence evaluation to event time with a
+bounded, justified lateness window; check whether session-gap correlation and campaign
+windows have the same arrival-order problem and fix the same way if so; check NTP/clock
+sync on all managers and add a clock-skew check to `/health/detail`; make LB agent
+routing sticky where possible, documented as reducing the problem, not solving it;
+VERIFY with real lab traffic by forcing an agent to move workers mid-sequence, 3 times.
+
+### The sequence-ordering fix
+
+Root cause, confirmed by reading `sequences.py` before touching it: `evaluate_sequences`
+advanced `current_step` for **any** alert matching `step_groups[current_step]`, with no
+check at all on whether the new alert's own `alert_time` was chronologically after the
+step it would complete. The correlator consumes Kafka in whatever order partitions
+deliver, and the LB's non-sticky reassignment (§9) can make that diverge from real
+event-time order across a worker move - two alerts both satisfying step 1, arriving in
+the reverse of their own real-world order, would silently complete the sequence using
+the wrong one.
+
+**Fix:** a bounded lateness window. Advancing past step 0 now requires
+`alert_time >= row["last_step_at"] - lateness_window`; failing that check is treated
+exactly like a non-matching rule group - a no-op, nothing mutated. Implemented in
+`sequences.py`, threaded through `correlator.py` → `consumer.py` → `run_correlator.py`
+as `SEQUENCE_LATENESS_SECONDS` (default **30s**).
+
+**Default, justified from real numbers already in this codebase, not guessed:** the
+shipper batches up to 1s (`shipper.py`'s `BATCH_MAX_SECONDS`) and the writer up to 2s
+(`writer.py`'s `BATCH_MAX_SECONDS`) per hop, so ordinary pipeline lag is a handful of
+seconds end to end. 30s leaves roughly an order of magnitude of margin over that for a
+Kafka consumer-group rebalance or a worker reconnect (the LB moving an agent is exactly
+this) without being wide enough that a genuinely stale, reordered alert could still
+complete a sequence long after the fact. Verified against the real scenario below, not
+left as a theoretical guess.
+
+New unit tests (`test_sequences.py`): an alert 60s before the step it would complete
+(past the window) is a no-op, and the genuinely-ordered completion still fires
+afterward; an alert only 10s before (within the window - clock-skew/jitter tolerance,
+not a real ordering violation) still fires. Both pass.
+
+### Session-gap correlation and campaign windows - checked, one of the two had the same class of bug
+
+**Session-gap correlation (`correlator.py`): already correct, not order-dependent.**
+Its own docstring says so and the code backs it up -
+`first_seen - gap <= alert_time <= last_seen + gap`, checked on both sides, so an alert
+that arrives late but whose own timestamp is still within the gap joins correctly
+regardless of consumption order. No fix needed.
+
+**Campaign windows (`campaigns.py`): a real bug, found by this check, not assumed
+absent.** `closer.py` processes incidents in whatever order its SELECT returns them
+(close-eligibility order), not event-time order - a chronologically EARLIER incident can
+close AFTER a LATER one already created the campaign. The window check was a plain
+signed subtraction, `(incident_first_seen - existing.last_seen) <= WINDOW` - for exactly
+that reverse-order case the difference is negative, and a negative number is always
+`<=` a positive window regardless of magnitude, so an incident truly days apart from the
+campaign's span would still silently link. Fixed with `abs()` - the same
+"checked-both-sides" shape correlator.py's own session-gap matching already uses for
+the identical class of problem - and the update now extends `first_seen` backward
+(`min()`) as well as `last_seen` forward (`max()`), since the first incident processed
+for a campaign isn't necessarily the chronologically first one.
+
+New tests (`test_campaigns.py`), both passing: the later incident closes first and
+creates the campaign, then the earlier one (25h before it) closes second - must NOT
+link (would have, under the old signed check); same shape but 23h apart - must link,
+AND the campaign's `first_seen` must move backward to the earlier incident's.
+
+### NTP / clock sync on the managers
+
+Checked directly, not assumed: none of `ntpd`, `chronyd`, or `timedatectl` exist in the
+manager image (`docker exec ... which ntpd chronyd timedatectl` - nothing found on any
+of master/worker1/worker2/worker-test). **No manager here runs any clock-sync daemon at
+all.** In this specific lab that's low-stakes - every container shares the host's
+kernel clock (no per-container clock namespace), so inter-manager skew is structurally
+~0 regardless of whether anything is "synced" - but that sharing is a single-Docker-host
+artifact, not a property a real multi-host deployment gets for free, and nothing today
+would notice if it didn't hold there.
+
+**Added `clock_skew_per_node` to `/health/detail`** (`health.py` /
+`routers/health.py`), reusing data every event already carries instead of standing up a
+new manager-API client: `ingested_at - time` per `cluster_node`, median over a rolling
+window. Reported as `median_latency_seconds` (informational - this is mostly real
+pipeline latency, not skew, and the check cannot tell the two apart for a large positive
+value) and `clock_ahead_suspected` (set only on a **negative** value - ingestion
+happening before the event's own reported time is impossible unless that node's clock
+is ahead of the writer's; the one unambiguous signal available from this data). Two new
+tests in `test_health.py` cover both the ordinary-latency and the flagged case against
+real ClickHouse rows. Directly relevant to the lateness-window default above: an
+operator seeing `clock_ahead_suspected` has the right place to look before assuming the
+window itself needs widening.
+
+### LB sticky routing
+
+`haproxy.cfg`'s backend switched from `balance roundrobin` to `balance source` +
+`hash-type consistent` - a given agent's connections now land on the same worker every
+time, as long as the worker set doesn't change. **Documented in the config itself as a
+mitigation, not a fix:** it stops the *gratuitous* reassignment plain roundrobin caused
+on every fresh TCP connection with nothing actually wrong, but a real worker failure or
+restart still moves that worker's agents to the survivor - that's the entire reason this
+LB exists (Phase 1 item 15's failover test) - and `consistent` hashing only bounds a
+topology change to the agents that were actually on the affected worker, not to zero
+moves. The lateness-window fix above is what actually makes a real cross-worker move
+safe; stickiness just makes it rarer.
+
+### VERIFY: real lab traffic, 3 forced worker restarts mid-sequence
+
+Used `agent-ubuntu-2` (not `agent-ubuntu-1` - that one now points directly at
+`wazuh-worker-test`, §11 item 3, with no second worker to fail over to) against the
+real `ssh_invalid_user_then_success` sequence: a real invalid-user SSH attempt for step
+0 (rule 5710), a real **successful** login for step 1 (rule 5715 - `sttest`/`sttest`,
+an existing throwaway account baked into the agent image for exactly this kind of test;
+`sshpass` installed into the running container to drive it non-interactively, not baked
+into the image). Which worker currently held each alert was read directly off each
+manager's own `alerts.json` growth, not assumed from HAProxy's config.
+
+| trial | step 0 worker | action | step 1 worker | real move? | firings (cumulative) | result |
+|---|---|---|---|---|---|---|
+| 1 | worker1 | `docker restart` worker1 | worker2 | **yes** | 1→2 | fired once, correct order (step0 07:44:36 < step1 07:45:51) |
+| 2 | worker2 | `docker restart` worker2 | worker1 | **yes** | 2→3 | fired once, correct order (step0 07:46:27 < step1 07:46:57) |
+| 3 | worker1 | `docker restart` worker1 | worker1 | no (worker1 recovered before step 1 fired, sticky hash routed back) | 3→4 | fired once, correct order (step0 07:47:19 < step1 07:47:51) |
+
+Every trial: `sequence_progress.current_step` back to 0 immediately after (reset on
+completion), `sequence_firings` incremented by exactly 1, and `step_matches` shows the
+real node each step landed on. Trials 1 and 2 are the real cross-worker-move case the
+VERIFY asks for; trial 3 is reported honestly as a same-node outcome (worker1 came back
+fast enough that the sticky hash sent the reconnect right back to it) rather than
+re-run until it looked like the other two - correctness held either way, which is itself
+a useful data point about how fast this lab's manager restart actually is relative to
+the lateness window.
+
+**"An out-of-order sequence by event time still does not fire"** is verified precisely
+by the new unit tests above instead of live traffic: real Wazuh agents stamp their own
+alert's timestamp from the real system clock, so there's no way to make a genuine SSH
+attempt report a backdated `alert_time` without faking the container's clock - an
+unreasonably invasive way to test one `if` condition the unit tests already exercise
+exactly. The live VERIFY's job was the real infrastructure race (a genuine worker
+restart moving a genuine agent's live connection); the unit tests' job is precise control
+over event-time ordering. Both ran; neither substitutes for the other.
+
+All 3 trials' test rows (agent-ubuntu-2, `ssh_invalid_user_then_success`, `::1`) were
+in the main lab tenant - `agent-ubuntu-2` isn't one of §11 item 3's re-pointed agents,
+and this VERIFY needed the real worker1/worker2 LB pool specifically (the dedicated test
+manager has no second worker to fail over to). Exported (same shape as the other
+purges, `~/shadowtracer-lab-purges/purge-2026-10-10-step0b-verify-trials/`) and deleted
+afterward: 3 incidents, 22 incident_alerts, 1 sequence_progress row, 22 ClickHouse
+events, 4 sequence_firings rows. Confirmed zero remaining on both ClickHouse replicas
+after.
+
+### Summary
+
+- Sequence lateness window: implemented, defaulted to 30s with a real justification,
+  unit-tested for both the rejected and the tolerated case.
+- Session-gap correlation: already correct, confirmed, not changed.
+- Campaign windows: a real bug (missing `abs()`, missing backward `first_seen`
+  extension) found and fixed, unit-tested for both directions.
+- NTP: no clock-sync daemon exists on any manager; harmless in this single-host lab by
+  construction, a real gap in a multi-host deployment. `/health/detail` now surfaces the
+  one unambiguous signal available from existing data (negative latency).
+- LB: sticky (`balance source` + `hash-type consistent`), explicitly documented as
+  reducing frequency, not eliminating the race.
+- VERIFY: 3 real forced worker restarts against real agent traffic, all 3 fired their
+  sequence exactly once in the correct order; 2 of 3 were genuine cross-worker moves.

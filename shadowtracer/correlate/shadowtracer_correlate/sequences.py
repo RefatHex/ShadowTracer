@@ -35,6 +35,29 @@ sequence_progress rows are never actively reaped - they're harmless
 (re-evaluated as expired, correctly, forever) but accumulate. A periodic
 cleanup is a reasonable follow-up, not required for this phase's
 "start small" scope.
+
+Phase 5C Step 0b fix: this used to advance current_step for ANY alert
+matching step_groups[current_step], with no check at all on whether its
+alert_time was chronologically AFTER the step it's completing. That was
+a real bug, not a theoretical one - the correlator consumes alerts in
+whatever order Kafka delivers them, and the LB's non-sticky agent
+reassignment (see PHASE5C_SIGMA.md §9/§12) can make that order diverge
+from event-time order across a worker move. Two alerts that both
+satisfy step_groups[1], arriving in reverse of their own real-world
+order, would silently complete the sequence using the wrong one and
+record a backwards-in-time span.
+
+Fixed with a bounded lateness window (SEQUENCE_LATENESS_SECONDS,
+configurable, default 30s - justified in run_correlator.py's own env
+var docstring): advancing past step 0 now requires the new alert's
+alert_time to be at or after (row["last_step_at"] - lateness_window).
+An alert that fails this check is treated exactly like one that doesn't
+match the expected rule group at all - a no-op, not an error, not a
+state mutation - so "an out-of-order sequence by event time still does
+not fire" holds structurally, and a real step-1 alert that's merely
+delayed in Kafka (not actually out of event-time order) still completes
+the sequence correctly whenever it eventually arrives, however late
+that is in CONSUMPTION terms, as long as its own alert_time qualifies.
 """
 
 import datetime
@@ -46,6 +69,10 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from .models import sequence_progress
+
+# Justified in run_correlator.py's SEQUENCE_LATENESS_SECONDS docstring -
+# the same number, imported from one place rather than duplicated.
+DEFAULT_LATENESS_SECONDS = 30
 
 
 def load_sequences(sequences_dir: str) -> list:
@@ -69,10 +96,14 @@ def _key_value(event, key_type: str):
     return None
 
 
-def evaluate_sequences(db, ch_client, clickhouse_database: str, sequences: list, tenant_key: str, event, alert_time: datetime.datetime) -> list:
+def evaluate_sequences(
+    db, ch_client, clickhouse_database: str, sequences: list, tenant_key: str, event, alert_time: datetime.datetime,
+    lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
+) -> list:
     """Returns the list of sequence ids that fired as a direct result of
     this one alert (usually empty - most alerts don't complete anything)."""
     fired_ids = []
+    lateness = datetime.timedelta(seconds=lateness_seconds)
 
     for seq in sequences:
         key_value = _key_value(event, seq["key"])
@@ -97,6 +128,13 @@ def evaluate_sequences(db, ch_client, clickhouse_database: str, sequences: list,
             continue  # defensive - should never happen, a completed row is always reset to 0
         if step_groups[current_step] not in event.rule_groups:
             continue  # doesn't match the next expected step - out-of-order and irrelevant alerts both land here, as a no-op
+        if current_step > 0 and alert_time < row["last_step_at"] - lateness:
+            # Matches the expected rule group, but its own event time is
+            # chronologically BEFORE the step it would be completing, by
+            # more than the lateness window - this is the out-of-order-by-
+            # event-time case, not mere Kafka consumption delay. Treated
+            # identically to a non-matching alert: no-op, no state touched.
+            continue
 
         step_match = {
             "step_index": current_step, "node": event.cluster_node,

@@ -1,5 +1,29 @@
+import datetime
+
+import clickhouse_connect
+
 from app import health as health_checks
 from app.config import Settings
+
+_EVENTS_COLUMNS = [
+    "tenant_id", "time", "cluster_node", "manager_name", "alert_id",
+    "agent_id", "agent_name", "agent_ip",
+    "rule_id", "rule_level", "rule_description", "rule_groups",
+    "mitre_ids", "mitre_tactics", "mitre_techniques",
+    "src_endpoint_ip", "src_endpoint_port", "dst_endpoint_ip", "dst_endpoint_port",
+    "actor_user", "target_user",
+    "decoder_name", "location", "message", "extra_fields", "raw_event",
+]
+
+
+def _event_row(tenant_id: str, cluster_node: str, alert_id: str, time: datetime.datetime):
+    return [
+        tenant_id, time, cluster_node, f"wazuh-{cluster_node}", alert_id,
+        "001", "test-agent", "10.0.0.1",
+        "5710", 5, "test rule", [], [], [], [],
+        "", 0, "", 0, "", "",
+        "test", "test", "test alert", {}, "{}",
+    ]
 
 
 def _real_settings(lab_env, clickhouse_database):
@@ -304,3 +328,57 @@ def test_check_clickhouse_replicas_feeds_into_readiness_report(db, lab_env, test
     assert report["ready"] is False
     assert report["checks"]["clickhouse_replicas"]["ok"] is False
     assert report["checks"]["clickhouse"]["ok"] is True  # the single-host check still points at the healthy one
+
+
+def test_clock_skew_per_node_normal_latency_not_flagged(lab_env, test_clickhouse_db):
+    """A real event, time in the past relative to ingested_at's now()
+    default: positive latency, never flagged - this is ordinary pipeline
+    lag (shipper/Kafka/writer hops), not clock skew."""
+    import uuid
+
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    node = f"node-{uuid.uuid4().hex[:8]}"
+    client = clickhouse_connect.get_client(
+        host="127.0.0.1", port=8123, username=lab_env["CLICKHOUSE_USER"],
+        password=lab_env["CLICKHOUSE_PASSWORD"], database=test_clickhouse_db,
+    )
+    try:
+        past = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=5)
+        client.insert(
+            "events", [_event_row(f"t-{uuid.uuid4().hex[:8]}", node, "a1", past)],
+            column_names=_EVENTS_COLUMNS,
+        )
+        report = health_checks.clock_skew_per_node(settings)
+        assert "error" not in report
+        assert report[node]["clock_ahead_suspected"] is False
+        assert report[node]["median_latency_seconds"] > 0
+    finally:
+        client.command(f"ALTER TABLE events DELETE WHERE cluster_node = '{node}'")
+        client.close()
+
+
+def test_clock_skew_per_node_future_event_time_is_flagged(lab_env, test_clickhouse_db):
+    """An event whose own reported time is AFTER ingested_at's now()
+    default is only possible if that node's clock is ahead - the one
+    unambiguous skew signal this check looks for."""
+    import uuid
+
+    settings = _real_settings(lab_env, test_clickhouse_db)
+    node = f"node-{uuid.uuid4().hex[:8]}"
+    client = clickhouse_connect.get_client(
+        host="127.0.0.1", port=8123, username=lab_env["CLICKHOUSE_USER"],
+        password=lab_env["CLICKHOUSE_PASSWORD"], database=test_clickhouse_db,
+    )
+    try:
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=10)
+        client.insert(
+            "events", [_event_row(f"t-{uuid.uuid4().hex[:8]}", node, "a1", future)],
+            column_names=_EVENTS_COLUMNS,
+        )
+        report = health_checks.clock_skew_per_node(settings)
+        assert "error" not in report
+        assert report[node]["clock_ahead_suspected"] is True
+        assert report[node]["median_latency_seconds"] < 0
+    finally:
+        client.command(f"ALTER TABLE events DELETE WHERE cluster_node = '{node}'")
+        client.close()

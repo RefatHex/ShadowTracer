@@ -293,3 +293,53 @@ def last_event_time_per_tenant(settings: Settings) -> dict:
                 for tenant_id, last_event in rows}
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
+
+
+def clock_skew_per_node(settings: Settings, window_minutes: int = 60) -> dict:
+    """Phase 5C Step 0b: no manager here runs ntpd/chronyd/timedatectl at
+    all (checked directly - none of those binaries exist in the manager
+    image) and this lab's containers share the host kernel's clock, so
+    inter-manager skew is structurally ~0 here regardless - this check
+    exists for a real multi-host deployment, where that sharing doesn't
+    hold and nothing today verifies clocks agree.
+
+    Reuses data every event already carries instead of adding a new
+    manager-API client: `ingested_at - time` (writer-insert wall-clock
+    minus the alert's own reported event time) is mostly real pipeline
+    latency (shipper/Kafka/writer hops), NOT skew - reported as
+    `median_latency_seconds` per node, informational only. The one
+    unambiguous skew signal is a NEGATIVE value: ingestion happening
+    BEFORE the event's own reported time is impossible unless that
+    node's clock is ahead of the writer's - `clock_ahead_suspected` is
+    only ever set from that, never from a large positive latency, which
+    this check cannot distinguish from ordinary backlog.
+
+    Directly relevant to the sequence-lateness-window default
+    (sequences.py's SEQUENCE_LATENESS_SECONDS): that window is sized to
+    absorb exactly this kind of cross-node timing slop, so an operator
+    seeing `clock_ahead_suspected` here has the right place to look
+    before assuming the window itself needs widening.
+    """
+    try:
+        client = clickhouse_connect.get_client(
+            host=settings.clickhouse_host, port=settings.clickhouse_port,
+            username=settings.clickhouse_user, password=settings.clickhouse_password,
+            database=settings.clickhouse_database, connect_timeout=3,
+        )
+        rows = client.query(
+            "SELECT cluster_node, "
+            "median(dateDiff('millisecond', time, ingested_at)) / 1000.0 AS median_latency_seconds "
+            "FROM events WHERE ingested_at >= now() - INTERVAL {window:UInt32} MINUTE "
+            "GROUP BY cluster_node",
+            parameters={"window": window_minutes},
+        ).result_rows
+        client.close()
+        return {
+            node: {
+                "median_latency_seconds": latency,
+                "clock_ahead_suspected": latency < 0,
+            }
+            for node, latency in rows
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}

@@ -40,6 +40,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from .correlator import DEFAULT_MAX_SPAN_SECONDS, DEFAULT_SESSION_GAP_SECONDS, UnparseableEvent, process_event
+from .sequences import DEFAULT_LATENESS_SECONDS
 from .metrics import Metrics
 from .sequences import load_sequences
 
@@ -86,6 +87,7 @@ def run(
     ch_client=None,
     clickhouse_database: str | None = None,
     sequences_dir: str | None = None,
+    sequence_lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
 ):
     """ch_client is optional (None is fine, e.g. in tests that don't care
     about dead-letter counts) - a dead-lettered event still always goes to
@@ -183,6 +185,7 @@ def run(
                     result = process_event(
                         db, event, session_gap_seconds, max_span_seconds,
                         sequences=sequences, ch_client=ch_client, clickhouse_database=clickhouse_database,
+                        sequence_lateness_seconds=sequence_lateness_seconds,
                     )
                 except UnparseableEvent:
                     db.close()

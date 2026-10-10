@@ -23,7 +23,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from .models import incident_alerts, incidents
-from .sequences import evaluate_sequences
+from .sequences import DEFAULT_LATENESS_SECONDS, evaluate_sequences
 
 DEFAULT_SESSION_GAP_SECONDS = 600
 DEFAULT_MAX_SPAN_SECONDS = 4 * 3600
@@ -97,6 +97,7 @@ def process_event(
     sequences: list | None = None,
     ch_client=None,
     clickhouse_database: str | None = None,
+    sequence_lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
 ) -> CorrelationResult:
     """One alert, one transaction. Safe to call twice for the same alert
     (a Kafka replay): the second call is a no-op past the idempotency
@@ -182,7 +183,10 @@ def process_event(
             return CorrelationResult(status="duplicate", incident_id=incident_id)
 
         if sequences and ch_client is not None:
-            evaluate_sequences(db, ch_client, clickhouse_database, sequences, event.tenant_id, event, alert_time)
+            evaluate_sequences(
+                db, ch_client, clickhouse_database, sequences, event.tenant_id, event, alert_time,
+                lateness_seconds=sequence_lateness_seconds,
+            )
 
         current = db.execute(
             select(incidents).where(incidents.c.id == incident_id).with_for_update()

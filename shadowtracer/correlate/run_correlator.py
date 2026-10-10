@@ -15,6 +15,21 @@ Env vars:
   SEQUENCES_DIR (default sequences/, relative to this file - Phase 5B
   Step 4) - sequence detection is simply not evaluated if this is unset
   or ch_client isn't configured (see consumer.run()'s own docstring).
+  SEQUENCE_LATENESS_SECONDS (default 30) - Phase 5C Step 0b: how far
+  behind the last matched step's own alert_time a new alert's alert_time
+  is allowed to be and still advance a sequence (sequences.py's own
+  module docstring has the full mechanism). 30s default, justified from
+  real numbers measured in this codebase, not guessed: the shipper
+  batches up to 1s (shadowtracer_ingest/shipper.py's BATCH_MAX_SECONDS)
+  and the writer up to 2s (shadowtracer_ingest/writer.py's
+  BATCH_MAX_SECONDS) per hop, so ordinary pipeline lag is a handful of
+  seconds; 30s leaves roughly an order of magnitude of margin over that
+  for a Kafka consumer-group rebalance (the LB moving an agent between
+  workers triggers exactly this) without being so wide that a truly
+  stale, reordered alert could still complete a sequence long after the
+  fact. Verified against this exact scenario - see
+  PHASE5C_SIGMA.md §12's VERIFY writeup (forcing a real worker restart
+  mid-sequence).
 """
 
 import logging
@@ -78,4 +93,5 @@ run(
     ch_client=ch_client,
     clickhouse_database=clickhouse_database,
     sequences_dir=sequences_dir if os.path.isdir(sequences_dir) else None,
+    sequence_lateness_seconds=float(os.environ.get("SEQUENCE_LATENESS_SECONDS", "30")),
 )

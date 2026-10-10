@@ -125,6 +125,9 @@ x-correlate-env: &correlate-env
   APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
   SESSION_GAP_SECONDS: "600"
   MAX_SPAN_SECONDS: "14400"
+  # Phase 5C Step 0b - see run_correlator.py's own docstring for the
+  # justification behind 30s.
+  SEQUENCE_LATENESS_SECONDS: "30"
   METRICS_PORT: "9104"
   # No single event may stop the pipeline: a dead-lettered event always
   # goes to the Kafka dead-letter topic regardless of these - they only

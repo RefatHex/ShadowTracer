@@ -27,6 +27,22 @@ Membership is idempotent via campaign_incidents' own unique constraint
 guarantee that an incident can only ever close (and therefore only ever
 call link_campaign) once, guarded by the same advisory lock closer.py
 already uses for fingerprint computation.
+
+Phase 5C Step 0b follow-up: closer.py processes incidents in whatever
+order its SELECT returns them (close-eligibility order), not event-time
+order, so an incident with an EARLIER first_seen can close (and reach
+here) AFTER one with a LATER first_seen already created the campaign.
+The window check below used to be a plain signed subtraction,
+`(incident_first_seen - existing.last_seen) <= WINDOW` - for the
+earlier-incident-closes-later case that difference is negative, and a
+negative number is always <= a positive window regardless of magnitude,
+so an incident truly days apart from the campaign's existing span would
+still link, silently. Fixed with abs() - the same "checked on both
+sides, not just forward" fix correlator.py's own session-gap matching
+already uses for the identical class of problem. Also now extends
+first_seen backward (min), not just last_seen forward (max) - the first
+incident to be processed for a given campaign is not necessarily the
+chronologically first one.
 """
 
 import datetime
@@ -75,13 +91,14 @@ def link_campaign(
 
     within_window = (
         existing is not None
-        and (incident_first_seen - existing["last_seen"]).total_seconds() <= CAMPAIGN_WINDOW_SECONDS
+        and abs((incident_first_seen - existing["last_seen"]).total_seconds()) <= CAMPAIGN_WINDOW_SECONDS
     )
 
     if within_window:
         campaign_id = existing["id"]
         db.execute(
             campaigns.update().where(campaigns.c.id == campaign_id).values(
+                first_seen=min(existing["first_seen"], incident_first_seen),
                 last_seen=max(existing["last_seen"], incident_last_seen),
                 incident_count=existing["incident_count"] + 1,
             )
