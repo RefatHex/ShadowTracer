@@ -4,6 +4,22 @@ x-manager-build: &manager-build
   context: ../..
   dockerfile: deploy/lab/manager.Dockerfile
 
+# Startup-race fix (Step 2 of the Phase 5C Step 0b gate, see
+# PHASE5C_SIGMA.md §11/§12): every service below now has restart:
+# unless-stopped, and every real infra dependency (kafka, postgres,
+# ch-clickhouse-1/2, ch-keeper) got its own healthcheck so dependents can
+# condition: service_healthy on it instead of service_started - a
+# container being "started" never meant "ready to accept connections",
+# which is exactly the race that killed correlate-1/2 and closer-1/2 on a
+# cold `docker compose up -d` (both crashed on ClickHouse refusing
+# connections before analysisd's own retry/backoff - now fixed in the
+# application code too - ever got a chance to run). restart:
+# unless-stopped is still kept as the real backstop: even with every
+# healthcheck and ordering correct, nothing here guarantees a dependency
+# can't go unhealthy again later at runtime (a restart, an OOM) - a
+# service exiting then must come back on its own, not sit Exited until
+# someone notices.
+
 # Phase 3 follow-up 3: agents go through shadowtracer-lb, registered with
 # a dynamic ("any") IP. Previously (Phase 1/2, see PHASE1_FINDINGS.md)
 # classic Wazuh TCP secure mode failed to identify "any"-registered agents
@@ -125,6 +141,7 @@ services:
     image: shadowtracer-lab/manager:local
     hostname: wazuh-master
     init: true
+    restart: unless-stopped
     environment:
       CLUSTER_NODE_TYPE: master
       CLUSTER_NODE_NAME: master
@@ -146,6 +163,7 @@ services:
     image: shadowtracer-lab/manager:local
     hostname: wazuh-worker1
     init: true
+    restart: unless-stopped
     environment:
       CLUSTER_NODE_TYPE: worker
       CLUSTER_NODE_NAME: worker1
@@ -169,6 +187,7 @@ services:
     image: shadowtracer-lab/manager:local
     hostname: wazuh-worker2
     init: true
+    restart: unless-stopped
     environment:
       CLUSTER_NODE_TYPE: worker
       CLUSTER_NODE_NAME: worker2
@@ -190,11 +209,14 @@ services:
   shadowtracer-lb:
     image: haproxy:2.9-alpine
     hostname: shadowtracer-lb
+    restart: unless-stopped
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
-      - wazuh-worker1
-      - wazuh-worker2
+      wazuh-worker1:
+        condition: service_healthy
+      wazuh-worker2:
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.13
@@ -206,6 +228,7 @@ services:
     image: shadowtracer-lab/agent-ubuntu:local
     hostname: agent-ubuntu-1
     init: true
+    restart: unless-stopped
     environment:
       <<: *agent-env
       # Phase 3 follow-up 3: through shadowtracer-lb now that the real bug
@@ -230,6 +253,7 @@ services:
     image: shadowtracer-lab/agent-ubuntu:local
     hostname: agent-ubuntu-2
     init: true
+    restart: unless-stopped
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: shadowtracer-lb
@@ -248,6 +272,7 @@ services:
     image: shadowtracer-lab/agent-rocky:local
     hostname: agent-rocky-1
     init: true
+    restart: unless-stopped
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: shadowtracer-lb
@@ -266,6 +291,7 @@ services:
     image: shadowtracer-lab/agent-rocky:local
     hostname: agent-rocky-2
     init: true
+    restart: unless-stopped
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: shadowtracer-lb
@@ -283,6 +309,7 @@ services:
     image: apache/kafka:3.9.0
     hostname: kafka
     mem_limit: 768m
+    restart: unless-stopped
     environment:
       CLUSTER_ID: "${KAFKA_CLUSTER_ID:?set KAFKA_CLUSTER_ID in deploy/lab/.env, see .env.example}"
       KAFKA_NODE_ID: 1
@@ -304,6 +331,17 @@ services:
       - kafka-data:/var/lib/kafka/data
     ports:
       - "127.0.0.1:9094:9094"
+    # Startup race fix (Step 2): previously no healthcheck at all, so
+    # nothing could ever depend_on kafka with condition: service_healthy -
+    # every consumer was stuck with service_started, i.e. "the container
+    # process launched", which for a JVM broker is well before it can
+    # actually serve a bootstrap request.
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
     networks:
       lab:
         ipv4_address: 172.28.0.30
@@ -312,9 +350,20 @@ services:
     image: clickhouse/clickhouse-keeper:24.8
     hostname: ch-keeper
     mem_limit: 256m
+    restart: unless-stopped
     volumes:
       - ./clickhouse/keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
       - ch-keeper-data:/var/lib/clickhouse
+    # localhost, not "localhost" resolved via DNS - this image's resolver
+    # returned ::1 first and clickhouse-keeper only listens on 0.0.0.0, so
+    # a plain `nc -z localhost 9181` failed even when the port was up;
+    # found testing this directly against the real container, not assumed.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "9181"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
     networks:
       lab:
         ipv4_address: 172.28.0.31
@@ -323,6 +372,7 @@ services:
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-1
     mem_limit: 2304m
+    restart: unless-stopped
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:
@@ -337,10 +387,20 @@ services:
       - ./clickhouse/config.d/macros-1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ch1-data:/var/lib/clickhouse
     depends_on:
-      - ch-keeper
+      ch-keeper:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8123:8123"
       - "127.0.0.1:9000:9000"
+    # /ping is ClickHouse's own unauthenticated HTTP liveness endpoint -
+    # confirmed directly (`docker exec ... wget -qO- http://localhost:8123/ping`
+    # -> "Ok.") rather than assumed from the image docs.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
     networks:
       lab:
         ipv4_address: 172.28.0.32
@@ -349,6 +409,7 @@ services:
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-2
     mem_limit: 2304m
+    restart: unless-stopped
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:
@@ -363,10 +424,17 @@ services:
       - ./clickhouse/config.d/macros-2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ch2-data:/var/lib/clickhouse
     depends_on:
-      - ch-keeper
+      ch-keeper:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8124:8123"
       - "127.0.0.1:9001:9000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
     networks:
       lab:
         ipv4_address: 172.28.0.33
@@ -375,6 +443,7 @@ services:
     image: postgres:16-alpine
     hostname: postgres
     mem_limit: 256m
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in deploy/lab/.env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/lab/.env}
@@ -383,6 +452,12 @@ services:
       - postgres-data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     networks:
       lab:
         ipv4_address: 172.28.0.34
@@ -396,6 +471,7 @@ services:
     image: shadowtracer-lab/ingest:local
     hostname: shipper-worker1
     command: ["python3", "run_shipper.py"]
+    restart: unless-stopped
     environment:
       <<: *shipper-env
       MANAGER_NAME: wazuh-worker1
@@ -408,7 +484,7 @@ services:
       wazuh-worker1:
         condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.38
@@ -420,6 +496,7 @@ services:
     image: shadowtracer-lab/ingest:local
     hostname: shipper-worker2
     command: ["python3", "run_shipper.py"]
+    restart: unless-stopped
     environment:
       <<: *shipper-env
       MANAGER_NAME: wazuh-worker2
@@ -430,7 +507,7 @@ services:
       wazuh-worker2:
         condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.39
@@ -442,12 +519,13 @@ services:
     image: shadowtracer-lab/ingest:local
     hostname: writer-1
     command: ["python3", "run_writer.py"]
+    restart: unless-stopped
     environment: *writer-env
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       ch-clickhouse-1:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.40
@@ -459,12 +537,13 @@ services:
     image: shadowtracer-lab/ingest:local
     hostname: writer-2
     command: ["python3", "run_writer.py"]
+    restart: unless-stopped
     environment: *writer-env
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       ch-clickhouse-1:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.41
@@ -478,12 +557,13 @@ services:
     image: shadowtracer-lab/correlate:local
     hostname: correlate-1
     command: ["python3", "run_correlator.py"]
+    restart: unless-stopped
     environment: *correlate-env
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       postgres:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.42
@@ -495,12 +575,13 @@ services:
     image: shadowtracer-lab/correlate:local
     hostname: correlate-2
     command: ["python3", "run_correlator.py"]
+    restart: unless-stopped
     environment: *correlate-env
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       postgres:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.43
@@ -512,12 +593,13 @@ services:
     image: shadowtracer-lab/correlate:local
     hostname: closer-1
     command: ["python3", "run_closer.py"]
+    restart: unless-stopped
     environment: *closer-env
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       ch-clickhouse-1:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.44
@@ -529,12 +611,13 @@ services:
     image: shadowtracer-lab/correlate:local
     hostname: closer-2
     command: ["python3", "run_closer.py"]
+    restart: unless-stopped
     environment: *closer-env
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       ch-clickhouse-1:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.45
@@ -547,14 +630,15 @@ services:
       dockerfile: deploy/lab/console-backend.Dockerfile
     image: shadowtracer-lab/console-backend:local
     hostname: console-backend-1
+    restart: unless-stopped
     environment: *console-backend-env
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       ch-clickhouse-1:
-        condition: service_started
+        condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.35
@@ -565,14 +649,15 @@ services:
       dockerfile: deploy/lab/console-backend.Dockerfile
     image: shadowtracer-lab/console-backend:local
     hostname: console-backend-2
+    restart: unless-stopped
     environment: *console-backend-env
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       ch-clickhouse-1:
-        condition: service_started
+        condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.36
@@ -583,6 +668,7 @@ services:
       dockerfile: deploy/lab/console-caddy.Dockerfile
     image: shadowtracer-lab/console-caddy:local
     hostname: caddy
+    restart: unless-stopped
     depends_on:
       - console-backend-1
       - console-backend-2

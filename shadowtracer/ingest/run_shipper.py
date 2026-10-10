@@ -21,8 +21,10 @@ import clickhouse_connect
 
 from shadowtracer_ingest import shipper
 from shadowtracer_ingest.metrics import Metrics, serve_metrics
+from shadowtracer_ingest.retry import retry_with_backoff
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 stop_flag = threading.Event()
 signal.signal(signal.SIGTERM, lambda *_: stop_flag.set())
@@ -31,12 +33,23 @@ signal.signal(signal.SIGINT, lambda *_: stop_flag.set())
 metrics = Metrics()
 serve_metrics(metrics, int(os.environ.get("METRICS_PORT", "9101")))
 
+# Startup race (found running the real lab stack cold): ClickHouse isn't
+# guaranteed to be ready to serve queries yet even after its container is
+# "started" - compose has no healthcheck for it to depend_on. Retry
+# forever instead of crashing; stop_flag lets a shutdown during the wait
+# exit cleanly rather than hang.
 ch_client = None
 if os.environ.get("CLICKHOUSE_HOST"):
-    ch_client = clickhouse_connect.get_client(
-        host=os.environ["CLICKHOUSE_HOST"], port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
-        username=os.environ.get("CLICKHOUSE_USER", "default"), password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
-        database=os.environ.get("CLICKHOUSE_DATABASE", "shadowtracer"),
+    ch_client = retry_with_backoff(
+        lambda: clickhouse_connect.get_client(
+            host=os.environ["CLICKHOUSE_HOST"], port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
+            username=os.environ.get("CLICKHOUSE_USER", "default"), password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
+            database=os.environ.get("CLICKHOUSE_DATABASE", "shadowtracer"),
+        ),
+        max_attempts=None, base_delay=1.0, max_delay=30.0, stop_flag=stop_flag,
+        on_retry=lambda attempt, exc: logger.warning(
+            "ClickHouse connect attempt %d failed (transient - retrying): %s", attempt, exc,
+        ),
     )
 
 shipper.run(

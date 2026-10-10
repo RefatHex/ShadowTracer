@@ -39,11 +39,19 @@ def run(
 
     while not stop_flag.is_set():
         db: Session = Session_()
-        ch_client = clickhouse_connect.get_client(
-            host=clickhouse_host, port=clickhouse_port,
-            username=clickhouse_user, password=clickhouse_password,
-        )
+        # ch_client construction used to happen outside this try - a
+        # transient ClickHouse hiccup (e.g. the startup race in
+        # PHASE5C_SIGMA.md §11: "started" but not yet ready to serve
+        # queries) raised here, uncaught, and killed the whole process
+        # instead of just this cycle. The poll loop already provides the
+        # retry cadence; no backoff helper needed, just don't let this
+        # escape the cycle it belongs to.
+        ch_client = None
         try:
+            ch_client = clickhouse_connect.get_client(
+                host=clickhouse_host, port=clickhouse_port,
+                username=clickhouse_user, password=clickhouse_password,
+            )
             closed = close_eligible_incidents(
                 db, ch_client, clickhouse_database, session_gap_seconds, internal_ranges,
             )
@@ -52,7 +60,8 @@ def run(
             logger.exception("close_eligible_incidents failed this cycle")
             metrics.incr("close_cycle_errors")
         finally:
-            ch_client.close()
+            if ch_client is not None:
+                ch_client.close()
             db.close()
 
         stop_flag.wait(poll_interval_seconds)
