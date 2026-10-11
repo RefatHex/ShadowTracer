@@ -526,3 +526,62 @@ the main tenant's `worker1`/`worker2` pool in Phase 5C Step 0b's own VERIFY). An
 LB-failover VERIFY must keep using a main-tenant-pooled agent (`agent-ubuntu-2`, as Step
 0b's VERIFY did) and purge its resulting test rows afterward, same as that VERIFY did -
 the test tenant's existence does not retire that obligation.
+
+## Phase 5C: Sigma rule support - execution model, raw-event topic, identity keys, rule-selection policy (decided)
+
+Full investigation and real-data verification in `shadowtracer/docs/design/PHASE5C_SIGMA.md`
+(design doc, approved in direction); this entry records the decisions themselves, for
+the same reason every other phase's design doc gets a terse DECISIONS.md summary -
+this file is what the next phase reads, not the full design doc.
+
+- **Execution model: (b), a custom streaming matcher**, not a Wazuh-XML transpiler and
+  not the thin single-maintainer `pySigma-backend-clickhouse` package. pySigma used for
+  rule parsing and field-mapping only (confirmed via a real spike, §8 of the design doc:
+  no built-in evaluator exists in pySigma regardless of backend choice, so a custom
+  matcher is required either way - this isn't a "build vs. buy" tradeoff, there is
+  nothing to buy). **Rule dispatch is logsource-indexed from the start**, not a flat
+  rule-by-rule scan - measured at a ~215x cost difference in the same spike, making this
+  a correctness-of-architecture decision, not a later optimization.
+- **New raw-event topic: `shadowtracer.events.archives`** (not `events.raw`, which
+  already exists and - confusingly - carries Wazuh **alerts**, not raw pre-match
+  events; the first design draft invented a different, wrong topic name and separately
+  proposed `events.raw` as if it were free, which would have collided with the real
+  topic of that name). Sourced from `archives.json` (`logall_json`), shipped by the
+  same per-manager shipper mechanism as alerts, tagged by a `source_file` Kafka header
+  distinguishing the two streams on one topic-per-manager-per-tenant model (not two
+  separate topics) - see Phase 5C Step 0b follow-up's tenant-to-manager entry above for
+  why that model is itself still undecided for multi-tenant production.
+- **Archive event identity: `(cluster.node, file inode, byte offset)`** - not Wazuh's
+  `id` field. Withdrawn after real paired-data testing (design doc §6a) found `id`
+  disagreeing between an alert and its own archive copy of the *same real event* 47% of
+  the time (not just colliding across different events, §11) - the shipper's existing
+  `TailSource` already tracks `(inode, offset)` per file to survive rotation correctly;
+  this reuses that, rather than inventing a new identity concept.
+- **Alert-to-archive linking key: `(cluster.node, agent.name, timestamp, hash(full_log))`**
+  - validated on real paired lab data (45 real alert/archive pairs, zero ambiguity); the
+  hash-of-`full_log` half is marked an assumption in the design doc (not yet tested for
+  an actual collision), everything else in this key is measured, not assumed.
+- **Rule-selection policy:**
+  - Default enabled: Sigma `status: stable` only. `test` is an explicit per-tenant
+    opt-in; `experimental`/`deprecated` are never auto-enabled.
+  - Default level: `medium` and above; `low`/`informational` are opt-in - matches the
+    alert-fatigue reasoning Phase 5B's rarity/warm-up machinery already exists for.
+  - Ruleset version is pinned to a reviewed commit hash (same `RULESET_VERSION`
+    convention `fingerprint.py` already uses for its own shape version) - a ruleset
+    bump is a reviewed, versioned change, never a silent `git pull`.
+  - Per-tenant enable/disable reuses `tenant_alert_settings`, the same mechanism every
+    other per-tenant knob in this project already uses - no new config table.
+  - Suppression: a Sigma-sourced incident's fingerprint goes through the exact same
+    `suppression_state` mechanism as a Wazuh-sourced one, by construction (both reach
+    fingerprinting through the same alert shape) - no special-casing needed or added.
+- **Fingerprints are unaffected by any of the above** - confirmed directly against
+  `fingerprint.py`'s own code: no event id, Kafka offset, inode, byte offset, or hash
+  of any kind reaches fingerprint computation from either the alert or the archive
+  side. This was a real mistake in the first design draft (withdrawn, not just
+  revised) and is checked explicitly in the design doc rather than assumed still true
+  after the identity-key rework above.
+- **Coverage, honestly, as of this decision: 0 of 3,152 Sigma rules are lab-backed
+  today** (~3,152 convertible, ~14 of 210 linux rules mappable to real fields, 0 of
+  2,418 windows rules - no Windows data source yet). Closing this runs through 5C-1's
+  data-source work and Phase 5D's attack execution, not through this decision alone -
+  recorded here so this entry doesn't imply more real coverage exists than does.

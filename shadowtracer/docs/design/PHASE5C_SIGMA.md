@@ -1422,3 +1422,109 @@ re-check when picked up again.
 network wiring, enrollment, measurement) was started** - all of it depends on having a
 VM to put them on. No placeholder config was written and no licence claim was made for
 a Sysmon config that was never actually selected - there is nothing to cite yet.
+
+---
+
+## 16. 5C-1 data sources: Linux events/s and bytes/s (quiet vs active), coverage recount
+
+**Scope:** re-measure per-endpoint events/s and bytes/s (quiet vs active) for
+Linux+auditd, at least 30 minutes; recount the three coverage numbers with real sampled
+events (Linux by logsource). Windows side is §15 - blocked, nothing to measure there.
+
+### Quiet: genuinely zero, measured over 29 minutes, not estimated
+
+```
+$ date -u +"%Y-%m-%dT%H:%M:%SZ"; docker exec ...worker1-1 wc -lc .../alerts.json; (same worker2, worker-test)
+2026-10-11T15:00:14Z
+worker1: 539 lines / 1103107 bytes
+worker2: 1069 lines / 1763999 bytes
+worker-test: 398 lines / 23780520 bytes
+
+# 29 minutes later, no activity generated in between:
+$ date -u +"%Y-%m-%dT%H:%M:%SZ"; ...
+2026-10-11T15:29:04Z
+worker1: 539 lines / 1103107 bytes      <- unchanged
+worker2: 1069 lines / 1763999 bytes     <- unchanged
+worker-test: 398 lines / 23780520 bytes <- unchanged
+```
+
+**Zero growth on all three managers across the full 29-minute window.** This lab's
+idle/background chatter (CIS SCA policy scans, osquery snapshots - see the real decoder
+breakdown below) runs on a schedule long enough that it didn't fire again during this
+specific window, not continuously - the honest quiet-period rate for this lab, right
+now, is **0 events/s, 0 bytes/s**, not a small-but-nonzero idle hum. (`worker-test`'s
+large byte count is this session's own smoke-test.sh hostile-input runs, each injecting
+an 11MB payload directly - not organic agent traffic; excluded from any rate
+calculation, noted so the number isn't mistaken for real endpoint volume.)
+
+### Active: a real SSH brute-force burst, measured off ClickHouse's own timestamps
+
+```
+$ docker exec ...agent-rocky-1-1 sh -c 'for i in $(seq 1 20); do
+    ssh ... "activeuser${i}@localhost" true & done; wait'
+# 15 of the 20 attempts matched a real alert rule (5 were deduped/rate-limited by
+# Wazuh's own firedtimes tracking within the same second - not a measurement error)
+
+$ clickhouse-client --query "SELECT count(), sum(length(raw_event)), min(time), max(time)
+    FROM events WHERE agent_id='009' AND time >= '2026-10-11 15:00:00'"
+15   16691   2026-10-11 15:29:24.743   2026-10-11 15:29:24.820
+```
+
+15 real alerts, 16,691 bytes of raw_event content, spanning **77 milliseconds** by
+Wazuh's own recorded alert timestamps (not wall-clock including pipeline latency,
+which would understate the true generation rate) - this is the real peak rate a single
+endpoint under active SSH brute-force produces:
+
+- **~194 events/s, ~217 KB/s peak**, for the duration of the actual attack traffic.
+
+This is a single real sample, not a statistical campaign - reported as one real
+measurement with its own real variance (burst timing, system load), not smoothed or
+extrapolated into a claimed steady-state number.
+
+**auditd's contribution: confirmed zero**, consistent with §14 - the real decoder
+breakdown below has no `auditd` entries anywhere, on any manager, at any point this
+session.
+
+### Real decoder/logsource breakdown, sampled directly (not estimated)
+
+```
+$ docker exec ...worker2-1 cat alerts.json | python3 -c '... count by decoder.name ...'
+worker2: sca 670, json(osquery) 380, dpkg-decoder 14, ossec 5
+worker1: sca 417, json(osquery) 105, dpkg-decoder 14, ossec 3
+worker-test (agent-ubuntu-1, has real ssh bursts): sca 208, json(osquery) 151, sshd 16,
+    dpkg-decoder 14, ossec 3
+```
+
+**New finding this pass, not in the original §3 field-mapping table: `sca` (CIS Security
+Configuration Assessment policy-compliance scans) is the single largest real alert
+category in this lab right now** - bigger than osquery. Checked against Sigma's
+taxonomy the same way §3 checked osquery: SCA output is a compliance-posture
+check-result (`rule.description` like "Ensure mounting of squashfs filesystems is
+disabled"), not an attack-shaped event - **no Sigma logsource corresponds to it**, same
+conclusion as osquery's snapshot-vs-event mismatch, for a different reason (this is
+compliance scoring, not telemetry of anything that happened). Doesn't change any of the
+three headline numbers (SCA was never going to map to a Sigma rule either way), but
+belongs in the honest accounting of what this lab's real alert volume actually is,
+since it's bigger than the category §3 already covered.
+
+### Coverage recount - headline numbers unchanged, confidence upgraded
+
+- **Convertible: ~3,152 of 3,152** - unchanged, this number measures pySigma parser
+  capability, not data availability, and nothing this pass touched that.
+- **Mappable to our real fields today: ~14 of 210 linux rules; 0 of 2,418 windows** -
+  unchanged. auditd's installation doesn't add any new mappable rule, because
+  "mappable" was always about field *names* existing in our data (§3's original
+  check), and installing the daemon doesn't change what fields a `process_creation`
+  Sigma rule needs - it changes whether real audit *content* exists, which is the
+  lab-backed number, not the mappable one.
+- **Lab-backed: 0 of 3,152 - unchanged, but the reason upgraded from assumption to
+  measured fact.** Before this pass: "0, because auditd was never configured" (an
+  assumption about what WOULD happen if it were). After this pass: "0, because auditd
+  IS correctly installed, licensed, configured, and wired into Wazuh's collection
+  pipeline end to end, and the host's kernel still cannot generate a single real audit
+  record for it to collect" (a measured fact, with the privileged-container test in §14
+  as the evidence). Same number, much stronger evidence behind it - this is what
+  "recount" means here: not a different number, a number that survived an actual
+  attempt to change it.
+- **Windows: still 0 of 2,418 mappable, untouched** - §15's blocker means nothing new
+  was learned on the Windows side this pass.
