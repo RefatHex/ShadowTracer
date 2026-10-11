@@ -21,8 +21,39 @@ FROM ubuntu:22.04 AS runtime
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
         procps iproute2 ca-certificates gawk curl \
-        openssh-server rsyslog sudo passwd && \
+        openssh-server rsyslog sudo passwd auditd audispd-plugins && \
     rm -rf /var/lib/apt/lists/*
+
+# Phase 5C-1: auditd itself (GPL-2) and its libaudit library (LGPL-2.1) -
+# confirmed directly from the installed package's own copyright file
+# (/usr/share/doc/auditd/copyright), source https://github.com/linux-audit/audit-userspace.
+# priority_boost 0: the package default (4) calls setpriority() on
+# itself, which needs CAP_SYS_NICE - not granted to this container (see
+# docker-compose.yml's cap_add for what IS granted: CAP_AUDIT_CONTROL
+# only) and not worth the extra capability for a lab container's own
+# scheduling priority.
+RUN sed -i 's/^priority_boost = 4/priority_boost = 0/' /etc/audit/auditd.conf
+
+# Ubuntu's auditd package registers these example rule files (dpkg -L
+# auditd lists them) but ships them empty - /usr/share/doc/* is stripped
+# in this base image (space saving, standard for Docker). Fetched
+# directly from the upstream audit-userspace repo at the exact tag
+# matching the installed package version (3.0.7) instead of writing a
+# from-scratch ruleset of unclear provenance - same GPL-2 licence as
+# auditd itself (confirmed above), verified at this exact URL:
+# https://github.com/linux-audit/audit-userspace/tree/v3.0.7/rules
+# 10-base-config (buffers/failure mode), 11-loginuid (auid tracking,
+# needed for every other rule's auid field to mean anything),
+# 31-privileged (setuid/setgid binary execution - matches several of
+# Wazuh's existing auditd ruleset entries), 43-module-load (kernel
+# module load/unload), 99-finalize (locks the config, standard last
+# rule). Deliberately NOT the full STIG/PCI-DSS/OSPP sets - this is a
+# lab coverage-measurement exercise, not a compliance deployment.
+RUN mkdir -p /etc/audit/rules.d && \
+    for f in 10-base-config 11-loginuid 31-privileged 43-module-load 99-finalize; do \
+        curl -fsSL -o "/etc/audit/rules.d/${f}.rules" \
+            "https://raw.githubusercontent.com/linux-audit/audit-userspace/v3.0.7/rules/${f}.rules"; \
+    done
 
 # osquery, pinned version (Step 1: "pinned version")
 RUN curl -fsSL -o /tmp/osquery.deb \

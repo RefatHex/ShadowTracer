@@ -98,6 +98,7 @@ def process_event(
     ch_client=None,
     clickhouse_database: str | None = None,
     sequence_lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
+    metrics=None,
 ) -> CorrelationResult:
     """One alert, one transaction. Safe to call twice for the same alert
     (a Kafka replay): the second call is a no-op past the idempotency
@@ -185,7 +186,7 @@ def process_event(
         if sequences and ch_client is not None:
             evaluate_sequences(
                 db, ch_client, clickhouse_database, sequences, event.tenant_id, event, alert_time,
-                lateness_seconds=sequence_lateness_seconds,
+                lateness_seconds=sequence_lateness_seconds, metrics=metrics,
             )
 
         current = db.execute(

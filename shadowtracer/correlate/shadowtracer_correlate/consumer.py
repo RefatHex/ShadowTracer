@@ -185,7 +185,7 @@ def run(
                     result = process_event(
                         db, event, session_gap_seconds, max_span_seconds,
                         sequences=sequences, ch_client=ch_client, clickhouse_database=clickhouse_database,
-                        sequence_lateness_seconds=sequence_lateness_seconds,
+                        sequence_lateness_seconds=sequence_lateness_seconds, metrics=metrics,
                     )
                 except UnparseableEvent:
                     db.close()

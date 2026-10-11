@@ -56,10 +56,11 @@ def _event(
     )
 
 
-def _process(db, ch_client, event):
+def _process(db, ch_client, event, metrics=None):
     return process_event(
         db, event, session_gap_seconds=600, max_span_seconds=14400,
         sequences=SEQUENCES, ch_client=ch_client, clickhouse_database=TEST_CH_DB,
+        metrics=metrics,
     )
 
 
@@ -283,3 +284,36 @@ def test_step1_within_lateness_window_still_fires(db, ch_client):
     ))
     assert _firing_count(ch_client, tenant, BRUTE_FORCE_SEQ_ID) == 1, \
         "within the lateness window - must still be treated as completing the sequence"
+
+
+def test_late_event_joins_incident_but_cannot_complete_sequence_and_is_counted(db, ch_client):
+    """Phase 5C Step 0b follow-up: an alert past the 30s lateness window
+    must still join its incident normally (session-gap correlation runs
+    in correlator.py BEFORE evaluate_sequences, and is not affected by
+    this rejection at all) - it just can't complete the sequence, and
+    the rejection itself is counted (sequence_late_events), not silent."""
+    from shadowtracer_correlate.metrics import Metrics
+
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    agent = f"agent-{uuid.uuid4().hex[:8]}"
+    ip = "203.0.113.58"
+    now = datetime.datetime.now(datetime.timezone.utc)
+    metrics = Metrics()
+
+    r1 = _process(db, ch_client, _event(
+        tenant=tenant, agent_id=agent, src_ip=ip, rule_groups=["authentication_failed"], time=now,
+    ), metrics=metrics)
+    assert r1.status == "created"
+    assert metrics.snapshot().get("sequence_late_events", 0) == 0
+
+    # 60s before step 0 - past the 30s default lateness window.
+    r2 = _process(db, ch_client, _event(
+        tenant=tenant, agent_id=agent, src_ip=ip, rule_groups=["authentication_success"],
+        time=now - datetime.timedelta(seconds=60),
+    ), metrics=metrics)
+
+    assert r2.status == "joined", "a late alert must still join its incident normally"
+    assert r2.incident_id == r1.incident_id, "same incident - session-gap correlation is unaffected by sequence rejection"
+    assert _firing_count(ch_client, tenant, BRUTE_FORCE_SEQ_ID) == 0, "must not complete the sequence"
+    assert metrics.snapshot()["sequence_late_events"] == 1, "the rejection must be counted, not silent"

@@ -31,3 +31,4 @@ deploy/lab/haproxy.cfg
 # docker compose at container start, never part of the image.
 deploy/lab/alerts-worker1/
 deploy/lab/alerts-worker2/
+deploy/lab/alerts-worker-test/

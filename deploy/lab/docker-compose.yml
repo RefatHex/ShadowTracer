@@ -276,6 +276,12 @@ services:
     hostname: agent-ubuntu-1
     init: true
     restart: unless-stopped
+    # Phase 5C-1: auditd needs this to load rules / enable the kernel
+    # audit subsystem (confirmed directly - it starts but immediately
+    # exits on "Error sending enable request (Operation not permitted)"
+    # without it). CAP_AUDIT_WRITE is already in Docker's default set.
+    cap_add:
+      - AUDIT_CONTROL
     environment:
       <<: *agent-env
       # Phase 5C Step 0, item 3: pointed directly at the dedicated test
@@ -304,6 +310,8 @@ services:
     hostname: agent-ubuntu-2
     init: true
     restart: unless-stopped
+    cap_add:
+      - AUDIT_CONTROL
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: shadowtracer-lb
@@ -323,6 +331,8 @@ services:
     hostname: agent-rocky-1
     init: true
     restart: unless-stopped
+    cap_add:
+      - AUDIT_CONTROL
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: shadowtracer-lb
@@ -342,6 +352,8 @@ services:
     hostname: agent-rocky-2
     init: true
     restart: unless-stopped
+    cap_add:
+      - AUDIT_CONTROL
     environment:
       <<: *agent-env
       AGENT_MANAGER_DATA_HOST: shadowtracer-lb

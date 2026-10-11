@@ -71,6 +71,21 @@ if mountpoint -q /var/ossec/logs/alerts 2>/dev/null; then
     (while true; do chmod o+r /var/ossec/logs/alerts/alerts.json 2>/dev/null || true; sleep 2; done) &
 fi
 
+# Phase 5C Step 0b follow-up: time sync is a real deployment requirement
+# (the sequence-lateness window in shadowtracer_correlate/sequences.py
+# assumes managers' clocks roughly agree) - chrony is installed and
+# started on every manager. -x: this lab's containers share the HOST
+# kernel's clock (no per-container clock namespace), so letting chronyd
+# actually adjust it would slew the one clock every container AND the
+# host itself uses, for a lab-only exercise - not something to do as a
+# side effect of running this entrypoint. A real deployment runs each
+# manager on its own OS/VM with its own independent clock; there, drop
+# -x and let chronyd actually correct drift, which is the entire point
+# of running it. Backgrounded, best-effort - a chronyd failure must
+# never block the manager itself from starting.
+mkdir -p /var/log/chrony
+chronyd -x || true
+
 /var/ossec/bin/shadowtracer-control start
 
 exec tail -F /var/ossec/logs/ossec.log /var/ossec/logs/cluster.log /var/ossec/logs/api.log 2>/dev/null

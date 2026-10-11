@@ -16,6 +16,8 @@
   test). Not changed yet - revisit with a real slow-Postgres test (a
   worker that's alive but can't commit in time may behave differently
   than a cleanly-killed one) before deciding whether to lower it.
+- **Production tenant-to-manager mapping** - see "Phase 5C Step 0b
+  follow-up" below. Deferred to Phase 10.
 
 ## Phase 3: queue, tenancy, alert identity, capacity (decided)
 
@@ -477,3 +479,50 @@ default 0.25) - a quarter of the retention window elapsed with a
 consumer still behind is "this will start losing data if it doesn't
 catch up soon", which is the actual operational question, not "is the
 offset count non-zero".
+
+## Phase 5C Step 0b follow-up: tenant-to-manager mapping for production (undecided, Phase 10)
+
+`TENANT_ID` is a shipper environment variable (`x-shipper-env`/`x-shipper-test-env` in
+`deploy/lab/docker-compose.yml`), and the shipper ships one manager node's entire
+`alerts.json` under that one value - **tenant identity is effectively a per-manager
+property, not a per-agent one.** Found concretely in Phase 5C Step 0's dedicated test
+tenant work: there was no way to put just one agent (`agent-ubuntu-1`) in a different
+tenant from its siblings without giving it an entirely separate manager
+(`wazuh-worker-test`) and shipper (`shipper-worker-test`) - every agent that reports to
+`wazuh-worker1`/`wazuh-worker2` is in the main lab tenant, unconditionally, by
+construction, regardless of anything about the agent itself.
+
+This is fine for the lab (one real tenant, one throwaway test tenant, each with its own
+manager) but doesn't describe how a real multi-tenant production deployment should
+work. Two options, **neither chosen yet**:
+
+- **(a) A dedicated manager (or manager cluster) per tenant.** Simple, reuses exactly
+  this lab's own mechanism unchanged - no new code, no new concept. Cost: one manager
+  deployment per tenant, which stops scaling cleanly once the number of tenants is
+  large relative to the traffic any one of them generates (a tenant with 3 agents still
+  needs its own manager cluster, the same fixed overhead as a tenant with 300).
+- **(b) Shared managers, tenant derived from the agent's own Wazuh group or a label.**
+  Wazuh agents can carry a group assignment (`agent_control`/`agent_groups`) the shipper
+  (or a new normalizer step) could read per-alert instead of taking tenant identity from
+  its own static env var - `agent.group` (or a comparable field) is already present on
+  every real alert's JSON, confirmed in passing while building the Step 0a/§11 analysis
+  (not re-verified here against every alert shape). Cost: tenant identity moves from "a
+  property of which process shipped this line" (trusted by construction, the shipper
+  only ever runs with one `TENANT_ID`) to "a property of attacker-reachable alert
+  content" (an agent's own reported group, or whatever field carries it) - a compromised
+  or misconfigured agent could plausibly misreport its group, and nothing downstream of
+  the shipper currently treats that as a trust boundary. Needs its own real investigation
+  (can an enrolled agent change its own group without manager-side authorization? is
+  group assignment itself per-manager or cluster-wide?) before this is a real proposal,
+  not just an idea - **not investigated here, flagged as the open question blocking this
+  option specifically.**
+
+**Noted while this was found, not yet acted on:** the dedicated test tenant (Phase 5C
+Step 0, item 3) bypasses `shadowtracer-lb` entirely - `agent-ubuntu-1`'s
+`AGENT_MANAGER_DATA_HOST` points directly at `wazuh-worker-test`, which isn't in the
+LB's backend pool. This means **no chaos/failover test run against the test tenant
+exercises the LB's actual failover path** (Phase 1 item 15's capability, re-verified for
+the main tenant's `worker1`/`worker2` pool in Phase 5C Step 0b's own VERIFY). Any future
+LB-failover VERIFY must keep using a main-tenant-pooled agent (`agent-ubuntu-2`, as Step
+0b's VERIFY did) and purge its resulting test rows afterward, same as that VERIFY did -
+the test tenant's existence does not retire that obligation.

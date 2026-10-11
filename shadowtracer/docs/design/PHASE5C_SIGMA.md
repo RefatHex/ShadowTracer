@@ -1186,3 +1186,239 @@ after.
   reducing frequency, not eliminating the race.
 - VERIFY: 3 real forced worker restarts against real agent traffic, all 3 fired their
   sequence exactly once in the correct order; 2 of 3 were genuine cross-worker moves.
+
+---
+
+## 13. Step 0b follow-ups: chrony, deterministic regression tests, VERIFY-tenant report
+
+### Chrony installed and run on all 4 managers - real `chronyc tracking` output
+
+GPL-2 (`chronyd`), confirmed directly from the installed package, same as auditd's own
+licence check (§14). Installed and started (`chronyd -x` - see below for why `-x`) on
+`wazuh-master`, `wazuh-worker1`, `wazuh-worker2`, `wazuh-worker-test`. Baked into
+`manager.Dockerfile` for the next image rebuild (plus a `DEBIAN_FRONTEND=noninteractive`
+fix - chrony pulls in `tzdata`, which prompts interactively for a timezone with no TTY
+and hung a build for over an hour before this was found and fixed); installed directly
+into the 4 already-running containers for this verification itself, since repeated
+session interruptions made the full from-scratch image rebuild (a real Wazuh C compile,
+10-20 minutes) unreliable to finish inside this working session - the real
+`chronyc tracking` output below is identical either way, since it's the same package
+either way.
+
+**`-x`, not the default clock-controlling mode:** this lab's containers share the HOST
+kernel's clock (confirmed: `adjtimex` fails with "Operation not permitted" without
+`CAP_SYS_TIME`, and granting it would mean one lab container's chronyd slewing the
+clock every other container AND the host itself uses - not something to do as a side
+effect of a documentation exercise). `-x` disables clock control entirely but still
+performs real NTP exchanges and reports real computed offsets via `chronyc tracking` -
+exactly what's needed to demonstrate the tool working without the side effect. **A real
+deployment runs each manager on its own OS/VM with an independent clock - there, drop
+`-x` and let chronyd actually correct drift, which is the entire point of running it.**
+Documented in `entrypoint-manager.sh` itself, not just here.
+
+Real output, all 4 managers, same moment:
+
+```
+$ docker exec shadowtracer-lab-wazuh-master-1 chronyc tracking
+Reference ID    : A380D82D (static.163.128.216.45.clients.securednoc.com)
+Stratum         : 3
+System time     : 0.876962423 seconds fast of NTP time
+Last offset     : +0.327723265 seconds
+Leap status     : Normal
+
+$ docker exec shadowtracer-lab-wazuh-worker1-1 chronyc tracking
+Reference ID    : A380D82D (static.163.128.216.45.clients.securednoc.com)
+System time     : 1.171493888 seconds fast of NTP time
+Last offset     : +0.350762397 seconds
+Leap status     : Normal
+
+$ docker exec shadowtracer-lab-wazuh-worker2-1 chronyc tracking
+Reference ID    : 9D0AEE02 (ns1.bbnisp.net)
+System time     : 0.824276865 seconds fast of NTP time
+Last offset     : +0.226738632 seconds
+Leap status     : Normal
+
+$ docker exec shadowtracer-lab-wazuh-worker-test-1 chronyc tracking
+Reference ID    : 9D0AEE02 (ns1.bbnisp.net)
+System time     : 0.528159082 seconds fast of NTP time
+Last offset     : -0.000919615 seconds
+Leap status     : Normal
+```
+
+**Real finding, not zero as the shared-kernel-clock reasoning alone would suggest:**
+every manager independently measured the same underlying clock (the WSL2 host's) as
+roughly **0.5-1.2 seconds fast of real NTP time** - small per-measurement variance
+(NTP round-trip jitter against different real servers), same ballpark magnitude on
+every single one, consistent with "one shared host clock, measured 4 times" rather
+than genuine inter-manager skew. **Time sync is a real deployment requirement, not
+lab-specific theatre**: this host's own clock is measurably wrong against real NTP by
+over half a second, and nothing before this check would have noticed. Documenting
+this as a deployment requirement: every manager in a real (multi-host) deployment
+must run chrony (or equivalent) against a real NTP source, with monitoring on
+`chronyc tracking`'s offset - this lab's `-x` restriction does not apply there.
+
+**The skew signal in `/health/detail` (§12) is kept as-is** - still the right
+mechanism for ongoing monitoring once chrony is actually controlling the clock on real
+hardware; this follow-up adds the tool chrony itself, not a replacement for that check.
+
+### Deterministic regression tests
+
+**(a) Reversed consumption order, correct event times - shown failing on the pre-fix
+code.** Used a git worktree (not a working-tree `git stash`, since the fix spans 3
+files and the new tests need to run against the old implementation while staying new
+themselves) checked out at the current commit, then reverted just
+`sequences.py`/`correlator.py`/`consumer.py` to the commit before the Step 0b fix
+(`git checkout 6c2ffb5953 -- <paths>`), keeping the new test file as-is:
+
+```
+$ cd /tmp/old-correlate-check/shadowtracer/correlate && python3 -m pytest tests/test_sequences.py \
+    -k "chronologically_before_step0_by_more_than_lateness" -v
+FAILED tests/test_sequences.py::test_step1_chronologically_before_step0_by_more_than_lateness_does_not_fire
+AssertionError: an alert chronologically before the step it would complete must not fire anything
+assert 1 == 0
+```
+
+On the pre-fix code, the exact same test (step 0 matches, then a step-1-matching alert
+whose own `alert_time` is 60s *before* step 0's arrives) **fires the sequence** (1
+firing where the test requires 0) - concrete proof the bug was real, not a defensive
+test against a hypothetical. The same test against current `HEAD` passes (already
+confirmed in §12). Worktree removed after (`git worktree remove --force`); no code
+changes came from this, it was a one-time proof using a disposable checkout, not a
+permanent dual-mode test.
+
+**(b) A late event still joins its incident, cannot complete a sequence, and is
+counted.** Threaded a new `sequence_late_events` metric through
+`evaluate_sequences` → `process_event` → `consumer.run()` (already-wired `metrics`
+object, same pattern every other counter in this codebase already uses). New test
+(`test_late_event_joins_incident_but_cannot_complete_sequence_and_is_counted`,
+`test_sequences.py`): an alert 60s past the lateness window still returns
+`status="joined"` against the SAME incident id step 0 created (session-gap
+correlation runs in `correlator.py` before `evaluate_sequences` ever sees the alert,
+and isn't affected by this rejection at all), the sequence does not fire, and
+`metrics.snapshot()["sequence_late_events"] == 1` - the rejection is counted, not
+silent. Passes.
+
+**(c) Campaign incidents closing in reverse order, >24h apart, do not link.** Already
+covered - `test_reverse_close_order_25h_apart_still_not_linked` (§12, written
+alongside the `campaigns.py` fix itself, not new this pass). Re-run here for
+confirmation, still passing.
+
+### Which tenant did the §12 VERIFY traffic land in
+
+**The main lab tenant** (`eec7135f91067739afe1cd3b3273bb72`) -
+`agent-ubuntu-2` ships via `worker1`/`worker2`, both configured with the main
+`TENANT_KEY`, not `TEST_TENANT_KEY` (confirmed by reading `x-shipper-env`'s
+assignment in `docker-compose.yml` directly, not assumed). **Already purged**, in the
+same turn §12 itself was written, using the same export-first procedure as every
+other purge this phase: 3 incidents, 22 incident_alerts, 1 sequence_progress row, 22
+ClickHouse events, 4 sequence_firings rows, exported to
+`~/shadowtracer-lab-purges/purge-2026-10-10-step0b-verify-trials/`, then deleted.
+Re-confirmed zero residual rows on both ClickHouse replicas and in Postgres as of this
+follow-up pass - nothing new to purge.
+
+---
+
+## 14. 5C-1 data sources: auditd (Linux) - installed and licensed correctly, environmentally blocked from generating real events
+
+**Scope:** install auditd on the Linux lab agents with Wazuh audit log collection; any
+ruleset used must have a verified licence.
+
+**Installed and licensed, confirmed directly, not assumed:**
+- `auditd` (daemon) is GPL-2; its `libaudit` library is LGPL-2.1 - read straight from the
+  installed package's own copyright file (`/usr/share/doc/auditd/copyright`), upstream
+  `https://github.com/linux-audit/audit-userspace`.
+- Ubuntu's `auditd` package registers example rule files (`dpkg -L auditd` lists
+  `/usr/share/doc/auditd/examples/rules/*`) but ships the directory **empty** - this base
+  image strips `/usr/share/doc/*` for size, confirmed by listing it directly. Fetched the
+  same files instead from the upstream repo at the exact tag matching the installed
+  version (`v3.0.7`), same GPL-2 licence, confirmed at that exact URL
+  (`https://github.com/linux-audit/audit-userspace/tree/v3.0.7/rules`). Five files used:
+  `10-base-config`, `11-loginuid`, `31-privileged`, `43-module-load`, `99-finalize` -
+  deliberately not the full STIG/PCI-DSS/OSPP sets, which are a compliance posture this
+  lab coverage-measurement exercise doesn't need.
+- `priority_boost` set to 0 (package default is 4, which calls `setpriority()` on itself -
+  needs `CAP_SYS_NICE`, not granted and not worth adding for a lab container's own
+  scheduling priority).
+- `CAP_AUDIT_CONTROL` added to all 4 agent containers in `docker-compose.yml`
+  (`CAP_AUDIT_WRITE` is already in Docker's default set) - confirmed necessary directly:
+  without it, `auditd` starts, logs `DAEMON_START`, then immediately
+  `DAEMON_ABORT ... op=set-enable ... res=failed` and exits.
+- Wazuh's own `localfile` block added (`log_format: audit`,
+  `/var/log/audit/audit.log`) - matches the real decoder's documented requirement
+  (`ruleset/decoders/0040-auditd_decoders.xml`: "Audit decoders (logformat must be
+  `audit`)"). Confirmed live: `wazuh-logcollector` is running and the file exists and is
+  being appended to.
+
+**Real, environment-specific blocker found running this, not assumed away:** even with
+`CAP_AUDIT_CONTROL` granted, every agent's `auditd` still fails the same way -
+`Error sending enable request (Operation not permitted)`. Isolated the cause with a
+privileged-container test, which rules out Docker capabilities/seccomp/AppArmor
+entirely:
+
+```
+$ docker run --rm --privileged --entrypoint sh shadowtracer-lab/agent-ubuntu:local \
+    -c 'auditctl -s 2>&1'
+Error sending status request (Operation not permitted)
+```
+
+Even `--privileged` (every capability, no seccomp, no AppArmor) cannot so much as query
+audit status, let alone enable it. The kernel reports `CONFIG_AUDIT=y`,
+`CONFIG_AUDITSYSCALL=y`, `CONFIG_AUDIT_ARCH=y` (`/proc/config.gz`) - the config flags
+are compiled in - but the actual audit-netlink control path returns `EPERM`
+unconditionally regardless of privilege. This host's kernel is
+`6.18.40.1-microsoft-standard-WSL2` (confirmed current: `wsl --version` reports WSL
+3.0.1.0, same kernel build, already the latest - not an update-available situation).
+**This lab runs on WSL2, and WSL2's kernel does not actually support enabling the Linux
+audit subsystem, even though it reports the config symbols that normally mean it does.**
+Not fixable from inside a container, and not something a real deployment (any actual
+Linux host or VM, which is the overwhelmingly common case) would hit - flagged here as a
+dev-environment artifact of this specific lab machine, not a product limitation.
+
+**Consequence for the coverage numbers (§5):** the lab-backed count for every
+`process_creation`/`auditd`-sourced Sigma rule stays at the same **0** §5 already
+reported - but the nature of that 0 has changed from "assumption: auditd isn't
+configured" to "measured: auditd is installed, licensed, configured, and Wazuh is
+correctly watching its output file end to end, but the kernel underneath this
+particular lab host cannot generate a single real audit record for it to collect,
+confirmed with a privileged-container test that rules out every container-level
+explanation." Re-verifying this on a real Linux host or VM (not WSL2) is a real
+follow-up, not done here.
+
+---
+
+## 15. 5C-1 data sources: Windows VM + Sysmon - blocked, not attempted beyond feasibility checks
+
+**Scope:** a Windows VM on the Windows host (Hyper-V or VirtualBox, not WSL, not the dev
+machine itself), ShadowTracer winagent + Sysmon with a licence-verified config, enrolled
+in the dedicated test tenant.
+
+**Checked directly, both paths, before attempting anything:**
+
+```
+$ powershell.exe -Command "Get-VMHost | Select-Object -Property VirtualMachinePath"
+Get-VMHost : You do not have the required permission to complete this task. Contact
+the administrator of the authorization policy for the computer 'DESKTOP-GMQHPAV'.
+
+$ powershell.exe -Command "whoami; whoami /groups | Select-String -Pattern 'Hyper-V'"
+desktop-gmqhpav\admin
+(no output - not a member of any Hyper-V group)
+
+$ powershell.exe -Command "Test-Path 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'"
+False
+```
+
+Hyper-V is installed and reachable from WSL via `powershell.exe` (confirmed
+`Get-Command Get-VM` resolves), but the current Windows user has no Hyper-V admin
+rights. VirtualBox isn't installed at all. Asked the user directly rather than guessing
+or attempting a workaround (installing VirtualBox or self-elevating would both be new,
+consequential host-level actions); the user chose to grant Hyper-V admin rights.
+**Re-checked after that grant - still blocked as of this writing**, same permission
+error. Windows group-membership changes apply to a new logon token, not a running
+session - this most likely needs the user to log off/on (or reboot) before
+`Get-VMHost` will succeed from this WSL session. Not re-attempted in a loop; will
+re-check when picked up again.
+
+**Nothing else in 5C-1's Windows scope (winagent/Sysmon build, config licence, lab
+network wiring, enrollment, measurement) was started** - all of it depends on having a
+VM to put them on. No placeholder config was written and no licence claim was made for
+a Sysmon config that was never actually selected - there is nothing to cite yet.

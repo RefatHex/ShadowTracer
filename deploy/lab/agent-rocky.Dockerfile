@@ -19,8 +19,22 @@ FROM rockylinux:9 AS runtime
 
 RUN dnf install -y -q --allowerasing \
         procps-ng iproute ca-certificates gawk curl \
-        openssh-server openssh-clients rsyslog sudo shadow-utils passwd && \
+        openssh-server openssh-clients rsyslog sudo shadow-utils passwd audit && \
     dnf clean all
+
+# Phase 5C-1: same auditd setup as agent-ubuntu.Dockerfile - see that
+# file's comments for the licence citation and why priority_boost is
+# disabled. RockyLinux's audit package ships its rules.d examples
+# un-stripped (unlike the Ubuntu container image), but fetched from the
+# same verified upstream tag anyway for one consistent, cited source
+# across both agent images rather than trusting two different
+# packagers' bundling to have stayed identical.
+RUN sed -i 's/^priority_boost = 4/priority_boost = 0/' /etc/audit/auditd.conf && \
+    mkdir -p /etc/audit/rules.d && \
+    for f in 10-base-config 11-loginuid 31-privileged 43-module-load 99-finalize; do \
+        curl -fsSL -o "/etc/audit/rules.d/${f}.rules" \
+            "https://raw.githubusercontent.com/linux-audit/audit-userspace/v3.0.7/rules/${f}.rules"; \
+    done
 
 # osquery, pinned version (Step 1: "pinned version")
 RUN curl -fsSL -o /tmp/osquery.rpm \

@@ -15,11 +15,17 @@
 
 FROM ubuntu:22.04
 
+# chrony pulls in tzdata, which prompts interactively for a timezone with
+# no DEBIAN_FRONTEND set and no TTY in a build - hangs the build forever
+# (found the hard way: a build that never produced any output and had to
+# be killed). Set once, for every RUN in this image.
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
         build-essential automake autoconf libtool cmake \
         curl wget git ca-certificates policycoreutils \
-        procps iproute2 gawk && \
+        procps iproute2 gawk chrony && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /wazuh

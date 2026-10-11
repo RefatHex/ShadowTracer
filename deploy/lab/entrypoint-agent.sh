@@ -94,6 +94,29 @@ fi
 service rsyslog start || rsyslogd || true
 /usr/sbin/sshd
 
+# --- Phase 5C-1: auditd, with Wazuh's own "audit" log_format decoder
+# watching its output. Real architectural limit, found running this
+# directly, not assumed: the Linux audit subsystem is a single
+# host-kernel-wide facility, not namespaced per container - every
+# container sharing this host's kernel sees the SAME audit events
+# (all syscalls on the host, not just this one container's), and only
+# one auditd can hold the kernel's audit netlink socket at a time.
+# Starting auditd here is real and does generate real events (needs
+# CAP_AUDIT_CONTROL, granted in docker-compose.yml), but "per-agent
+# auditd telemetry" does not mean per-container-isolated telemetry in
+# this lab the way Wazuh's own alert pipeline is per-agent - documented
+# in PHASE5C_SIGMA.md, not silently assumed away.
+if command -v auditd >/dev/null 2>&1; then
+    mkdir -p /var/log/audit
+    augenrules --load || true
+    auditd || true
+fi
+if [ -d /var/log/audit ] && ! grep -q "/var/log/audit/audit.log" "$OSSEC_CONF"; then
+    audit_block="  <localfile><log_format>audit</log_format><location>/var/log/audit/audit.log</location></localfile>"
+    awk -v block="$audit_block" '/<\/ossec_config>/{print block} {print}' "$OSSEC_CONF" > "${OSSEC_CONF}.tmp"
+    mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
+fi
+
 # --- enroll with the master if we don't already have keys ---
 # Dynamic IP ("any") - see the note above sed-ing <address> for why this
 # no longer needs -I <static-ip>.

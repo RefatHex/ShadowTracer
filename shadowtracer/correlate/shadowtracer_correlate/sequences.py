@@ -98,7 +98,7 @@ def _key_value(event, key_type: str):
 
 def evaluate_sequences(
     db, ch_client, clickhouse_database: str, sequences: list, tenant_key: str, event, alert_time: datetime.datetime,
-    lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
+    lateness_seconds: float = DEFAULT_LATENESS_SECONDS, metrics=None,
 ) -> list:
     """Returns the list of sequence ids that fired as a direct result of
     this one alert (usually empty - most alerts don't complete anything)."""
@@ -133,7 +133,14 @@ def evaluate_sequences(
             # chronologically BEFORE the step it would be completing, by
             # more than the lateness window - this is the out-of-order-by-
             # event-time case, not mere Kafka consumption delay. Treated
-            # identically to a non-matching alert: no-op, no state touched.
+            # identically to a non-matching alert: no-op, no state touched -
+            # but counted, so an operator can tell "sequences never fire
+            # here" apart from "sequences are being silently dropped here".
+            # This alert still joined its incident normally above (in
+            # correlator.py, before evaluate_sequences ever runs) -
+            # rejection here is scoped to sequence completion only.
+            if metrics is not None:
+                metrics.incr("sequence_late_events")
             continue
 
         step_match = {
