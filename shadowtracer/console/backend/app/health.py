@@ -296,12 +296,17 @@ def last_event_time_per_tenant(settings: Settings) -> dict:
 
 
 def clock_skew_per_node(settings: Settings, window_minutes: int = 60) -> dict:
-    """Phase 5C Step 0b: no manager here runs ntpd/chronyd/timedatectl at
-    all (checked directly - none of those binaries exist in the manager
-    image) and this lab's containers share the host kernel's clock, so
-    inter-manager skew is structurally ~0 here regardless - this check
-    exists for a real multi-host deployment, where that sharing doesn't
-    hold and nothing today verifies clocks agree.
+    """Phase 5C Step 0b / 5C-1 follow-up: chrony now runs on every manager
+    (`entrypoint-manager.sh`), but with `-x` - it cannot actually set the
+    clock inside these containers (`adjtimex` needs CAP_SYS_TIME, not
+    granted, confirmed directly) and every manager shares the one WSL2
+    host kernel clock anyway (no per-container clock namespace), so
+    inter-manager skew is ~0 here BY CONSTRUCTION regardless of what
+    chrony measures - there is only one clock to measure, several times.
+    This check exists for a real multi-host deployment, where neither of
+    those things is true: each manager has its own clock, its own
+    chrony/NTP client actually correcting it (no `-x` there), and nothing
+    else today verifies they still agree.
 
     Reuses data every event already carries instead of adding a new
     manager-API client: `ingested_at - time` (writer-insert wall-clock

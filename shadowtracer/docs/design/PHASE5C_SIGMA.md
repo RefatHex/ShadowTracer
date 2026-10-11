@@ -1102,6 +1102,27 @@ kernel clock (no per-container clock namespace), so inter-manager skew is struct
 artifact, not a property a real multi-host deployment gets for free, and nothing today
 would notice if it didn't hold there.
 
+**Update after this was written (§13): chrony is now installed and running on all 4
+managers - the paragraph above describes this phase's starting state, not where it
+ended.** Restating the mechanism precisely, since it matters: chrony **cannot actually
+set the clock inside these containers** - `adjtimex` fails with "Operation not
+permitted" without `CAP_SYS_TIME`, which isn't granted (confirmed directly, not
+assumed) - so it runs with `-x` (NTP exchanges and real offset reporting, no clock
+control) and is a measurement tool here, not a correction mechanism. That's not a
+workaround for a missing capability; it's required by what these containers actually
+are: every manager in this lab shares the **same WSL2 host kernel clock** (no
+per-container clock namespace), so **inter-manager skew is zero by construction**,
+with or without chrony - there is only one clock to measure, four times. The real,
+non-zero number `chronyc tracking` found (§13: ~0.5-1.2s) is **this WSL2 host's own
+drift against real NTP**, not inter-manager skew, and chrony here cannot correct it
+(no `CAP_SYS_TIME`) even though it can see it. **Production implication, stated
+plainly: time sync is a per-host concern** - each manager in a real (non-lab,
+multi-host) deployment runs on its own OS/VM with its own independent clock and its own
+chrony/NTP client *without* `-x`, correcting that host's own drift against real NTP.
+This lab cannot demonstrate clock correction or genuine inter-manager skew detection at
+all, by construction - only that the measurement tooling (chrony itself, and
+`clock_skew_per_node` below) works and that this host's clock needed it.
+
 **Added `clock_skew_per_node` to `/health/detail`** (`health.py` /
 `routers/health.py`), reusing data every event already carries instead of standing up a
 new manager-API client: `ingested_at - time` per `cluster_node`, median over a rolling
@@ -1431,7 +1452,24 @@ a Sysmon config that was never actually selected - there is nothing to cite yet.
 Linux+auditd, at least 30 minutes; recount the three coverage numbers with real sampled
 events (Linux by logsource). Windows side is §15 - blocked, nothing to measure there.
 
-### Quiet: genuinely zero, measured over 29 minutes, not estimated
+### Correction (same day): "quiet = 0 events/s" below was alerts-only, and incomplete
+
+The quiet-period measurement immediately below only ever looked at `alerts.json`
+(ClickHouse holds alert-derived events only - there is nothing else to query there).
+`logall_json` was off on every manager at the time (confirmed:
+`grep logall_json ossec.conf` → `no` on master/worker1/worker2/worker-test), so
+`archives.json` - every raw event Wazuh processes, not just the subset that matched an
+alert rule - was never even being written, let alone measured. §4's original
+measurement (same doc, done earlier in this phase) already found a steady
+non-zero archive-level hum (`monitord`'s periodic checks, osquery's scheduled
+queries) completely independent of alert activity - "quiet = 0 events/s" below
+describes the alert layer correctly, but reads as "the manager is doing nothing,"
+which is wrong. Re-measured properly, both layers, same real methodology as §4
+(`logall_json` re-enabled, a real baseline/wait/measure/disable cycle - see the new
+subsection after the active-burst one below for the real archives numbers, alerts and
+archives reported separately, quiet and active, for both).
+
+### Quiet (alerts layer only): genuinely zero, measured over 29 minutes, not estimated
 
 ```
 $ date -u +"%Y-%m-%dT%H:%M:%SZ"; docker exec ...worker1-1 wc -lc .../alerts.json; (same worker2, worker-test)
@@ -1448,14 +1486,13 @@ worker2: 1069 lines / 1763999 bytes     <- unchanged
 worker-test: 398 lines / 23780520 bytes <- unchanged
 ```
 
-**Zero growth on all three managers across the full 29-minute window.** This lab's
-idle/background chatter (CIS SCA policy scans, osquery snapshots - see the real decoder
-breakdown below) runs on a schedule long enough that it didn't fire again during this
-specific window, not continuously - the honest quiet-period rate for this lab, right
-now, is **0 events/s, 0 bytes/s**, not a small-but-nonzero idle hum. (`worker-test`'s
-large byte count is this session's own smoke-test.sh hostile-input runs, each injecting
-an 11MB payload directly - not organic agent traffic; excluded from any rate
-calculation, noted so the number isn't mistaken for real endpoint volume.)
+**Zero growth on all three managers across the full 29-minute window - at the alert
+layer.** As the correction above says, this is real but incomplete: it's the rate of
+events that matched a rule, not the rate of events Wazuh actually processed. See the
+archives-layer re-measurement below for the rest of the picture. (`worker-test`'s large
+byte count is this session's own smoke-test.sh hostile-input runs, each injecting an
+11MB payload directly - not organic agent traffic; excluded from any rate calculation,
+noted so the number isn't mistaken for real endpoint volume.)
 
 ### Active: a real SSH brute-force burst, measured off ClickHouse's own timestamps
 
@@ -1484,6 +1521,80 @@ extrapolated into a claimed steady-state number.
 **auditd's contribution: confirmed zero**, consistent with §14 - the real decoder
 breakdown below has no `auditd` entries anywhere, on any manager, at any point this
 session.
+
+### Archives layer, re-measured properly: alerts vs. archives, quiet and active, side by side
+
+`logall_json` re-enabled on `worker1`/`worker2`/`worker-test` (confirmed:
+`grep logall_json ossec.conf` → `yes` on all three after
+`shadowtracer-control restart`), same real methodology as §4: baseline, a real 20-minute
+quiet wait with nothing deliberately generated, then a real SSH burst, then disabled
+again afterward (`logall_json` is not this lab's steady default - matches §4's own
+cleanup step).
+
+**Quiet, 1200s real wait, both layers:**
+
+```
+$ date -u +"%Y-%m-%dT%H:%M:%SZ"; docker exec ...worker1-1 sh -c 'wc -lc alerts.json; wc -lc archives.json'; (x3)
+T0  2026-10-11T17:13:34Z
+worker1:     alerts 821 / 1552951    archives 12 / 4817
+worker2:     alerts 1143 / 1820966   archives 11 / 4490
+worker-test: alerts 478 / 46978514   archives 10 / 4075
+
+T1 (+1200s)  2026-10-11T17:32:22Z
+worker1:     alerts 821 / 1552951    archives 61 / 22058
+worker2:     alerts 1143 / 1820966   archives 89 / 32093
+worker-test: alerts 479 / 46979061   archives 61 / 22627
+```
+
+| manager | alerts Δ (1200s) | alerts events/s | archives Δ (1200s) | archives events/s | archives bytes/s |
+|---|---|---|---|---|---|
+| worker1 | 0 lines | **0** | +49 lines / +17,241 B | 0.041 | 14.4 |
+| worker2 | 0 lines | **0** | +78 lines / +27,603 B | 0.065 | 23.0 |
+| worker-test | +1 line / +547 B | ~0.0008 | +51 lines / +18,552 B | 0.0425 | 15.5 |
+
+**The quiet-period alert rate genuinely is ~0 - that part of the original claim holds.**
+What was missing is the archives layer: **0.04-0.065 raw events/s per manager, steady,
+with zero deliberate traffic** - the same `monitord`/osquery housekeeping hum §4 found
+earlier in this phase, present again now, same ballpark magnitude (§4: ~0.07-0.1
+events/s - this re-measurement's slightly lower rate is a real, unexplained difference
+across runs, not reconciled further here, flagged rather than papered over).
+
+**Active, a real burst, both layers, same window:**
+
+```
+$ date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"; docker exec ...worker2-1 sh -c 'wc -lc alerts.json; wc -lc archives.json'
+before  2026-10-11T17:32:35.346Z   alerts 1143/1820966   archives 89/32093
+# 20 parallel SSH invalid-user attempts against agent-rocky-1
+after   2026-10-11T17:32:42.052Z   alerts 1162/1842056   archives 129/63923
+```
+
+Precise event-time span, same technique as the alerts-side ClickHouse check above but
+applied directly to the new archive lines' own `timestamp` field (archives aren't
+ingested into ClickHouse in this lab - this is the raw file content, parsed directly):
+
+```
+$ docker exec ...worker2-1 sh -c 'tail -n 40 archives.json' | python3 -I -c '... parse timestamp, sum bytes ...'
+lines=40 total_bytes=31790
+min_ts=2026-10-11T17:32:36.841+0000 max_ts=2026-10-11T17:32:36.959+0000
+```
+
+| layer | new lines | new bytes | real span | events/s | bytes/s |
+|---|---|---|---|---|---|
+| alerts (ClickHouse-timestamp precise) | 19 | 21,071 | 101ms | **~188** | **~208,600** |
+| archives (file-timestamp precise) | 40 | 31,790 | 118ms | **~339** | **~269,400** |
+
+**Archives grew more than twice as many lines as alerts for the same burst** (40 vs.
+19) - consistent with §4's own finding and this phase's sequences.py work: several
+real sshd lines in a burst (`Connection closed by invalid user ...`,
+`drop connection ... past MaxStartups`) never individually satisfy an alert rule, so
+they only ever reach archives, never alerts. The two spans overlap almost exactly
+(36.841-36.959 vs. 36.858-36.959) - same real burst, measured twice, from two
+different real data sources, agreeing with each other.
+
+**Both bursts' resulting rows (main tenant, agent `agent-rocky-1`/`009`) exported and
+purged afterward**, same procedure as every other test burst this phase -
+`~/shadowtracer-lab-purges/purge-2026-10-11-5c1-archives-measurement/`: 1 incident, 19
+incident_alerts, 19 ClickHouse events. Confirmed zero residual on both replicas.
 
 ### Real decoder/logsource breakdown, sampled directly (not estimated)
 
