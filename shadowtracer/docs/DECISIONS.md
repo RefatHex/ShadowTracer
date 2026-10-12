@@ -712,3 +712,38 @@ down-migration does `DROP COLUMN`, a genuine one-way data-loss point on rollback
 any tenant with a real (non-default) value in that column - not hit by this test's
 tenant, but real for production. Re-upgraded to HEAD and tore the stack down
 afterward.
+
+## Phase 5.5 Item 4: backup and restore (mechanism recommended, real restore test run)
+
+Full writeup in `docs/design/BACKUP_RESTORE.md`. Mechanism: Postgres `pg_dump`/
+`pg_restore` (logical - dataset doesn't justify `pg_basebackup` yet), ClickHouse native
+`BACKUP`/`RESTORE` to a new `backups` disk, Kafka not backed up by design (7-day
+retention is the replay buffer, not durable storage - bounds RPO instead).
+
+Consistency: writer and correlator are independent Kafka consumer groups on the same
+topic, so backup ordering alone cannot guarantee Postgres/ClickHouse consistency -
+proposed recording both groups' offsets at backup time and replaying the behind one
+on restore (same mechanism `replay_unknown_tenant_dead_letters.py` already uses for a
+different gap). Verified this is actually safe to do: reset a consumer group backward
+by 5 and reran it for real - raw `count()` briefly over-counted (5 duplicates,
+unmerged) but `count() FINAL`/`uniqExact` were correct (7) immediately, same
+`ReplicatedReplacingMergeTree` behavior already documented for `dead_letter_events`.
+
+Ran a real restore test in a separate stack (`deploy/ci/backup-test/`, own network/
+ports/volumes, lab's 26 containers confirmed untouched). Generated real data (tenant/
+admin/audit entry, 5 real events through the real writer, 2 incidents into 1 real
+campaign, 1 real dead letter). Backed up (BACKUP: 0.24s, pg_dump: 0.30s). Destructively
+wiped both databases for real. `pg_restore` worked immediately (0.6s). **ClickHouse's
+`RESTORE DATABASE` failed on the first attempt** - `REPLICA_ALREADY_EXISTS` - a real
+Keeper-metadata snag: `DROP DATABASE` left `ReplicatedMergeTree` replica registrations
+behind in Keeper. Fixed for real with `SYSTEM DROP REPLICA ... FROM ZKPATH ...` per
+affected table (confirmed via `system.zookeeper`, not guessed), then `RESTORE`
+succeeded (0.43s). All data and the audit hash chain verified byte-identical after
+restore via the real `cli.py verify-audit-chain`. Console verified working against
+the restored data (real login, real JWT issued). Pipeline resumption verified (7
+events, 7 distinct ids, zero loss/duplication across the restore).
+
+RPO: bounded by backup frequency, with Kafka's 7-day retention closing any
+writer/correlator offset gap within that window. RTO: restore itself sub-second per
+store at this dataset's size; the Keeper-cleanup step is real added time a written
+runbook (not yet written) would make routine instead of a from-scratch diagnosis.
