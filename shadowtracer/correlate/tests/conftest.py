@@ -27,14 +27,16 @@ ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "
 INGEST_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ingest")
 _CLICKHOUSE_SCHEMA_PATH = os.path.join(INGEST_DIR, "schema", "events_schema.sql")
 
-TEST_POSTGRES_DB = "shadowtracer_test"
 # Session-unique, not a fixed "shadowtracer_test" - found the hard way
 # (2026-10-08, see MEMORY/project_test_suite_db_race.md): a shared fixed
-# name let this suite's session-start DROP+recreate race the ingest
-# suite's own identical fixture when both ran concurrently against the
-# same real cluster. Generated once at conftest import time (= once per
-# pytest session, same as the Keeper path prefix below), dropped again at
-# session end so it doesn't orphan a database per run.
+# name let this suite's session-start DROP+recreate race the ingest/backend
+# suites' own identical fixtures when run concurrently against the same real
+# cluster. The 2026-10-08 fix only applied this to TEST_CLICKHOUSE_DB below -
+# TEST_POSTGRES_DB was still the fixed "shadowtracer_test" until now, so the
+# same race was still live on Postgres. Generated once at conftest import
+# time (= once per pytest session), dropped again at session end so it
+# doesn't orphan a database per run.
+TEST_POSTGRES_DB = f"shadowtracer_test_{uuid.uuid4().hex[:8]}"
 TEST_CLICKHOUSE_DB = f"shadowtracer_test_{uuid.uuid4().hex[:8]}"
 LAB_CLICKHOUSE_DB = "shadowtracer"
 

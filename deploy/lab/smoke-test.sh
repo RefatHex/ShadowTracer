@@ -17,7 +17,7 @@
 # structural-health check shouldn't do by default. Run it on its own:
 #   ./verify-correlator-chaos.sh
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 fail=0
 check() {

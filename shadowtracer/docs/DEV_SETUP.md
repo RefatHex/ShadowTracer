@@ -99,3 +99,39 @@ step is unconditional (unlike its source-fallback path, it isn't guarded by
 `src/wazuh-agentd` was produced. **Takeaway:** don't run `make clean` between
 `make deps` and the first build in a fresh checkout; if you do, run
 `make deps` once more before building.
+
+## Local CI
+
+GitHub Actions doesn't run on this account yet (every run fails before a
+runner is even assigned — see `docs/DECISIONS.md`'s Phase 5.5 Item 2 entry).
+Until that's fixed, run the same checks locally:
+
+```
+deploy/ci/run-ci.sh
+```
+
+Runs, in order, failing fast on the first error: `check-project.sh`,
+`shellcheck` (on `shadowtracer/` and `deploy/` only — not the 93 inherited
+Wazuh scripts this project doesn't maintain), the `ingest`/`correlate`/
+`console/backend` pytest suites (sequentially — see the script's own
+comment for why: a shared Postgres role races under concurrency), the
+frontend (`oxlint`, `vitest`, `tsc`/`vite build`), and an agent build
+inside a clean `ubuntu:22.04` container. Needs the lab stack up
+(`docker compose -f deploy/lab/docker-compose.yml up -d`) for the pytest
+suites, and Docker for the last step.
+
+The exact same `check-project`/`shellcheck-syntax`/`build-agent` jobs still
+run via `act` (`act -j check-project`, etc.) once GitHub Actions itself is
+fixed — `run-ci.sh` is additive, not a replacement for
+`.github/workflows/ci.yml`.
+
+**Pre-push hook (opt-in):**
+
+```
+ln -sf ../../deploy/ci/pre-push-hook.sh .git/hooks/pre-push
+```
+
+Runs only the fast, lab-independent subset (`check-project.sh`, shellcheck,
+frontend lint+test — ~6s measured) on every `git push`. Deliberately
+excludes the pytest suites (lab-dependent, 2-4 minutes combined); those run
+via `run-ci.sh` and CI. Bypass once with `git push --no-verify`.

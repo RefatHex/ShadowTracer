@@ -599,3 +599,81 @@ this codebase's alert JSON today, and would move tenant identity from
 trusted-by-construction to agent-influenced-at-enrollment (`-G` is accepted with no
 authorization check in `src/os_auth/auth.c:158-184`). Not decided yet - project owner
 to weigh in.
+
+## Phase 5.5 Item 2: local CI (done - run-ci.sh, pre-push hook, GitHub Actions diagnosis)
+
+- **`deploy/ci/run-ci.sh`**: one command running check-project.sh, shellcheck (our own
+  scripts only), the three real-database pytest suites, the frontend, and an agent
+  build in a clean `ubuntu:22.04` container - sequentially, fails on first error. See
+  `docs/DEV_SETUP.md`'s "Local CI" section for usage. Measured end-to-end: ~314s for
+  everything through the frontend step (ingest 202s, correlate 67s, backend 31s,
+  frontend 12s, check-project+shellcheck+lab-check ~2s), plus the agent build (see
+  below for why its first real run took three attempts).
+- **`deploy/ci/pre-push-hook.sh`** (opt-in, install command in DEV_SETUP.md): fast
+  lab-independent subset only (check-project.sh, shellcheck, frontend lint+test),
+  measured ~6s. The pytest suites are lab-dependent and too slow (2-4 min combined)
+  for a push-time gate; no pure-unit tier exists to run instead - verified directly
+  that even a test file touching no DB in its own body still pays conftest.py's full
+  session-fixture cost, since every suite's autouse fixture is session-scoped.
+- **Three real bugs found while building/verifying this, all fixed:**
+  1. **Postgres test-DB name race, half-fixed, not fully**: the 2026-10-08 fix
+     (MEMORY/project_test_suite_db_race.md) made `TEST_CLICKHOUSE_DB` session-unique
+     in all three suites but left `TEST_POSTGRES_DB` as the fixed string
+     `"shadowtracer_test"` in `correlate` and `console/backend` (their own comments
+     *claimed* it was already session-unique - it wasn't). Fixed in both
+     `tests/conftest.py` files to match `ingest`'s pattern. Verified by running all
+     three suites concurrently before and after: before, `console/backend` failed
+     with 94 errors; after, all three passed concurrently (and are now run
+     sequentially in `run-ci.sh` anyway, for the next bug).
+  2. **Postgres role race, a second, separate bug**: Postgres roles are
+     cluster-global, not per-database. Every suite's Alembic migration does
+     `ALTER ROLE shadowtracer_app WITH PASSWORD ...`
+     (`shadowtracer/ingest/alembic/versions/5f408777ad31_*.py`) against that one
+     shared role even though each suite targets its own isolated database -
+     concurrent runs hit a real `psycopg2.errors.InternalError: tuple concurrently
+     updated` on the shared `pg_authid` catalog row, reproduced directly by running 3
+     concurrent `alembic upgrade head` processes. Not fixed in the migration itself
+     (out of scope, production-affecting); `run-ci.sh` runs suites sequentially
+     instead, which avoids it entirely.
+  3. **Agent build fails from a clean container - two causes, both fixed**:
+     (a) `cp -r` (not `-a`) resets copied files' mtimes to "now" in traversal order,
+     which can make vendored `src/external/libyaml`'s pre-generated `aclocal.m4`
+     look older than its own `Makefile.am` - triggering a regenerate-via-`ACLOCAL`
+     rule in libyaml's shipped `Makefile` that hardcodes
+     `/build_wazuh/rpmbuild/BUILD/wazuh-agent-4.8.0/...` (a leftover absolute path
+     from whatever RPM buildroot produced this vendored tarball, for a far older
+     4.8.0, never since regenerated) - fails with "No such file" since that path
+     exists nowhere outside Wazuh's own build infra. Fixed: `cp -a` in
+     `run-ci.sh` (preserves the host's already-correct mtime ordering).
+     (b) `external/libbpf-bootstrap`'s CMake `ExternalProject_Add` needs `git` to
+     clone its own dependency - missing from both `run-ci.sh`'s package list AND
+     `.github/workflows/ci.yml`'s `build-agent` job (which only ever installed
+     `build-essential automake autoconf libtool cmake`, matching `run-ci.sh`'s first
+     draft exactly). `docs/DEV_SETUP.md`'s own prior verified clean-build record
+     already listed `git curl wget ca-certificates` as needed - the GitHub Actions
+     job just never matched it, and this was never caught because that job has never
+     actually run on GitHub (every run fails before a runner is assigned - see
+     below). Fixed in both files.
+- **Known flaky test, found while verifying `run-ci.sh`, NOT fixed (out of this
+  item's scope)**: `shadowtracer/ingest/tests/test_writer.py::
+  test_replay_does_not_inflate_base_table_or_rollup` failed once in a full
+  `run-ci.sh` run (asserted 10 rows after a replay, got 20 - ClickHouse's
+  `insert_deduplication_token` did not dedupe that time) but passed 3/3 in
+  isolation and 46/46 on an immediate full-suite rerun - consistent with the
+  dedup token's window being time-bounded and occasionally exceeded under
+  this test's own timing, not a regression from anything touched here. Left
+  as a known flake, not chased further or fixed.
+- **GitHub Actions diagnosis**: queried the public API directly
+  (`api.github.com/repos/RefatHex/ShadowTracer/actions/runs`) rather than guessing.
+  All 15 most recent CI runs show `status: completed`, `conclusion: failure`, each
+  finishing in 1-3 seconds. Per-job detail: zero recorded `steps`, `runner_id: 0`,
+  `runner_name: ""` - no runner was ever assigned to any job, for any run, so nothing
+  in `.github/workflows/ci.yml` itself ever executed. `runs-on: ubuntu-22.04` is a
+  valid, standard GitHub-hosted label, ruling out a bad label as the cause. This is
+  consistent with an account-level block (billing/spending limit or a manual-review
+  hold), not a workflow bug - `/repos/.../actions/permissions` requires auth (401), so
+  this can't be confirmed further without `gh auth` or repo-admin access, and account/
+  billing settings are explicitly out of scope here per instruction. Once Actions is
+  unblocked, `act` (confirmed still runs `check-project` unchanged, see
+  `docs/DEV_SETUP.md`) and the `build-agent` fix above mean the workflow should run
+  for real, not just get scheduled, for the first time.

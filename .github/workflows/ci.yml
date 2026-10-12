@@ -36,6 +36,14 @@ jobs:
           submodules: recursive
       - run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential automake autoconf libtool cmake
+          # git/curl/wget/ca-certificates: external/libbpf-bootstrap's CMake
+          # ExternalProject_Add needs git to clone its own dependency - found
+          # the hard way (Phase 5.5 Item 2) running this same build in a
+          # clean ubuntu:22.04 container locally via deploy/ci/run-ci.sh, the
+          # first time this job's exact command ever actually ran (every
+          # GitHub Actions run of this workflow has failed before a runner
+          # was even assigned, so this was never exposed here before).
+          sudo apt-get install -y -qq build-essential automake autoconf libtool cmake \
+              git curl wget ca-certificates
       - run: cd src && make deps TARGET=agent
       - run: cd src && make TARGET=agent -j$(nproc)

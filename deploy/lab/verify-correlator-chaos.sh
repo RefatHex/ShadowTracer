@@ -35,11 +35,10 @@
 #
 # Run from deploy/lab/: ./verify-correlator-chaos.sh
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 set -a; source .env; set +a
 
 GROUP=shadowtracer-correlate
-TOPIC=shadowtracer.events.raw
 KAFKA_BOOTSTRAP=127.0.0.1:9094
 PY="../../shadowtracer/correlate/.venv/bin/python3"
 
@@ -157,7 +156,7 @@ find_agent_for_owner() {
 }
 
 run_cycle() {
-    local run_label="$1" target_ip="$2" victim_name="$3" victim_ip="$4" survivor_name="$5" survivor_ip="$6"
+    local run_label="$1" target_ip="$2" victim_name="$3" victim_ip="$4" survivor_name="$5"
 
     echo
     echo "=== Run $run_label: target owner = $victim_name ($target_ip) ==="
@@ -173,7 +172,8 @@ run_cycle() {
     check "[$run_label] total owned = 24 before this run" "[ \"$total\" = 24 ]"
 
     echo "--- searching for an agent whose partition is owned by $victim_name ---"
-    local marker="${run_label}$(date +%s)"
+    local marker
+    marker="${run_label}$(date +%s)"
     local find_output agent partition
     if ! find_output="$(find_agent_for_owner "$target_ip" "$marker")"; then
         echo "FAIL: [$run_label] could not find any agent owned by $victim_name ($target_ip) within attempt budget"

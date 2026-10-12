@@ -6,7 +6,7 @@
 #
 # Run from deploy/lab/: ./verify-phase5b.sh
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 set -a; source .env; set +a
 
 PY_CORRELATE="../../shadowtracer/correlate/.venv/bin/python3"
