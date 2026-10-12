@@ -504,18 +504,22 @@ work. Two options, **neither chosen yet**:
 - **(b) Shared managers, tenant derived from the agent's own Wazuh group or a label.**
   Wazuh agents can carry a group assignment (`agent_control`/`agent_groups`) the shipper
   (or a new normalizer step) could read per-alert instead of taking tenant identity from
-  its own static env var - `agent.group` (or a comparable field) is already present on
-  every real alert's JSON, confirmed in passing while building the Step 0a/§11 analysis
-  (not re-verified here against every alert shape). Cost: tenant identity moves from "a
-  property of which process shipped this line" (trusted by construction, the shipper
-  only ever runs with one `TENANT_ID`) to "a property of attacker-reachable alert
-  content" (an agent's own reported group, or whatever field carries it) - a compromised
-  or misconfigured agent could plausibly misreport its group, and nothing downstream of
-  the shipper currently treats that as a trust boundary. Needs its own real investigation
-  (can an enrolled agent change its own group without manager-side authorization? is
-  group assignment itself per-manager or cluster-wide?) before this is a real proposal,
-  not just an idea - **not investigated here, flagged as the open question blocking this
-  option specifically.**
+  its own static env var. **Correction (Phase 5.5 Item 1, see
+  `docs/design/TENANCY.md` §3): the claim directly above this one - that
+  `agent.group` is "already present on every real alert's JSON" - was wrong,**
+  not just unverified. A real read of `src/analysisd/format/to_json.c` and
+  `json_extended.c` found the alert's `agent` JSON object carries only `id`,
+  `name`, `ip`, and `labels` - no group field at all; `wdb_get_agent_group()`
+  (`src/wazuh_db/helpers/wdb_global_helpers.c:645`) exists but its only caller
+  in the whole repo is `remoted` (`src/remoted/manager.c:1569`), never
+  `analysisd`. Option (b) as originally stated cannot work unmodified. The
+  investigation below (also now done) still stands on its own: group
+  assignment is **agent-asserted at enrollment**, not purely manager-side -
+  `src/os_auth/auth.c:158-184` parses a client-supplied `-G <group>` token
+  with no existence/authorization check beyond enrollment auth, and
+  `src/os_auth/main-server.c:1136-1143` writes it with
+  `WDB_GROUP_MODE_OVERRIDE`. See TENANCY.md for the full citation trail and
+  what this means for option (b)'s viability.
 
 **Noted while this was found, not yet acted on:** the dedicated test tenant (Phase 5C
 Step 0, item 3) bypasses `shadowtracer-lb` entirely - `agent-ubuntu-1`'s
@@ -585,3 +589,13 @@ this file is what the next phase reads, not the full design doc.
   2,418 windows rules - no Windows data source yet). Closing this runs through 5C-1's
   data-source work and Phase 5D's attack execution, not through this decision alone -
   recorded here so this entry doesn't imply more real coverage exists than does.
+
+## Phase 5.5 Item 1: tenancy model for production (recommendation given, not decided)
+
+Full design and citation trail in `docs/design/TENANCY.md`. Recommendation: option
+(A), dedicated manager per tenant (today's lab mechanism, unchanged) - option (B)
+(shared managers, tenant derived from agent group) needs a field that doesn't exist in
+this codebase's alert JSON today, and would move tenant identity from
+trusted-by-construction to agent-influenced-at-enrollment (`-G` is accepted with no
+authorization check in `src/os_auth/auth.c:158-184`). Not decided yet - project owner
+to weigh in.
