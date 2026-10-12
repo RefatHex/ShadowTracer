@@ -764,3 +764,25 @@ current. Confirmed (by grepping, not assuming) that ShadowTracer's own ingest/
 correlate/console-backend code never imports the GPL `framework` package or calls the
 manager's API directly - the only GPL boundary is files (`alerts.json`/`archives.json`,
 read-only) and Kafka (network), never linking.
+
+## Phase 5.5 Item 6: threat model outline (report only, no fixes)
+
+Full outline in `docs/design/THREAT_MODEL.md`. Every boundary's "what protects it
+today" claim is evidence (a command run, a file/line cited), not a guess. Top findings,
+all confirmed directly: **Kafka has zero authentication on every listener**
+(`SASL`/`SSL`/`TLS` grepped across the whole compose file - zero matches) - the widest
+-open boundary, and the one the tenant-isolation model depends on being closed, since
+`TENANT_ID` is asserted by the shipper into that otherwise-unauthenticated bus.
+**Postgres/ClickHouse traffic is cleartext** (`SHOW ssl` -> `off`, confirmed directly;
+no `interface="https"` anywhere `clickhouse_connect.get_client()` is called). **One
+shared `JWT_SECRET` signs every tenant's tokens** - compromise breaks cross-tenant
+isolation for every tenant at once, the same single-shared-resource pattern
+`docs/design/TENANCY.md` already flagged for fingerprints. **ClickHouse has no
+per-service least privilege** (zero `GRANT`/`ROLE` statements in `events_schema.sql`)
+where **Postgres does** (the restricted `shadowtracer_app` role, confirmed real -
+`audit_log` has `UPDATE`/`DELETE` explicitly revoked from it). Real positive findings
+stated too, not just gaps: secrets are gitignored and never hardcoded in compose files
+(confirmed); browser-to-console already has real TLS (Caddy). Rule/feed updates and a
+future SOAR don't exist yet (confirmed empty), so nothing to threat-model there today -
+flagged for a real pass once either is built. No fixes made, per instruction - this is
+the input to whatever gets prioritized next.
