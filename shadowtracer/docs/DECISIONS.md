@@ -747,3 +747,20 @@ RPO: bounded by backup frequency, with Kafka's 7-day retention closing any
 writer/correlator offset gap within that window. RTO: restore itself sub-second per
 store at this dataset's size; the Keeper-cleanup step is real added time a written
 runbook (not yet written) would make routine instead of a from-scratch diagnosis.
+
+## Phase 5.5 Item 5: licence boundary inventory (not legal advice)
+
+Full inventory in `docs/design/LICENSE_INVENTORY.md`, generated from this repo's real
+dependency trees (no new SBOM tool added - Python via stdlib `importlib.metadata`,
+npm via each package's own `package.json`, sidestepping the "verify the SBOM tool's
+own licence" question entirely). Found: GPLv2 base (confirmed via `ruleset/`'s own
+header), one copyleft Python dependency (`psycopg2-binary`, LGPL, statically bundles
+`libpq` - flagged for a lawyer), 3 MPL-2.0 npm packages (`lightningcss` + 2 native
+builds), no GPL/AGPL anywhere in either dependency tree. **pySigma and Sigma rules are
+not yet real dependencies** - grepped every `requirements.txt` and the whole tree for
+rule files, zero matches; Phase 5C's Sigma work is design-only per this file's own
+"0 of 3,152 rules lab-backed" entry, so their licence obligations are future, not
+current. Confirmed (by grepping, not assuming) that ShadowTracer's own ingest/
+correlate/console-backend code never imports the GPL `framework` package or calls the
+manager's API directly - the only GPL boundary is files (`alerts.json`/`archives.json`,
+read-only) and Kafka (network), never linking.
