@@ -1,0 +1,132 @@
+# Phase 5.5 Item 3: upgrade/rollback test stack. Deliberately separate from
+# deploy/lab's docker-compose.yml - own project name, own network (172.30.0.0/24,
+# not the lab's 172.28.0.0/24), own host ports, own volumes - so a destructive
+# upgrade/rollback test never touches the main lab, per the phase's own rule.
+#
+# Data-platform only (Postgres, ClickHouse, Kafka) - no Wazuh managers/agents.
+# Item 3 is about ShadowTracer's OWN schema/envelope versioning, not the
+# (unversioned-by-this-item) Wazuh C agent/manager pipeline; the ingest/
+# correlate/console-backend Python processes that write to this stack are run
+# directly from the host (same pattern the pytest suites already use - real
+# code, real services, over published host ports), not as containers, to
+# avoid building a second set of images for a one-off test.
+name: shadowtracer-upgrade-test
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    mem_limit: 768m
+    environment:
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID:?set in deploy/ci/upgrade-test/.env}"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://127.0.0.1:19094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms512m"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "127.0.0.1:19094:9094"
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      upgrade_test:
+        ipv4_address: 172.30.0.10
+
+  ch-keeper:
+    image: clickhouse/clickhouse-keeper:24.8
+    hostname: ch-keeper
+    mem_limit: 256m
+    volumes:
+      - ./clickhouse/keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - ch-keeper-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "9181"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    networks:
+      upgrade_test:
+        ipv4_address: 172.30.0.11
+
+  ch-clickhouse-1:
+    image: clickhouse/clickhouse-server:24.8
+    hostname: ch-clickhouse-1
+    mem_limit: 1500m
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    environment:
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER:?set in deploy/ci/upgrade-test/.env}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:?set in deploy/ci/upgrade-test/.env}"
+      CLICKHOUSE_DB: shadowtracer
+    volumes:
+      - ./clickhouse/config.d/zookeeper.xml:/etc/clickhouse-server/config.d/zookeeper.xml:ro
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/resources.xml:/etc/clickhouse-server/config.d/resources.xml:ro
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/macros.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ch1-data:/var/lib/clickhouse
+    depends_on:
+      ch-keeper:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18123:8123"
+      - "127.0.0.1:19000:9000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      upgrade_test:
+        ipv4_address: 172.30.0.12
+
+  postgres:
+    image: postgres:16-alpine
+    hostname: postgres
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:?set in deploy/ci/upgrade-test/.env}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set in deploy/ci/upgrade-test/.env}"
+      POSTGRES_DB: "${POSTGRES_DB:-shadowtracer}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      upgrade_test:
+        ipv4_address: 172.30.0.13
+
+networks:
+  upgrade_test:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  kafka-data:
+  ch-keeper-data:
+  ch1-data:
+  postgres-data:

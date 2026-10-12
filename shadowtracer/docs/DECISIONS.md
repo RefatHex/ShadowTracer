@@ -677,3 +677,38 @@ to weigh in.
   unblocked, `act` (confirmed still runs `check-project` unchanged, see
   `docs/DEV_SETUP.md`) and the `build-agent` fix above mean the workflow should run
   for real, not just get scheduled, for the first time.
+
+## Phase 5.5 Item 3: versioning and upgrades (scheme + inventory recommended, real upgrade/rollback test run)
+
+Full writeup in `docs/design/VERSIONING.md`. Checked every place a version marker
+could live today - found none wired up (`shadowtracer/VERSION` unused,
+`package.json`'s version a placeholder, FastAPI's default, no Kafka envelope version
+field at all). Recommends semantic versioning sourced from `shadowtracer/VERSION`,
+surfaced via the API/console, plus a new `envelope_version` Kafka header - directly
+motivated by the real, already-documented 46 unrecoverable pre-envelope dead letters
+(`docs/PHASE3_DATA_PLATFORM.md`).
+
+Schema inventory: Postgres/Alembic is real and versioned (13 migrations). ClickHouse
+is **not** - `apply_schema()`'s `CREATE TABLE IF NOT EXISTS` silently no-ops a column
+added to an existing table, demonstrated concretely (not just read from code) against
+an isolated test table. Checked whether this has bitten anyone: every real schema
+change in this project's git history so far added a whole new table, never altered an
+existing one - the gap is real but has never actually been exercised. Proposed a
+versioned migration mechanism (numbered SQL files + a tracking table) - not built yet.
+
+Ran a real upgrade+rollback test in a genuinely separate stack
+(`deploy/ci/upgrade-test/`, own network/ports/volumes, lab's 26 containers confirmed
+untouched before and after): old version = commit `a233b161ce` (pre-Phase-5C) in a git
+worktree, new version = HEAD, 3 real Alembic migrations apart. Generated real data
+with the OLD code (tenant/admin/audit entry, 2 incidents closed into 1 real campaign
+via the real `close_eligible_incidents`, a real dead letter via the real
+`send_to_dead_letter`). Upgraded for real: all data and the audit hash chain verified
+byte-identical before/after via the real `cli.py verify-audit-chain`. Resumption
+tested by restarting the real `run_writer.py` mid-stream (3 then 4 events, same
+consumer group): 7 events, 7 distinct ids, zero loss or duplication. Rollback tested
+for real (`alembic downgrade`, all 3 down-migrations actually implemented, not
+stubs) - data and audit chain stayed intact, but found a real caveat: one
+down-migration does `DROP COLUMN`, a genuine one-way data-loss point on rollback for
+any tenant with a real (non-default) value in that column - not hit by this test's
+tenant, but real for production. Re-upgraded to HEAD and tore the stack down
+afterward.
