@@ -590,15 +590,23 @@ this file is what the next phase reads, not the full design doc.
   data-source work and Phase 5D's attack execution, not through this decision alone -
   recorded here so this entry doesn't imply more real coverage exists than does.
 
-## Phase 5.5 Item 1: tenancy model for production (recommendation given, not decided)
+## Phase 5.5 Item 1 / Phase 5.6: tenancy model for production - DECIDED (option A)
 
-Full design and citation trail in `docs/design/TENANCY.md`. Recommendation: option
-(A), dedicated manager per tenant (today's lab mechanism, unchanged) - option (B)
-(shared managers, tenant derived from agent group) needs a field that doesn't exist in
-this codebase's alert JSON today, and would move tenant identity from
+Full design and citation trail in `docs/design/TENANCY.md`. **Decided (Phase 5.6):
+option (A), dedicated manager per tenant** - today's lab mechanism, unchanged. Option
+(B) (shared managers, tenant derived from agent group) needs a field that doesn't
+exist in this codebase's alert JSON today, and would move tenant identity from
 trusted-by-construction to agent-influenced-at-enrollment (`-G` is accepted with no
-authorization check in `src/os_auth/auth.c:158-184`). Not decided yet - project owner
-to weigh in.
+authorization check in `src/os_auth/auth.c:158-184`) - not revisited now.
+
+**Open dependency, flagged at decision time**: option (A)'s isolation strength
+(`TENANCY.md` §1 - "trusted by construction, no agent input anywhere in the chain")
+is only as strong as `tenant_key` actually being unforgeable once it leaves the
+shipper. Per `docs/design/THREAT_MODEL.md`'s own #1/#5 ranked findings, Kafka today
+has zero authentication and the shipper asserts `tenant_id` into that
+otherwise-unauthenticated bus - meaning the tenancy model's own foundational
+assumption is not yet actually enforced downstream. Phase 5.6 Item 1
+(`docs/design/KAFKA_AUTH.md`) is the fix in progress for exactly this gap.
 
 ## Phase 5.5 Item 2: local CI (done - run-ci.sh, pre-push hook, GitHub Actions diagnosis)
 
