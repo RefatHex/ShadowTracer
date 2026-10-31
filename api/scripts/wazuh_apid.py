@@ -1,4 +1,14 @@
-#!/var/ossec/framework/python/bin/python3
+#!/bin/sh
+""":"
+# Rebrand Pass C prep: the old shebang hardcoded /var/ossec, so running this
+# script directly (bypassing wrappers/generic_wrapper.sh, which already
+# derives WAZUH_PATH correctly) would silently fail on any other install
+# path. Same self-locating logic as generic_wrapper.sh, as a polyglot
+# sh/Python header: sh runs the exec below, Python sees lines 2-6 as one
+# inert triple-quoted string literal. See UPSTREAM.md.
+_D="$(cd "$(dirname "$0")/../.."; pwd)"
+exec "${WAZUH_PATH:-$_D}/framework/python/bin/python3" "$0" "$@"
+":"""
 
 # Copyright (C) 2015, Wazuh Inc.
 # Created by Wazuh, Inc. <info@wazuh.com>.

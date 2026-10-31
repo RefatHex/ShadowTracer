@@ -17,6 +17,10 @@ RUN cd src && make deps && make TARGET=agent -j4
 
 FROM rockylinux:9 AS runtime
 
+# Rebrand Pass C prep: one setting for the install dir, default unchanged -
+# see docs/design/REBRAND_PASS_C.md and manager.Dockerfile's identical ARG.
+ARG INSTALL_DIR=/var/ossec
+
 RUN dnf install -y -q --allowerasing \
         procps-ng iproute ca-certificates gawk curl \
         openssh-server openssh-clients rsyslog sudo shadow-utils passwd audit && \
@@ -44,6 +48,7 @@ RUN curl -fsSL -o /tmp/osquery.rpm \
 WORKDIR /wazuh
 COPY --from=builder /wazuh /wazuh
 COPY deploy/lab/preloaded-vars-agent.conf /wazuh/etc/preloaded-vars.conf
+RUN sed -i "s|^USER_DIR=.*|USER_DIR=\"${INSTALL_DIR}\"|" /wazuh/etc/preloaded-vars.conf
 
 RUN cd /wazuh && ./install.sh
 
@@ -58,7 +63,7 @@ RUN cd /wazuh && ./install.sh
 # system libgcc (11.4.1-2.1.el9, installed before any dev-tool package
 # pulls in the newer one) only needs up to GLIBC_2.34 and works fine -
 # use it instead of the bundled copy.
-RUN cp -f /usr/lib64/libgcc_s.so.1 /var/ossec/lib/libgcc_s.so.1
+RUN cp -f /usr/lib64/libgcc_s.so.1 "${INSTALL_DIR}/lib/libgcc_s.so.1"
 
 # Throwaway sshd, for step 3.5 (brute force) and step 3.10 (active response
 # disable-account test uses a throwaway user "sttest")

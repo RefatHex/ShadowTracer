@@ -18,6 +18,10 @@ RUN cd src && make deps && make TARGET=agent -j4
 
 FROM ubuntu:22.04 AS runtime
 
+# Rebrand Pass C prep: one setting for the install dir, default unchanged -
+# see docs/design/REBRAND_PASS_C.md and manager.Dockerfile's identical ARG.
+ARG INSTALL_DIR=/var/ossec
+
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
         procps iproute2 ca-certificates gawk curl \
@@ -63,6 +67,7 @@ RUN curl -fsSL -o /tmp/osquery.deb \
 WORKDIR /wazuh
 COPY --from=builder /wazuh /wazuh
 COPY deploy/lab/preloaded-vars-agent.conf /wazuh/etc/preloaded-vars.conf
+RUN sed -i "s|^USER_DIR=.*|USER_DIR=\"${INSTALL_DIR}\"|" /wazuh/etc/preloaded-vars.conf
 
 RUN cd /wazuh && ./install.sh
 

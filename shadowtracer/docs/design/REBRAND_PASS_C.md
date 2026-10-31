@@ -1,7 +1,7 @@
 # Rebrand Pass C: remove Wazuh branding from everything a customer can see
 
-Status: **Step 1 (audit) and Step 2 (plan) only - no changes made.** Per instruction,
-stopping here for approval before any Step 3 implementation. This builds on, and in
+Status: **plan approved. Stage 1 and the two Prep items are implemented; Stages 2-4
+are approved in direction but not yet implemented** - see §3. This builds on, and in
 one case (daemon names/system user) partially reopens, a decision already recorded in
 `docs/DECISIONS.md` ("Phase 2 Pass C decision: daemon names and the system user are
 kept") - that entry's own "if revisited" checklist is reused as the backbone of §2's
@@ -350,5 +350,98 @@ own hardcoded files) that make it a materially bigger and riskier effort than ei
 daemon renaming or the Windows items, and bundling it into the same script raises the
 chance of a silent miss in any one of those categories.
 
-No files touched in writing this report. Waiting on your decision before any Step 3
-implementation.
+## Step 3: Approved staging (decided)
+
+**Stage 1 - done.** Config header banner (`etc/templates/config/generic/header-comments.template`),
+our own Docker hostnames/container names (`wazuh-master`/`worker1`/`worker2`/`worker-test`
+-> `shadowtracer-*`, in `deploy/lab/docker-compose.yml` and every script referencing
+them), and the `COVERAGE_LABEL` string (`attack_coverage.py`, "inherited Wazuh
+ruleset" -> "inherited detection ruleset"). A console About page plus a "Built on
+Wazuh open source (GPLv2)" notice were added at the same time (not originally part of
+§1's audit, approved alongside Stage 1).
+
+**Prep - done.** `api/scripts/wazuh_apid.py`'s shebang fixed (see UPSTREAM.md and
+`shadowtracer/docs/UPSTREAM_ISSUES/api-script-shebang-hardcodes-var-ossec.md`). One
+`SHADOWTRACER_INSTALL_DIR` setting (default `/var/ossec`, no path change) now drives
+every one of the 41 scattered literal `/var/ossec` occurrences in `deploy/lab/`
+(compose env/volumes/build-args, both entrypoint scripts, both healthcheck scripts,
+`smoke-test.sh`, and a new `INSTALL_DIR` build arg in all three Dockerfiles feeding
+the `preloaded-vars-*.conf` files that used to hardcode it).
+
+**Decided, recorded, not yet built:**
+
+- **`<category>`/`<type>`/`<plugin_decoder>` values (`ossec`, `wazuh`,
+  `OSSECAlert_Decoder`) are internal - never renamed**, full stop, not staged for any
+  later phase. They are `strcmp`-matched against hardcoded C enums/arrays in
+  `src/analysisd/rules.c`, `decode-xml.c`, and `plugin_decoders.h` (§1.4) - a cosmetic
+  rename here means patching and recompiling analysisd, a fundamentally different and
+  much riskier change than any text/XML edit this phase makes elsewhere. Added
+  explicitly to this doc's own NEVER CHANGE list, distinct from "Keep: decoder names"
+  (which covers `name=`/`parent=`/`<decoded_as>`, not these values).
+- **Stage 2 = Windows NSIS installer + service rename.** `win_service.c`'s
+  `WazuhSvc`/`"Wazuh"`/`"Wazuh Windows Agent"` and the shipping NSIS installer's full
+  branding (§1.5) - a contained, source-only change, but **verification needs the
+  Windows VM** (per Phase 5.5's own standing note: paused until Hyper-V works) - no
+  live `services.msc`/installer-run/Add-Remove-Programs check is possible in this
+  WSL2-only environment. Not started.
+- **Stage 3 = daemon names + system user.** The 16 `wazuh-*` -> `st-*` renames and the
+  `wazuh` system user/group, scripted (per `docs/DECISIONS.md`'s existing revisit
+  checklist) and now additionally required to: dual-accept every one of the ~20
+  self-log-prefix decoder/rule matches found in §1.4 (not just the one previously-known
+  `0200-ossec_decoders.xml:19` case), fix the stale `SYS_USERS` list
+  (`0280-attack_rules.xml`, found in §1.3) as part of the same pass, and prove with a
+  real test that agent started/stopped/disconnected self-monitoring alerts still fire
+  under the new names. Not started.
+- **Stage 4 = install path (`/var/ossec` -> `/opt/shadowtracer`), after Stage 3, with
+  a hard gate: must be done before the first customer install, never after.** Builds on
+  the Prep item's single setting (already threaded through, default unchanged) -
+  Stage 4 is specifically changing that one default and dealing with everything §1.2
+  found that the setting alone doesn't cover (the Solaris IPS manifest, Debian
+  maintainer scripts, any remaining upstream build-time literal). Not started.
+- **`full_log` is never rewritten for display.** Alert JSON's `full_log` field carries
+  the real, original daemon log line verbatim (e.g. `"ossec: Agent started: ..."`) -
+  this phase does not retroactively rewrite historical or live `full_log` content to
+  show a new prefix. Old `ossec:`/`wazuh:` prefixes stay visible in `full_log` until
+  Stage 3 actually changes what the daemons themselves emit - at which point new
+  events naturally carry the new prefix and old ones keep the old one, same as how
+  `ossec-logcollector`/`wazuh-logcollector` already coexist in real data today.
+
+## VERIFY (real outputs, not asserted)
+
+**Re-ran the Step 1 audit for every Stage 1 item - zero hits for the old text/names.**
+Live config banner inside the rebuilt manager (`docker exec ... head -4
+/var/ossec/etc/ossec.conf`): `ShadowTracer - Manager - Default configuration for
+ubuntu 22.04` / `Built on Wazuh open source (GPLv2)` - no `documentation.wazuh.com`/
+mailing-list links. `docker ps | grep ^shadowtracer-lab-wazuh`: empty. `grep Wazuh
+attack_coverage.py`: empty, and the **live** API (`POST /auth/login` then `GET
+/api/attack-coverage` through Caddy) returned the updated label text for real, not
+just from source.
+
+**`check-project.sh`: OK** (after regenerating `MODIFIED_FILES.txt` and reviewing/
+committing the new `ALLOWLIST_WAZUH_TEXT.txt` diff - exactly one line removed, the old
+banner text; one line added, the new intentional "Built on Wazuh" attribution -
+reviewed, not blindly regenerated).
+
+**Full pytest suites green**: ingest 46 passed (236.79s), correlate 67 passed
+(106.28s), backend 94 passed (79.47s) - run sequentially per the known Postgres-role
+race (`docs/DECISIONS.md`). Frontend: `tsc -b` clean, `vitest run` 9 passed, `oxlint`
+only the one pre-existing unrelated warning (`AuthContext.tsx`).
+
+**Images actually rebuilt from clean** (manager/agent-ubuntu/agent-rocky's prior build
+cache had been lost to an earlier `docker buildx prune -f` run while recovering from
+an unrelated environment issue - a real full `make deps && make TARGET=server`/
+`TARGET=agent` rebuild, not a no-op): confirmed via fresh image timestamps, and
+`console-backend` rebuilt separately (Python-only, no C compile needed).
+
+**`smoke-test.sh` run clean twice in a row** against the rebuilt images: both runs
+`SMOKE TEST: PASS`, including the renamed cluster showing up correctly in real
+command output (`cluster_control -l`: `master ... shadowtracer-master`; `agent_control
+-l`: `ID: 000, Name: shadowtracer-master (server)`), and "no pipeline container
+restarted" / "main lab tenant received zero new incidents" both held across both runs.
+
+**Shebang fix verified against the real rebuilt install**, not just the earlier
+manual-copy test: `docker exec ... sh /var/ossec/api/scripts/wazuh_apid.py --help`
+printed real argparse help (interpreter resolved via the fixed polyglot header,
+relative to the script's real location); `shadowtracer-control status` separately
+confirms `wazuh-apid is running` via the unaffected wrapper path - the daemon itself
+was never at risk, only direct execution was.

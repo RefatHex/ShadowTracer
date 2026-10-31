@@ -88,6 +88,7 @@ D	src/init/templates/wazuh-agent.service
 D	src/init/templates/wazuh-manager.service
 M	.gitignore
 M	api/api/spec/spec.yaml
+M	api/scripts/wazuh_apid.py
 M	api/test/integration/env/base/agent/entrypoint.sh
 M	api/test/integration/env/base/manager/entrypoint.sh
 M	api/test/integration/env/configurations/manager/manager/healthcheck/healthcheck.py
@@ -96,6 +97,7 @@ M	api/test/integration/env/tools/healthcheck_utils.py
 M	api/tools/env/wazuh-agent/entrypoint.sh
 M	api/tools/env/wazuh-manager/healthcheck.sh
 M	etc/ossec.conf
+M	etc/templates/config/generic/header-comments.template
 M	etc/templates/en/messages.txt
 M	etc/templates/en/messages/0x101-initial.txt
 M	etc/templates/en/messages/0x103-thanksforusing.txt

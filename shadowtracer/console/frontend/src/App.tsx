@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { AboutPage } from './AboutPage'
 import { AlertsPage } from './AlertsPage'
 import { AttackCoveragePage } from './AttackCoveragePage'
 import { AuthProvider, useAuth } from './AuthContext'
@@ -17,6 +18,7 @@ type View =
   | { name: 'fingerprints' }
   | { name: 'fingerprint'; key: string }
   | { name: 'attack-coverage' }
+  | { name: 'about' }
 
 function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => void }) {
   const { logout } = useAuth()
@@ -41,9 +43,19 @@ function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => voi
           </button>
         ))}
       </nav>
-      <button onClick={() => void logout()} className="text-sm text-gray-500 hover:text-gray-700">
-        Sign out
-      </button>
+      <div className="flex items-center gap-4">
+        <button
+          onClick={() => onNavigate({ name: 'about' })}
+          className={`text-sm ${
+            view.name === 'about' ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          About
+        </button>
+        <button onClick={() => void logout()} className="text-sm text-gray-500 hover:text-gray-700">
+          Sign out
+        </button>
+      </div>
     </header>
   )
 }
@@ -72,6 +84,7 @@ function AppContent() {
         <FingerprintDetailPage fingerprintKey={view.key} onBack={() => setView({ name: 'fingerprints' })} />
       )}
       {view.name === 'attack-coverage' && <AttackCoveragePage />}
+      {view.name === 'about' && <AboutPage />}
     </div>
   )
 }

@@ -27,7 +27,7 @@ from ..rbac import ALL_ROLES
 router = APIRouter(prefix="/api", tags=["attack-coverage"])
 
 COVERAGE_LABEL = (
-    "Rules that exist for this technique in the inherited Wazuh ruleset - "
+    "Rules that exist for this technique in the inherited detection ruleset - "
     "NOT a claim that ShadowTracer detects this technique in practice. "
     "Tested detection coverage is validated separately (Phase 5D, Atomic Red Team)."
 )

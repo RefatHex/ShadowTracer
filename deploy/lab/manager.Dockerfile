@@ -15,6 +15,14 @@
 
 FROM ubuntu:22.04
 
+# Rebrand Pass C prep: one setting for the install dir, default unchanged -
+# see docs/design/REBRAND_PASS_C.md. Wired to docker-compose.yml's build.args
+# (SHADOWTRACER_INSTALL_DIR), so one .env value can drive both the build-time
+# install path below and the runtime SHADOWTRACER_INSTALL_DIR env var the
+# entrypoint/healthcheck scripts read - not wired to any compose service yet,
+# since no path change is happening in this item.
+ARG INSTALL_DIR=/var/ossec
+
 # chrony pulls in tzdata, which prompts interactively for a timezone with
 # no DEBIAN_FRONTEND set and no TTY in a build - hangs the build forever
 # (found the hard way: a build that never produced any output and had to
@@ -33,6 +41,7 @@ COPY . .
 RUN cd src && make deps && make TARGET=server -j4
 
 COPY deploy/lab/preloaded-vars-server.conf /wazuh/etc/preloaded-vars.conf
+RUN sed -i "s|^USER_DIR=.*|USER_DIR=\"${INSTALL_DIR}\"|" /wazuh/etc/preloaded-vars.conf
 
 RUN cd /wazuh && sh install.sh
 

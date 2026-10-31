@@ -9,10 +9,13 @@ ENROLL_PASSWORD="${ENROLL_PASSWORD:?ENROLL_PASSWORD is required}"
 AGENT_NAME="${AGENT_NAME:-$(hostname)}"
 AGENT_MANAGER_DATA_HOST="${AGENT_MANAGER_DATA_HOST:-$MANAGER_ENROLL_HOST}"
 AGENT_MANAGER_DATA_HOST_FALLBACK="${AGENT_MANAGER_DATA_HOST_FALLBACK:-}"
+# Rebrand Pass C prep: one setting for the install dir, default unchanged -
+# see entrypoint-manager.sh's identical comment and docs/design/REBRAND_PASS_C.md.
+SHADOWTRACER_INSTALL_DIR="${SHADOWTRACER_INSTALL_DIR:-/var/ossec}"
 
-OSSEC_CONF=/var/ossec/etc/ossec.conf
-CLIENT_KEYS=/var/ossec/etc/client.keys
-FIM_TEST_DIR=/var/ossec/lab-fim-test
+OSSEC_CONF="${SHADOWTRACER_INSTALL_DIR}/etc/ossec.conf"
+CLIENT_KEYS="${SHADOWTRACER_INSTALL_DIR}/etc/client.keys"
+FIM_TEST_DIR="${SHADOWTRACER_INSTALL_DIR}/lab-fim-test"
 
 # Phase 3 follow-up 3: event data now goes through shadowtracer-lb
 # (AGENT_MANAGER_DATA_HOST=shadowtracer-lb in docker-compose.yml), and
@@ -122,12 +125,12 @@ fi
 # no longer needs -I <static-ip>.
 if [ ! -s "$CLIENT_KEYS" ]; then
     for i in $(seq 1 60); do
-        /var/ossec/bin/agent-auth -m "$MANAGER_ENROLL_HOST" -p 1515 -A "$AGENT_NAME" -P "$ENROLL_PASSWORD" -a && break
+        "${SHADOWTRACER_INSTALL_DIR}/bin/agent-auth" -m "$MANAGER_ENROLL_HOST" -p 1515 -A "$AGENT_NAME" -P "$ENROLL_PASSWORD" -a && break
         echo "agent-auth: waiting for $MANAGER_ENROLL_HOST:1515 (attempt $i)"
         sleep 3
     done
 fi
 
-/var/ossec/bin/shadowtracer-control start
+"${SHADOWTRACER_INSTALL_DIR}/bin/shadowtracer-control" start
 
-exec tail -F /var/ossec/logs/ossec.log /var/ossec/logs/active-responses.log 2>/dev/null
+exec tail -F "${SHADOWTRACER_INSTALL_DIR}/logs/ossec.log" "${SHADOWTRACER_INSTALL_DIR}/logs/active-responses.log" 2>/dev/null

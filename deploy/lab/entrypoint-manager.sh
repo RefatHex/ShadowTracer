@@ -7,10 +7,15 @@ set -euo pipefail
 CLUSTER_NODE_TYPE="${CLUSTER_NODE_TYPE:-worker}"
 CLUSTER_NODE_NAME="${CLUSTER_NODE_NAME:-worker-1}"
 CLUSTER_KEY="${CLUSTER_KEY:?CLUSTER_KEY is required}"
-CLUSTER_MASTER_NAME="${CLUSTER_MASTER_NAME:-wazuh-master}"
+CLUSTER_MASTER_NAME="${CLUSTER_MASTER_NAME:-shadowtracer-master}"
 ENROLL_PASSWORD="${ENROLL_PASSWORD:?ENROLL_PASSWORD is required}"
+# Rebrand Pass C prep: one setting for the install dir, default unchanged
+# (/var/ossec) - no path change yet, just removes the 41 scattered literal
+# hardcodes across deploy/lab/ so a future change (Stage 4) touches one
+# value instead of all of them. See docs/design/REBRAND_PASS_C.md.
+SHADOWTRACER_INSTALL_DIR="${SHADOWTRACER_INSTALL_DIR:-/var/ossec}"
 
-OSSEC_CONF=/var/ossec/etc/ossec.conf
+OSSEC_CONF="${SHADOWTRACER_INSTALL_DIR}/etc/ossec.conf"
 
 # The installed ossec.conf already ships a <cluster> block with placeholder
 # values (empty <key>, node_name=node01, <node>NODE_IP</node>, disabled=yes)
@@ -39,9 +44,9 @@ if grep -q "<node>NODE_IP</node>" "$OSSEC_CONF"; then
 
     # authd: require a password for enrollment (default ships use_password=no)
     sed -i 's:<use_password>no</use_password>:<use_password>yes</use_password>:' "$OSSEC_CONF"
-    echo -n "${ENROLL_PASSWORD}" > /var/ossec/etc/authd.pass
-    chmod 640 /var/ossec/etc/authd.pass
-    chown root:wazuh /var/ossec/etc/authd.pass || true
+    echo -n "${ENROLL_PASSWORD}" > "${SHADOWTRACER_INSTALL_DIR}/etc/authd.pass"
+    chmod 640 "${SHADOWTRACER_INSTALL_DIR}/etc/authd.pass"
+    chown root:wazuh "${SHADOWTRACER_INSTALL_DIR}/etc/authd.pass" || true
 fi
 
 # Step 3 item 14 (data volume) temporarily flipped <logall>/<logall_json> on
@@ -50,7 +55,7 @@ fi
 # event archive is back off by default, matching ossec.conf's shipped default.
 
 # API: bind all interfaces, raise the request rate limit for lab load-testing.
-API_YAML=/var/ossec/api/configuration/api.yaml
+API_YAML="${SHADOWTRACER_INSTALL_DIR}/api/configuration/api.yaml"
 if [ -f "$API_YAML" ] && ! grep -q "^host:" "$API_YAML"; then
     { echo "host: ['0.0.0.0']"; echo "access:"; echo "  max_request_per_minute: 99999"; } >> "$API_YAML"
 fi
@@ -60,15 +65,15 @@ fi
 # directly, one shipper process per manager node. Docker creates a fresh
 # bind-mount host directory as root:root, which wazuh-analysisd (running
 # as wazuh:wazuh) can't write into - chown it before starting daemons.
-if mountpoint -q /var/ossec/logs/alerts 2>/dev/null; then
-    chown wazuh:wazuh /var/ossec/logs/alerts
-    chmod 755 /var/ossec/logs/alerts
+if mountpoint -q "${SHADOWTRACER_INSTALL_DIR}/logs/alerts" 2>/dev/null; then
+    chown wazuh:wazuh "${SHADOWTRACER_INSTALL_DIR}/logs/alerts"
+    chmod 755 "${SHADOWTRACER_INSTALL_DIR}/logs/alerts"
     # The shipper runs on the host as a different uid than the wazuh user
     # inside this container, so alerts.json itself also needs to stay
     # world-readable for it - lab-only, a real deployment runs the shipper
     # as a sidecar sharing the manager's uid/mount instead of across a
     # host/container uid boundary.
-    (while true; do chmod o+r /var/ossec/logs/alerts/alerts.json 2>/dev/null || true; sleep 2; done) &
+    (while true; do chmod o+r "${SHADOWTRACER_INSTALL_DIR}/logs/alerts/alerts.json" 2>/dev/null || true; sleep 2; done) &
 fi
 
 # Phase 5C Step 0b follow-up: time sync is a real deployment requirement
@@ -86,6 +91,6 @@ fi
 mkdir -p /var/log/chrony
 chronyd -x || true
 
-/var/ossec/bin/shadowtracer-control start
+"${SHADOWTRACER_INSTALL_DIR}/bin/shadowtracer-control" start
 
-exec tail -F /var/ossec/logs/ossec.log /var/ossec/logs/cluster.log /var/ossec/logs/api.log 2>/dev/null
+exec tail -F "${SHADOWTRACER_INSTALL_DIR}/logs/ossec.log" "${SHADOWTRACER_INSTALL_DIR}/logs/cluster.log" "${SHADOWTRACER_INSTALL_DIR}/logs/api.log" 2>/dev/null

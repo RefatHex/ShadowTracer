@@ -65,7 +65,7 @@ alert = {
     "id": f"{agent}.{suffix}",
     "rule": {"id": "5710", "level": 5, "description": "test", "groups": groups},
     "agent": {"id": agent, "name": agent, "ip": "172.28.0.99"},
-    "manager": {"name": "wazuh-worker1"},
+    "manager": {"name": "shadowtracer-worker1"},
     "cluster": {"node": "worker1"},
     "data": {"srcip": src_ip},
     "decoder": {"name": "sshd"},
@@ -256,7 +256,7 @@ def on_delivery(err, msg):
         result["partition"] = msg.partition()
 alert = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()), "id": f"{agent}.probe",
          "rule": {"id": "5710", "level": 5, "description": "probe", "groups": ["sshd"]},
-         "agent": {"id": agent, "name": agent, "ip": "172.28.0.99"}, "manager": {"name": "wazuh-worker1"},
+         "agent": {"id": agent, "name": agent, "ip": "172.28.0.99"}, "manager": {"name": "shadowtracer-worker1"},
          "cluster": {"node": "worker1"}, "data": {"srcip": "1.1.1.1"}, "decoder": {"name": "sshd"},
          "location": "x", "full_log": "x"}
 producer.produce("shadowtracer.events.raw", key=f"{tenant}:{agent}".encode(), value=json.dumps(alert).encode(),

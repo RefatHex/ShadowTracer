@@ -3,6 +3,8 @@ name: shadowtracer-lab
 x-manager-build: &manager-build
   context: ../..
   dockerfile: deploy/lab/manager.Dockerfile
+  args:
+    INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
 
 # Startup-race fix (Step 2 of the Phase 5C Step 0b gate, see
 # PHASE5C_SIGMA.md §11/§12): every service below now has restart:
@@ -28,8 +30,9 @@ x-manager-build: &manager-build
 # UPSTREAM.md), now fixed and re-verified: Phase 1 item 15 (20 events
 # during a worker outage) re-run through the LB, 20/20 delivered.
 x-agent-env: &agent-env
-  MANAGER_ENROLL_HOST: wazuh-master
+  MANAGER_ENROLL_HOST: shadowtracer-master
   ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+  SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
 
 # Phase 4 Step 7: 2 byte-identical console backend replicas (same image,
 # same env, nothing replica-specific) share this block - Caddy round-robins
@@ -62,7 +65,7 @@ x-console-backend-env: &console-backend-env
 # `cli.py create-admin`, never the display-only tenant name.
 x-shipper-env: &shipper-env
   TENANT_ID: ${TENANT_KEY:?set TENANT_KEY in deploy/lab/.env, see .env.example}
-  ALERTS_PATH: /var/ossec/logs/alerts/alerts.json
+  ALERTS_PATH: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts/alerts.json
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   KAFKA_TOPIC: shadowtracer.events.raw
   # On the /offsets volume, not /tmp - must survive a container restart or
@@ -83,7 +86,7 @@ x-shipper-env: &shipper-env
 # one tenant in a future edit.
 x-shipper-test-env: &shipper-test-env
   TENANT_ID: ${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env, see .env.example}
-  ALERTS_PATH: /var/ossec/logs/alerts/alerts.json
+  ALERTS_PATH: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts/alerts.json
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   KAFKA_TOPIC: shadowtracer.events.raw
   OFFSET_FILE: /offsets/offsets.json
@@ -155,10 +158,10 @@ x-closer-env: &closer-env
   METRICS_PORT: "9105"
 
 services:
-  wazuh-master:
+  shadowtracer-master:
     build: *manager-build
     image: shadowtracer-lab/manager:local
-    hostname: wazuh-master
+    hostname: shadowtracer-master
     init: true
     restart: unless-stopped
     environment:
@@ -166,6 +169,7 @@ services:
       CLUSTER_NODE_NAME: master
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+      SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     volumes: &manager-config-mounts
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
@@ -177,10 +181,10 @@ services:
       lab:
         ipv4_address: 172.28.0.10
 
-  wazuh-worker1:
+  shadowtracer-worker1:
     build: *manager-build
     image: shadowtracer-lab/manager:local
-    hostname: wazuh-worker1
+    hostname: shadowtracer-worker1
     init: true
     restart: unless-stopped
     environment:
@@ -188,23 +192,24 @@ services:
       CLUSTER_NODE_NAME: worker1
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+      SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
       # shipper-worker1 (Phase 4 follow-up 2) mounts this same host path
       # read-only and tails it from there.
-      - ./alerts-worker1:/var/ossec/logs/alerts
+      - ./alerts-worker1:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
     depends_on:
-      wazuh-master:
+      shadowtracer-master:
         condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.11
 
-  wazuh-worker2:
+  shadowtracer-worker2:
     build: *manager-build
     image: shadowtracer-lab/manager:local
-    hostname: wazuh-worker2
+    hostname: shadowtracer-worker2
     init: true
     restart: unless-stopped
     environment:
@@ -212,12 +217,13 @@ services:
       CLUSTER_NODE_NAME: worker2
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+      SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
-      - ./alerts-worker2:/var/ossec/logs/alerts
+      - ./alerts-worker2:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
     depends_on:
-      wazuh-master:
+      shadowtracer-master:
         condition: service_healthy
     networks:
       lab:
@@ -229,10 +235,10 @@ services:
   # shipper (shipper-worker-test) ships under TEST_TENANT_KEY, never
   # TENANT_KEY - this is what keeps smoke-test.sh's real SSH-burst and
   # hostile-input traffic out of the main lab tenant.
-  wazuh-worker-test:
+  shadowtracer-worker-test:
     build: *manager-build
     image: shadowtracer-lab/manager:local
-    hostname: wazuh-worker-test
+    hostname: shadowtracer-worker-test
     init: true
     restart: unless-stopped
     environment:
@@ -240,12 +246,13 @@ services:
       CLUSTER_NODE_NAME: worker-test
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+      SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
-      - ./alerts-worker-test:/var/ossec/logs/alerts
+      - ./alerts-worker-test:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
     depends_on:
-      wazuh-master:
+      shadowtracer-master:
         condition: service_healthy
     networks:
       lab:
@@ -260,9 +267,9 @@ services:
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
-      wazuh-worker1:
+      shadowtracer-worker1:
         condition: service_healthy
-      wazuh-worker2:
+      shadowtracer-worker2:
         condition: service_healthy
     networks:
       lab:
@@ -272,6 +279,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/lab/agent-ubuntu.Dockerfile
+      args:
+        INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     image: shadowtracer-lab/agent-ubuntu:local
     hostname: agent-ubuntu-1
     init: true
@@ -289,14 +298,14 @@ services:
       # real SSH-brute-force check uses, and it must never land on worker1
       # or worker2 (the main lab tenant's shippers) by way of the LB's
       # non-sticky reassignment (see PHASE5C_SIGMA.md §9/§12). Enrollment
-      # still goes through wazuh-master (MANAGER_ENROLL_HOST, in
+      # still goes through shadowtracer-master (MANAGER_ENROLL_HOST, in
       # *agent-env, unchanged) - only live event-data routing changes here.
-      AGENT_MANAGER_DATA_HOST: wazuh-worker-test
+      AGENT_MANAGER_DATA_HOST: shadowtracer-worker-test
     volumes: &agent-config-mounts
       - ./entrypoint-agent.sh:/entrypoint.sh:ro
       - ./healthcheck-agent.sh:/healthcheck.sh:ro
     depends_on:
-      wazuh-worker-test:
+      shadowtracer-worker-test:
         condition: service_healthy
     networks:
       lab:
@@ -306,6 +315,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/lab/agent-ubuntu.Dockerfile
+      args:
+        INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     image: shadowtracer-lab/agent-ubuntu:local
     hostname: agent-ubuntu-2
     init: true
@@ -327,6 +338,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/lab/agent-rocky.Dockerfile
+      args:
+        INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     image: shadowtracer-lab/agent-rocky:local
     hostname: agent-rocky-1
     init: true
@@ -348,6 +361,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/lab/agent-rocky.Dockerfile
+      args:
+        INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     image: shadowtracer-lab/agent-rocky:local
     hostname: agent-rocky-2
     init: true
@@ -536,14 +551,14 @@ services:
     restart: unless-stopped
     environment:
       <<: *shipper-env
-      MANAGER_NAME: wazuh-worker1
+      MANAGER_NAME: shadowtracer-worker1
     volumes:
       # Read-only - the shipper has no business writing to a manager's
       # alert log, only tailing it.
-      - ./alerts-worker1:/var/ossec/logs/alerts:ro
+      - ./alerts-worker1:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts:ro
       - shipper-worker1-offsets:/offsets
     depends_on:
-      wazuh-worker1:
+      shadowtracer-worker1:
         condition: service_healthy
       kafka:
         condition: service_healthy
@@ -561,12 +576,12 @@ services:
     restart: unless-stopped
     environment:
       <<: *shipper-env
-      MANAGER_NAME: wazuh-worker2
+      MANAGER_NAME: shadowtracer-worker2
     volumes:
-      - ./alerts-worker2:/var/ossec/logs/alerts:ro
+      - ./alerts-worker2:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts:ro
       - shipper-worker2-offsets:/offsets
     depends_on:
-      wazuh-worker2:
+      shadowtracer-worker2:
         condition: service_healthy
       kafka:
         condition: service_healthy
@@ -574,7 +589,7 @@ services:
       lab:
         ipv4_address: 172.28.0.39
 
-  # Phase 5C Step 0, item 3: ships wazuh-worker-test's alerts under
+  # Phase 5C Step 0, item 3: ships shadowtracer-worker-test's alerts under
   # TEST_TENANT_KEY (x-shipper-test-env), never TENANT_KEY - the only
   # shipper the dedicated test agent's traffic ever reaches.
   shipper-worker-test:
@@ -587,12 +602,12 @@ services:
     restart: unless-stopped
     environment:
       <<: *shipper-test-env
-      MANAGER_NAME: wazuh-worker-test
+      MANAGER_NAME: shadowtracer-worker-test
     volumes:
-      - ./alerts-worker-test:/var/ossec/logs/alerts:ro
+      - ./alerts-worker-test:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts:ro
       - shipper-worker-test-offsets:/offsets
     depends_on:
-      wazuh-worker-test:
+      shadowtracer-worker-test:
         condition: service_healthy
       kafka:
         condition: service_healthy

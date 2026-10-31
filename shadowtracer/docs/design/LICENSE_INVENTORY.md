@@ -129,3 +129,11 @@ GPL-unencumbered is a legal conclusion this doc does not make.
   dependency tree) - the real open questions are all about *how* obligations are met
   (attribution, source availability, the LGPL static-linking point), not *whether*
   shipping is possible at all.
+
+## 5. Customer-facing attribution (Rebrand Pass C, Stage 1)
+
+The console now shows a "Built on Wazuh open source (GPLv2)" notice with a link to
+this fork's public source (`github.com/RefatHex/ShadowTracer`) on a new About page
+(`shadowtracer/console/frontend/src/AboutPage.tsx`, linked from the nav bar) - the
+customer-visible counterpart to this document's own GPLv2 source-availability
+obligation (§4).

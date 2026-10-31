@@ -18,6 +18,12 @@
 #   ./verify-correlator-chaos.sh
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
+if [ -f .env ]; then
+    set -a; source .env; set +a
+fi
+# Rebrand Pass C prep: one setting for the install dir, default unchanged -
+# see docs/design/REBRAND_PASS_C.md.
+SHADOWTRACER_INSTALL_DIR="${SHADOWTRACER_INSTALL_DIR:-/var/ossec}"
 
 fail=0
 check() {
@@ -70,7 +76,7 @@ docker compose up -d
 # known, documented glibc bug (PHASE1_FINDINGS.md Step 2) and never go
 # healthy - that's not a smoke-test regression, so --wait (which waits on
 # every service) would always time out here.
-for svc in wazuh-master wazuh-worker1 wazuh-worker2 wazuh-worker-test agent-ubuntu-1 agent-ubuntu-2 \
+for svc in shadowtracer-master shadowtracer-worker1 shadowtracer-worker2 shadowtracer-worker-test agent-ubuntu-1 agent-ubuntu-2 \
     shipper-worker1 shipper-worker2 shipper-worker-test writer-1 writer-2 \
     correlate-1 correlate-2 closer-1 closer-2; do
     cid="$(docker compose ps -q "$svc")"
@@ -89,17 +95,17 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-MASTER=shadowtracer-lab-wazuh-master-1
+MASTER=shadowtracer-lab-shadowtracer-master-1
 
 echo "--- cluster ---"
-cluster_out="$(docker exec "$MASTER" /var/ossec/bin/cluster_control -l)"
+cluster_out="$(docker exec "$MASTER" "${SHADOWTRACER_INSTALL_DIR}/bin/cluster_control" -l)"
 echo "$cluster_out"
 check "master in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^master '"
 check "worker1 in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^worker1 '"
 check "worker2 in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^worker2 '"
 
 echo "--- agents ---"
-agent_out="$(docker exec "$MASTER" /var/ossec/bin/agent_control -l)"
+agent_out="$(docker exec "$MASTER" "${SHADOWTRACER_INSTALL_DIR}/bin/agent_control" -l)"
 echo "$agent_out"
 # Only the two Ubuntu agents are expected Active - Rocky agents have a known,
 # documented glibc bug (PHASE1_FINDINGS.md, Step 2) and are not a smoke-test
@@ -129,9 +135,6 @@ for ch_container in shadowtracer-lab-ch-clickhouse-1-1 shadowtracer-lab-ch-click
 done
 
 echo "--- console (Step 7) ---"
-if [ -f .env ]; then
-    set -a; source .env; set +a
-fi
 
 # Phase 5C Step 0, item 3: baseline, checked again at the very end of this
 # script - the main lab tenant must receive zero rows from any of the test
@@ -156,7 +159,7 @@ check "console readiness (Postgres/ClickHouse/Kafka all reachable)" \
 # wait loop above), the alert simply never arrives and this fails.
 #
 # Phase 5C Step 0, item 3: agent-ubuntu-1 is pointed at the dedicated test
-# manager (wazuh-worker-test), never worker1/worker2, so this burst's real
+# manager (shadowtracer-worker-test), never worker1/worker2, so this burst's real
 # alert lands in TEST_TENANT_KEY - logging in as the main lab tenant's
 # admin would never see it. Needs TEST_TENANT_ADMIN_EMAIL/PASSWORD in .env
 # for an admin already created via `python cli.py create-admin` - this
@@ -257,7 +260,7 @@ def good(suffix):
         "timestamp": "2026-10-04T12:00:00.000+0000",
         "rule": {"id": "5710", "level": 5, "description": "sshd failure", "groups": ["sshd"]},
         "agent": {"id": agent, "name": agent, "ip": "10.0.0.1"},
-        "manager": {"name": "wazuh-worker-test"},
+        "manager": {"name": "shadowtracer-worker-test"},
         "cluster": {"node": "worker-test"},
         "id": f"{marker}.good.{suffix}",
         "data": {"srcip": "9.9.9.9"},
