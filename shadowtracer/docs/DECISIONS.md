@@ -794,3 +794,35 @@ stated too, not just gaps: secrets are gitignored and never hardcoded in compose
 future SOAR don't exist yet (confirmed empty), so nothing to threat-model there today -
 flagged for a real pass once either is built. No fixes made, per instruction - this is
 the input to whatever gets prioritized next.
+
+## Phase 5.6 Item 7: known issue, not fixed - Postgres `ALTER ROLE` race
+
+**The bug** (already found and reproduced in Phase 5.5, recorded above): every test
+suite's Alembic migration (`shadowtracer/ingest/alembic/versions/5f408777ad31_*.py`)
+mixes two things with very different scopes into one migration:
+1. **Cluster-global**: `CREATE ROLE`/`ALTER ROLE shadowtracer_app WITH PASSWORD ...` -
+   Postgres roles live at the cluster level, shared across every database.
+2. **Database-scoped**: the `GRANT`/`REVOKE` statements that follow, which only ever
+   affect the one database the migration is running against.
+
+Running this migration against two different databases concurrently (exactly what
+happens when two test suites, or two environments sharing one Postgres cluster, run
+Alembic at the same time) races on step 1's write to the shared `pg_authid` catalog
+row - reproduced directly (`psycopg2.errors.InternalError: tuple concurrently
+updated`) by running 3 concurrent `alembic upgrade head` processes.
+
+**The proper fix (not implemented now): split the two concerns.** Role
+creation/password-setting moves out of this per-database migration entirely, into a
+**separate, one-time cluster-level provisioning step** - run once when a Postgres
+cluster is first stood up (or when the app role's password needs rotating), never
+per-database and never per-migration-run. The Alembic migration keeps only the
+`GRANT`/`REVOKE` statements, which are genuinely database-scoped and safe to run
+concurrently across different databases - it would assume the role already exists
+(failing loudly with a clear error if it doesn't, rather than silently trying to
+create it) instead of creating/altering it itself.
+
+This is real, scoped work (a new provisioning script, removing ~15 lines from the
+migration, updating `deploy/lab/`'s own setup sequence to run the new step before any
+Alembic migration ever does) - not implemented here per instruction. `run-ci.sh`'s
+existing workaround (run suites sequentially) remains the mitigation until this
+lands.
