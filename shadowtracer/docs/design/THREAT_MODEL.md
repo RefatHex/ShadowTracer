@@ -183,3 +183,58 @@ because this report found "nothing" and moved on.
 
 No fixes in this item, per instruction - this ranking is the input to whatever gets
 prioritized next.
+
+## 11. Proposed fix and effort per top-10 item (Phase 5.6 Item 2 - report only)
+
+No fixes implemented here except where noted (#1/#5 are already in progress as
+Phase 5.6 Item 1 - `docs/design/KAFKA_AUTH.md`, not yet approved/built).
+
+1. **Kafka plaintext/no auth.** Fix: `KAFKA_AUTH.md`'s design - TLS + SASL/SCRAM +
+   per-component ACLs, signed envelopes for tenant binding. **Effort: Medium** -
+   config and provisioning scripting across shipper/writer/correlator/console-backend,
+   no new topics under the recommended option. **In progress (Item 1).**
+2. **Single shared `JWT_SECRET`.** Fix: per-tenant signing keys (a new column on
+   `tenants`, or HKDF-derived from one master key + `tenant_key`) - token issuance
+   (`auth.py`) signs with the tenant's own key; verification (`rbac.py`) must decode
+   the unverified claims first to learn `tenant_id`, look up that tenant's key, *then*
+   verify the signature - a real implementation subtlety (reject firmly on algorithm/
+   structure before any lookup, to avoid a downgrade attack), not just a config
+   change. **Effort: Medium** - two files, one migration, and existing tokens need to
+   expire/be reissued (short-lived tokens make this cheap to roll out).
+3. **ClickHouse shared admin credential.** Fix: per-service ClickHouse users/roles
+   with scoped grants, same pattern Postgres's `shadowtracer_app` role already proves
+   out (writer: `INSERT` only on `events`/`dead_letter_events`; closer: scoped to
+   `fingerprint_occurrences`; console-backend: `SELECT` only; shipper: `INSERT` only
+   on `dead_letter_events`). **Effort: Medium** - `CREATE USER`/`GRANT` statements
+   added to schema application, plus a credential per service in compose.
+4. **Postgres/ClickHouse cleartext.** Fix: enable TLS on both (self-signed lab CA,
+   same pattern already used for Kafka's and `wazuh-authd`'s certs); every service's
+   connection config needs the new `sslmode=require`/`interface="https"` settings.
+   **Effort: Medium-High** - cert provisioning plus touching every connecting
+   service's config, real testing needed (a TLS misconfiguration fails closed, which
+   is correct but means this can't be rolled out partially without breaking things).
+5. **Tenant identity into an unauthenticated bus.** Same fix as #1 (signed
+   envelopes close this specifically). **In progress (Item 1).**
+6. **No network segmentation.** Fix: split the single flat `lab` Docker network into
+   tiers (e.g. a data-plane network for Kafka/ClickHouse/Postgres reachable only by
+   ingest/correlate/console-backend, separate from the manager/agent network;
+   shippers bridge both since they need manager-local file access and Kafka). Compose
+   supports multiple networks per service natively. **Effort: Medium** - topology
+   change with real dependency-mapping risk; needs the full chaos/smoke suite rerun
+   to prove nothing's connectivity silently broke.
+7. **`agent -> manager` never independently re-audited.** Fix: a dedicated review of
+   upstream Wazuh's enrollment/secure-channel cipher suite and protocol version
+   against current practice - **or** an explicit documented decision to treat it as
+   inherited/out-of-scope (this fork doesn't maintain that code). **Effort: Low** as
+   a decision, but needs real security-review time to do properly, not a reflexive
+   code change - flagged as a scoping question before an effort estimate for an
+   actual fix means anything.
+8. **No secrets rotation/expiry story.** Fix, minimum viable: a documented rotation
+   runbook (how to rotate `CLUSTER_KEY`/`ENROLL_PASSWORD`/`CLICKHOUSE_PASSWORD`/
+   `POSTGRES_PASSWORD`/`JWT_SECRET` without downtime, informed by #2's per-tenant-key
+   design once built). **Effort: Low** for documentation; **Higher** if this becomes
+   an actual secrets-manager integration (Vault or equivalent) rather than
+   versioned `.env` values with a rotation script.
+9. **Rule/feed update mechanism doesn't exist yet.** No fix proposed - nothing to
+   secure until it's built (Phase 5C/5D). Revisit then.
+10. **Future SOAR doesn't exist yet.** Same as #9 - revisit when built.
