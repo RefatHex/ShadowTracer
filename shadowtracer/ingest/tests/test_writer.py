@@ -83,17 +83,29 @@ def test_writer_is_actually_running_and_draining_not_just_callable(
     try:
         _produce(kafka_bootstrap, kafka_topic, lines)
 
+        # Phase 5.6 Item 3: wait for BOTH signals in the same bounded loop,
+        # not count-then-assert-metrics-immediately. Root cause of a real,
+        # reproducible flake found by timestamping both sides directly: a
+        # row committed via ch.insert() becomes visible to a DIFFERENT
+        # connection's FINAL-deduplicated query before the ORIGINAL
+        # inserting client's own HTTP call returns control to the writer
+        # thread (measured ~380ms apart) - metrics.incr() only runs after
+        # that return, so checking "count caught up" and then immediately
+        # asserting on metrics with no grace period races a real, normal
+        # ClickHouse response-latency window, not a bug in the writer.
         deadline = time.monotonic() + 20
         count = 0
+        snap: dict = {}
         while time.monotonic() < deadline:
             count = _count_alert_ids(ch_client, alert_ids)
-            if count == len(lines):
+            snap = metrics.snapshot()
+            if count == len(lines) and snap.get("messages_inserted", 0) >= len(lines) and snap.get("batches_committed", 0) >= 1:
                 break
             time.sleep(0.5)
 
         assert count == len(lines), f"expected {len(lines)} rows drained into ClickHouse, got {count}"
-        assert metrics.snapshot()["messages_inserted"] >= len(lines)
-        assert metrics.snapshot()["batches_committed"] >= 1
+        assert snap.get("messages_inserted", 0) >= len(lines), f"metrics never caught up: {snap}"
+        assert snap.get("batches_committed", 0) >= 1, f"metrics never caught up: {snap}"
     finally:
         stop_flag.set()
         thread.join(timeout=5)

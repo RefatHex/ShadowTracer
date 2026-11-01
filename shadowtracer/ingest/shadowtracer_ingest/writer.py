@@ -143,6 +143,25 @@ def run(
             while len(batch_msgs) < BATCH_MAX_MESSAGES and time.monotonic() < deadline:
                 msg = consumer.poll(POLL_TIMEOUT_SECONDS)
                 if msg is None:
+                    # Phase 5.6 Item 3: flush on a genuine idle gap once we
+                    # already have something, instead of always waiting out
+                    # the full BATCH_MAX_SECONDS regardless of arrival
+                    # pattern. Root cause of a real flaky test
+                    # (test_replay_does_not_inflate_base_table_or_rollup):
+                    # insert_deduplication_token is derived from this
+                    # batch's own offset range, so under load, a backlog
+                    # that arrived as ONE batch on first consume could get
+                    # split into TWO batches on replay purely because the
+                    # fixed wall-clock deadline fired mid-stream - same
+                    # offsets, different token, defeating block-level dedup
+                    # (the ReplicatedReplacingMergeTree identity backstop
+                    # still catches it, just not immediately - see the
+                    # module docstring). A backlog that's fully available in
+                    # Kafka returns messages back-to-back with no real idle
+                    # gap, so this flushes early only when there's truly
+                    # nothing more waiting, not because a clock ran out.
+                    if batch_msgs:
+                        break
                     continue
                 if msg.error():
                     metrics.incr("messages_failed")
