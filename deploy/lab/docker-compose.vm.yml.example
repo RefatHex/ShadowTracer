@@ -1,0 +1,32 @@
+# Phase 5.6 Item 4: optional override for the Hyper-V/WSL2 VM step
+# (Phase 5C-1) - publishes the manager's enrollment port (1515) and the
+# dedicated test worker's event port (1514) on 0.0.0.0 instead of staying
+# internal to the lab network, so a Hyper-V VM on the host's Default
+# Switch can reach them via the Windows host's own IP (relying on WSL2's
+# localhostForwarding to relay it in - re-check
+# `netsh int ipv4 show excludedportrange protocol=tcp` before trusting
+# this is free if it ever stops binding; Hyper-V has reserved this exact
+# port before, a known, intermittent Windows dynamic-port exclusion
+# behavior, not a config mistake here if it recurs).
+#
+# This binds to every interface on the host, not just loopback - never
+# the default, and never committed as part of the main compose file
+# (see deploy/lab/README.md). Copy this file to docker-compose.vm.yml
+# (gitignored) and layer it in only when you actually have a VM
+# enrolling against this lab:
+#   docker compose -f docker-compose.yml -f docker-compose.vm.yml up -d
+#
+# The VM must still authenticate: ENROLL_PASSWORD (deploy/lab/.env) is
+# already required for enrollment regardless of this override
+# (entrypoint-manager.sh flips authd's use_password to yes and writes
+# authd.pass unconditionally) - exposing the port more broadly does not
+# relax that. Pass the VM's agent-auth call the same ENROLL_PASSWORD
+# value, the same way every lab agent container already does.
+services:
+  shadowtracer-master:
+    ports:
+      - "0.0.0.0:1515:1515"
+
+  shadowtracer-worker-test:
+    ports:
+      - "0.0.0.0:1514:1514"

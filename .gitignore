@@ -184,3 +184,8 @@ dist/
 deploy/lab/alerts-worker1/
 deploy/lab/alerts-worker2/
 deploy/lab/alerts-worker-test/
+# Phase 5.6 Item 4: host-specific VM-step override (see
+# docker-compose.vm.yml.example and deploy/lab/README.md) - never
+# committed, since it binds ports to 0.0.0.0 and only makes sense on
+# whichever host actually has a VM enrolling against this lab.
+deploy/lab/docker-compose.vm.yml
