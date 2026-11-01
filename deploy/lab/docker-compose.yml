@@ -271,6 +271,18 @@ services:
         condition: service_healthy
       shadowtracer-worker2:
         condition: service_healthy
+    # Phase 5.6 Item 9: no build/Dockerfile for this service (plain
+    # haproxy:2.9-alpine image), so this goes here rather than in a
+    # HEALTHCHECK instruction like every other service's. Confirms the
+    # frontend is actually bound and accepting connections, same depth
+    # as the frontend-only check this image's own `check` keyword
+    # already does per-backend-server in haproxy.cfg.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "1514"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     networks:
       lab:
         ipv4_address: 172.28.0.13
