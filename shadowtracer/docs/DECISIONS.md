@@ -851,3 +851,52 @@ were byte-identical to the ones recorded before the save (`7ed7b3391b26`,
 `9b84191a34b4`, `c6a55cebf9da`) - proof the round trip is lossless, which is what
 matters for "a fresh checkout or a wiped build cache gets the exact same image back
 instead of rebuilding."
+
+## Phase 5.6 Item 3 follow-up #2: ClickHouse's real dedup window, and sustained load
+
+**`replicated_deduplication_window` in the lab, confirmed directly** (`system.
+merge_tree_settings`, no per-table override in `events_schema.sql`'s `SETTINGS`
+clause): `replicated_deduplication_window = 1000` (most recent 1000 inserted blocks
+kept), `replicated_deduplication_window_seconds = 604800` (7 days) - whichever limit
+is hit first evicts a block's token from the window. Only the count-based limit is
+practically testable in a session (604800s is a week); the count-based one is real
+and was exercised for real below.
+
+**Beyond-window replay DOES duplicate - confirmed, and the eviction is NOT
+synchronous.** Inserted 3 real rows with their own tokens into an isolated test
+database, then 1100 separate filler blocks (same tenant/partition) to push the count
+past 1000. First surprise: `system.zookeeper`'s `.../events/blocks` node count kept
+growing past 1000 (observed 1062) with NO eviction for 15+ seconds after the 1100th
+insert - the window is enforced by a periodic background cleanup thread, not
+synchronously on insert. Waited it out: the blocks count dropped to exactly 1000
+within ~30s. Replaying the original 3 rows' tokens *after* that cleanup ran produced
+raw `count()` = 6 (duplicated) - confirmed the window really is finite and really
+does get exceeded in practice, not just in theory.
+
+**The identity backstop already in place catches it anyway.** `events`'s
+`ReplicatedReplacingMergeTree` (`ORDER BY (tenant_id, time, cluster_node, alert_id)`,
+version column `ingested_at`) is already the table-level fix the instruction asked to
+propose if the token-window test failed - confirmed, not assumed: `FINAL` and
+`uniqExact(alert_id)` both read back 3 (correct) on the exact same beyond-window-
+duplicated data where raw `count()` read 6. **No table change needed** - the existing
+design already covers this; the operational takeaway is that any replay of data
+older than ~1000 blocks (or 7 days) must be followed by a query that uses `FINAL`/
+`uniqExact`, never assume raw `count()` is correct for data that old (already true
+project-wide convention per `PHASE3_DATA_PLATFORM.md`).
+
+**Sustained moderate load (50 events/s, one partition, 10 minutes = 30,000 events),
+through the real writer against an isolated database**: parts and merge behavior
+stayed healthy throughout - `system.parts` showed 9 active parts for ~27k rows
+(avg ~3016 rows/part), `system.part_log` recorded 2781 merges during the run, and no
+table exceeded 300 active parts (the threshold checked for a real "too many parts"
+risk). **Real caveat, test-harness artifact, not a writer bug**: the script's own
+drain-then-stop sequence cut the writer off mid-retry at the very end (a transient
+`TABLE_IS_READ_ONLY` - a brief Keeper-session hiccup under load, not a container
+crash, confirmed via `docker inspect` showing both ClickHouse replicas at
+`RestartCount=0` throughout) - `retry_with_backoff`'s documented behavior is to
+re-raise if `stop_flag` fires during a backoff wait (graceful-shutdown contract,
+`retry.py`'s own docstring), which the test script's premature `stop_flag.set()`
+triggered, so ~2858 of the 30,000 events were still in-flight when the script queried
+its final count (27142, raw == FINAL, so no duplication - just an incomplete drain).
+A real writer, not killed by an impatient test harness mid-retry, would have retried
+the transient readonly condition successfully per its own retry-forever contract.
