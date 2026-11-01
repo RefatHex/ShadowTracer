@@ -826,3 +826,28 @@ migration, updating `deploy/lab/`'s own setup sequence to run the new step befor
 Alembic migration ever does) - not implemented here per instruction. `run-ci.sh`'s
 existing workaround (run suites sequentially) remains the mitigation until this
 lands.
+
+## Phase 5.6 Item 10: build resilience - cache the manager/agent images outside the repo
+
+**The problem, lived through directly this session**: `shadowtracer-lab/manager`,
+`agent-ubuntu`, and `agent-rocky` (5.16GB/2.94GB/3.13GB) are the slowest images to
+build from scratch - a background build process lost across a multi-day sandbox
+suspension, or a build killed on a mistaken "this looks hung" judgment, meant
+starting over from zero rather than resuming, more than once. A local Docker build
+cache getting pruned (accidentally, in this session's case) has the same effect.
+
+**Fix: `deploy/lab/image-cache.sh save|load`** - `docker save` these three images to
+`${SHADOWTRACER_IMAGE_CACHE:-$HOME/.cache/shadowtracer-images}` (outside the repo by
+default, never committed - these are multi-GB tarballs) after a known-good build;
+`load` brings them back with `docker load`, no rebuild needed.
+
+**Verified for real**: rebuilt all three from the current Dockerfiles (confirmed
+clean, not stale - `Image ... Built` for all three). `./image-cache.sh save` wrote
+2.5GB across 3 tarballs in 80s. `./image-cache.sh load` on the same machine (without
+first removing the live images - they're in use by running lab containers, removing
+them would be a destructive operation on the real lab this item doesn't call for)
+reported `Loaded image: ...` for all three with exit 0, and the resulting image IDs
+were byte-identical to the ones recorded before the save (`7ed7b3391b26`,
+`9b84191a34b4`, `c6a55cebf9da`) - proof the round trip is lossless, which is what
+matters for "a fresh checkout or a wiped build cache gets the exact same image back
+instead of rebuilding."
