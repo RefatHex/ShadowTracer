@@ -547,6 +547,64 @@ def test_writer_dead_letters_unsupported_envelope_version_known_version_still_pr
         ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_key}'")
 
 
+def test_writer_replay_of_pre_envelope_version_messages_is_processed_not_dead_lettered(
+    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, pg_db, database_url,
+):
+    """Phase 5.6 Item 4, follow-up request: a message with NO
+    envelope_version header at all - the real shape of every message
+    this project ever produced before Item 4 existed, which could still
+    be sitting in Kafka's 7-day retention window or get replayed from a
+    dead-letter backup after this writer is upgraded (the exact kind of
+    gap that caused the 46 unrecoverable dead letters VERSIONING.md Sec
+    0 describes) - must be treated as version 1 and processed normally,
+    never dead-lettered just for lacking the header. Produced directly
+    via raw Producer.produce(), deliberately NOT through shipper.py (which
+    always sets the header now), to reproduce the real pre-change wire
+    shape exactly, not an approximation of it."""
+    import json
+    marker = uuid.uuid4().hex[:8]
+    tenant_key = f"test-prechange-{marker}"
+    insert_tenant(pg_db, tenant_key)
+
+    events = []
+    for i in range(3):
+        event = json.loads(real_alert_lines[i])
+        event["id"] = f"{event['id']}.{marker}.{i}"
+        events.append(event)
+
+    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
+    try:
+        producer = Producer({"bootstrap.servers": kafka_bootstrap})
+        for event in events:
+            producer.produce(
+                kafka_topic, value=json.dumps(event).encode(),
+                # Deliberately no envelope_version header - the real,
+                # exact shape shipper.py produced before Item 4.
+                headers=[("tenant_id", tenant_key.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json")],
+            )
+        producer.flush(30)
+
+        alert_ids = [e["id"] for e in events]
+        deadline = time.monotonic() + 20
+        count = dl_count = 0
+        while time.monotonic() < deadline:
+            count = _count_alert_ids(ch_client, alert_ids)
+            dl_count = ch_client.query(
+                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{tenant_key}'"
+            ).result_rows[0][0]
+            if count == len(events):
+                break
+            time.sleep(0.5)
+
+        assert count == len(events), f"pre-change (no header) messages must still land in ClickHouse, got {count}/{len(events)}"
+        assert dl_count == 0, "a missing envelope_version header must never be treated as unsupported/dead-lettered"
+        assert thread.is_alive(), "writer must never crash on a message with no envelope_version header"
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+        ch_client.command(f"ALTER TABLE events DELETE WHERE tenant_id = '{tenant_key}'")
+
+
 def test_a_brand_new_tenants_first_event_sent_right_away_is_stored_not_dead_lettered(
     kafka_bootstrap, kafka_topic, ch_client, lab_env, pg_db, database_url, real_alert_lines,
 ):

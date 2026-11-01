@@ -16,15 +16,19 @@ real duplicate at the ClickHouse layer. Two independent defenses against
 that, not one (see PHASE3_DATA_PLATFORM.md's "Phase 3 follow-up 1" section
 for the full writeup and the real, measured behavior of each):
 
-- Step 3 inserts each Kafka partition's messages as its own batch, with
-  `insert_deduplication_token` set from (topic, partition, min offset, max
-  offset). A retry that re-reads the same committed offset range produces
-  the same token, and ClickHouse drops the duplicate INSERT at the block
-  level - confirmed this also protects the dependent materialized view
-  (events_hourly_rollup_mv) even with deduplicate_blocks_in_dependent_materialized_views
-  at its default (0). This only works when the replay reproduces the same
-  partition/offset grouping, which a live retry does (resuming from the
-  last committed offset) but isn't guaranteed for every possible replay.
+- Step 3 inserts with `insert_deduplication_token` set from (topic,
+  partition, offset) - confirmed this also protects the dependent
+  materialized view (events_hourly_rollup_mv) even with
+  deduplicate_blocks_in_dependent_materialized_views at its default (0).
+  Phase 5.6 Item 3 follow-up found that deriving the token from
+  "whatever got batched together" doesn't survive a replay at a
+  different speed (proved: a slow write then a full-speed replay of the
+  same 12 messages produced 24 rows) - a batch grouped by arrival timing
+  can never be guaranteed to match a DIFFERENT run's grouping of the
+  same offsets. See DEDUP_CHUNK_SIZE's own comment for the fix: bucket
+  purely by offset, batch only a COMPLETE fixed-size bucket, fall back
+  to one insert per row for whatever's incomplete (the tail, or a
+  not-yet-full partition's entire backlog under low/moderate traffic).
 - schema/events_schema.sql's events table (ReplicatedReplacingMergeTree,
   dedup on tenant_id/cluster_node/alert_id) and events_hourly_rollup
   (uniqExact on cluster_node/alert_id) are the backstop for whatever the
@@ -54,6 +58,45 @@ logger = logging.getLogger(__name__)
 BATCH_MAX_MESSAGES = 1000
 BATCH_MAX_SECONDS = 2.0
 POLL_TIMEOUT_SECONDS = 1.0
+# Phase 5.6 Item 3 follow-up: idle-gap flush alone is NOT sufficient -
+# proved for real (test_item3_followup_proof.py, now deleted after use):
+# a range written slowly (gaps > BATCH_MAX_SECONDS, so idle-gap-flush
+# fires after nearly every message) then replayed at full speed (a new
+# consumer group reading the same, now fully-published backlog with no
+# gaps at all) produced 24 raw rows for 12 real messages - the SLOW pass
+# flushed ~12 tiny batches (tokens "offset N-N" each), the FAST pass
+# flushed ~1 big batch (token "offset 0-11") - neither token set matches
+# the other's, so ClickHouse's block-level dedup can't recognize the
+# replay as already-seen data at all.
+# Root cause: insert_deduplication_token is a per-INSERT-statement
+# setting, matched only by an EXACT repeat of the same token string - it
+# can never be made to match across two DIFFERENT groupings of the same
+# rows, and grouping-by-arrival-timing can never be made identical
+# across two runs at different speeds (a consumer has no way to tell "a
+# slow but still-live stream" from "a stream that's permanently done"
+# from timing alone).
+# Fix: decouple "how we batch for insert efficiency" from "what the
+# dedup token covers" - bucket every row by a FIXED, offset-only
+# function (offset // DEDUP_CHUNK_SIZE), not by arrival time:
+#   - a COMPLETE bucket (exactly DEDUP_CHUNK_SIZE consecutive offsets,
+#     all captured in this flush) is batch-inserted as one call, token
+#     = the bucket's own fixed range - this is deterministic regardless
+#     of timing, since "the count reached a fixed number" never depends
+#     on how fast or slow those messages arrived.
+#   - an INCOMPLETE bucket (the tail of whatever's currently available,
+#     or a slice split across flush boundaries) cannot be trusted to
+#     group identically across two different-speed runs, so each of its
+#     rows gets inserted individually, tokened by its own exact
+#     (topic, partition, offset) - this is the one granularity ClickHouse
+#     can always match on a replay, no matter how the rows get batched.
+# Trade-off, accepted deliberately: low/moderate-throughput partitions
+# (most real traffic, most of the time) mostly pay per-row inserts
+# instead of one big batch - bounded by DEDUP_CHUNK_SIZE-1 extra calls
+# per flush at worst, same worst case idle-gap-flush already had before
+# this fix (every message its own tiny batch), just now provably
+# correct instead of accidentally-usually-correct. A sustained burst
+# (DEDUP_CHUNK_SIZE+ messages at once) still gets full batch efficiency.
+DEDUP_CHUNK_SIZE = 100
 
 COLUMNS = [
     "tenant_id", "time", "cluster_node", "manager_name", "alert_id",
@@ -266,28 +309,60 @@ def run(
                             ev.alert_id, ev.cluster_node,
                         )
                         metrics.incr("cluster_node_fallback_count")
-                    rows.append(_row(ev))
+                    rows.append((msg.offset(), _row(ev)))
 
                 if not rows:
                     continue
 
-                offsets = [msg.offset() for msg in msgs]
-                token = f"{msg_topic}:{partition}:{min(offsets)}-{max(offsets)}"
-                # By the time a row gets here it already passed
-                # normalize_alert() - any insert failure now is presumed
-                # infrastructure (ClickHouse unreachable/overloaded), not bad
-                # data. Retry forever with capped backoff; never dead-letter
-                # this path. stop_flag lets a graceful shutdown interrupt a
-                # long wait instead of blocking it.
-                retry_with_backoff(
-                    lambda: ch.insert("events", rows, column_names=COLUMNS, settings={"insert_deduplication_token": token}),
-                    max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
-                    max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
-                    on_retry=lambda attempt, exc: logger.warning(
-                        "ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc,
-                    ),
-                )
-                metrics.incr("messages_inserted", len(rows))
+                # Phase 5.6 Item 3 follow-up: bucket by a FIXED function of
+                # offset alone (see DEDUP_CHUNK_SIZE's own comment) - never
+                # by how these rows happened to be grouped by arrival timing.
+                by_bucket: dict[int, list[tuple[int, list]]] = {}
+                for offset, row in rows:
+                    by_bucket.setdefault(offset // DEDUP_CHUNK_SIZE, []).append((offset, row))
+
+                for bucket, bucket_items in sorted(by_bucket.items()):
+                    # By the time a row gets here it already passed
+                    # normalize_alert() - any insert failure now is presumed
+                    # infrastructure (ClickHouse unreachable/overloaded), not
+                    # bad data. Retry forever with capped backoff; never
+                    # dead-letter this path. stop_flag lets a graceful
+                    # shutdown interrupt a long wait instead of blocking it.
+                    if len(bucket_items) == DEDUP_CHUNK_SIZE:
+                        # A complete, offset-aligned bucket - safe to batch,
+                        # token is the bucket's own fixed range.
+                        bucket_rows = [row for _, row in bucket_items]
+                        token = f"{msg_topic}:{partition}:chunk{bucket}"
+                        retry_with_backoff(
+                            lambda rows=bucket_rows, token=token: ch.insert(
+                                "events", rows, column_names=COLUMNS, settings={"insert_deduplication_token": token},
+                            ),
+                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            on_retry=lambda attempt, exc: logger.warning(
+                                "ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc,
+                            ),
+                        )
+                        metrics.incr("messages_inserted", len(bucket_rows))
+                    else:
+                        # An incomplete bucket (the tail of what's currently
+                        # available, or a slice split across flush
+                        # boundaries) - its grouping can't be trusted to
+                        # match a replay at a different speed, so each row
+                        # gets its own token instead of a batch-wide one.
+                        for offset, row in bucket_items:
+                            token = f"{msg_topic}:{partition}:{offset}"
+                            retry_with_backoff(
+                                lambda row=row, token=token: ch.insert(
+                                    "events", [row], column_names=COLUMNS, settings={"insert_deduplication_token": token},
+                                ),
+                                max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                                max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                                on_retry=lambda attempt, exc: logger.warning(
+                                    "ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc,
+                                ),
+                            )
+                            metrics.incr("messages_inserted", 1)
 
             consumer.commit(asynchronous=False)
             metrics.incr("batches_committed")
