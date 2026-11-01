@@ -33,6 +33,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest"))
 from shadowtracer_ingest.dead_letter import send_to_dead_letter  # noqa: E402
 from shadowtracer_ingest.normalizer import normalize_alert  # noqa: E402
+from shadowtracer_ingest.shipper import ENVELOPE_VERSION  # noqa: E402
 from shadowtracer_ingest.tenants import TenantCache  # noqa: E402
 
 from confluent_kafka import Consumer, Producer
@@ -128,10 +129,12 @@ def run(
                 continue
 
             tenant_key = None
+            envelope_version_raw = None
             for k, v in (msg.headers() or []):
                 if k == "tenant_id":  # header name predates tenant_key (Phase 4 follow-up 1); the VALUE is the tenant_key
                     tenant_key = v.decode()
-                    break
+                elif k == "envelope_version":
+                    envelope_version_raw = v.decode()
 
             # errors="replace", never strict: invalid UTF-8 in a Kafka
             # message value must not crash the consumer loop - replaced
@@ -139,6 +142,26 @@ def run(
             # dead-lettered there.
             raw_line = msg.value().decode("utf-8", errors="replace")
             source_location = f"{msg.topic()}:{msg.partition()}:{msg.offset()}"
+
+            # Phase 5.6 Item 4: a missing header predates this change
+            # (version 1, the only shape that ever existed before it) - a
+            # PRESENT header this correlator doesn't recognize means
+            # something newer produced it and must not be silently
+            # misparsed (see writer.py's identical check and
+            # docs/design/VERSIONING.md's 46-pre-envelope-dead-letters
+            # story for why this matters).
+            if envelope_version_raw is not None and envelope_version_raw != str(ENVELOPE_VERSION):
+                metrics.incr("messages_failed")
+                if not _dead_letter_with_retry(
+                    stop_flag, metrics,
+                    kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
+                    component="correlator", source_location=source_location,
+                    error=f"unsupported_envelope_version: got {envelope_version_raw!r}, this correlator only understands {ENVELOPE_VERSION}",
+                    raw_event=raw_line,
+                ):
+                    continue
+                consumer.commit(msg)
+                continue
 
             # Phase 5C Step 0: checked before normalize_alert, same
             # permanent-bad-data path - never retried, since this

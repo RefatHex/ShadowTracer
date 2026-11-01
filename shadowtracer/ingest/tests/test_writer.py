@@ -486,6 +486,67 @@ def test_writer_dead_letters_unknown_tenant_known_tenant_still_processes(
         ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{unknown_tenant}'")
 
 
+def test_writer_dead_letters_unsupported_envelope_version_known_version_still_processes(
+    kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, pg_db, database_url,
+):
+    """Phase 5.6 Item 4: an envelope_version header this writer doesn't
+    recognize must be dead-lettered (error starts "unsupported_envelope_
+    version"), never stored - proven alongside an otherwise-identical
+    event at the real, current ENVELOPE_VERSION that still lands
+    normally, same shape as the unknown_tenant test above."""
+    import json
+    from shadowtracer_ingest.writer import ENVELOPE_VERSION
+    marker = uuid.uuid4().hex[:8]
+    tenant_key = f"test-flagged-{marker}"
+    insert_tenant(pg_db, tenant_key)
+
+    known_event = json.loads(real_alert_lines[0])
+    known_event["id"] = f"{known_event['id']}.{marker}.known"
+    future_event = json.loads(real_alert_lines[1])
+    future_event["id"] = f"{future_event['id']}.{marker}.future"
+
+    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
+    try:
+        producer = Producer({"bootstrap.servers": kafka_bootstrap})
+        producer.produce(
+            kafka_topic, value=json.dumps(known_event).encode(),
+            headers=[
+                ("tenant_id", tenant_key.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json"),
+                ("envelope_version", str(ENVELOPE_VERSION).encode()),
+            ],
+        )
+        producer.produce(
+            kafka_topic, value=json.dumps(future_event).encode(),
+            headers=[
+                ("tenant_id", tenant_key.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json"),
+                ("envelope_version", b"99"),
+            ],
+        )
+        producer.flush(30)
+
+        deadline = time.monotonic() + 20
+        known_count = dl_count = 0
+        while time.monotonic() < deadline:
+            known_count = _count_alert_ids(ch_client, [known_event["id"]])
+            dl_count = ch_client.query(
+                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{tenant_key}' "
+                f"AND error LIKE 'unsupported_envelope_version%'"
+            ).result_rows[0][0]
+            if known_count == 1 and dl_count == 1:
+                break
+            time.sleep(0.5)
+
+        assert known_count == 1, "the event at the real ENVELOPE_VERSION must still land in ClickHouse"
+        assert dl_count == 1, "the unsupported-version event must be dead-lettered with error=unsupported_envelope_version..."
+        assert _count_alert_ids(ch_client, [future_event["id"]]) == 0, "the unsupported-version event must never be stored"
+        assert thread.is_alive(), "writer must never crash on an unsupported envelope version"
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+        ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id = '{known_event['id']}'")
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_key}'")
+
+
 def test_a_brand_new_tenants_first_event_sent_right_away_is_stored_not_dead_lettered(
     kafka_bootstrap, kafka_topic, ch_client, lab_env, pg_db, database_url, real_alert_lines,
 ):

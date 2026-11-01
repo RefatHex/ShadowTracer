@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
 from .config import load_settings
+from .version import VERSION
 from .db import make_session_factory
 from .logging_redact import register_secret, setup_logging
 from .routers import agents as agents_router
@@ -19,7 +20,7 @@ def create_app() -> FastAPI:
     settings = load_settings()
     register_secret(settings.jwt_secret)
 
-    app = FastAPI(title="ShadowTracer console API")
+    app = FastAPI(title="ShadowTracer console API", version=VERSION)
     app.state.settings = settings
     app.state.session_factory = make_session_factory(settings)
 

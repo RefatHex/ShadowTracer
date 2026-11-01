@@ -39,6 +39,15 @@ POLL_IDLE_SECONDS = 0.5
 DEAD_LETTER_BASE_DELAY_SECONDS = 1.0
 DEAD_LETTER_MAX_DELAY_SECONDS = 30.0
 
+# Phase 5.6 Item 4: a header, not a payload field, so a consumer can reject
+# an envelope shape it doesn't understand before even deserializing the
+# value - see writer.py's/consumer.py's matching ENVELOPE_VERSION check.
+# Bump only on a breaking change to what a header means or which headers
+# exist; this is why 46 pre-envelope dead letters became permanently
+# unparseable (docs/design/VERSIONING.md) - a reader could have dispatched
+# on this instead of guessing a shape that wasn't there.
+ENVELOPE_VERSION = 1
+
 logger = logging.getLogger(__name__)
 
 
@@ -220,6 +229,7 @@ def run(
                     ("tenant_id", tenant_id.encode()),
                     ("source_manager", manager_name.encode()),
                     ("source_file", source_name.encode()),
+                    ("envelope_version", str(ENVELOPE_VERSION).encode()),
                 ]
                 while True:
                     try:

@@ -43,6 +43,7 @@ from .dead_letter import send_to_dead_letter
 from .metrics import Metrics
 from .normalizer import normalize_alert
 from .retry import retry_with_backoff
+from .shipper import ENVELOPE_VERSION
 from .tenants import TenantCache
 
 INSERT_BASE_DELAY_SECONDS = 1.0
@@ -182,16 +183,41 @@ def run(
                 rows = []
                 for msg in msgs:
                     tenant_id = None
+                    envelope_version_raw = None
                     for k, v in (msg.headers() or []):
                         if k == "tenant_id":
                             tenant_id = v.decode()
-                            break
+                        elif k == "envelope_version":
+                            envelope_version_raw = v.decode()
                     # errors="replace", never strict: invalid UTF-8 bytes in
                     # a Kafka message value must not crash the writer the
                     # way a raw-mode file read once could (shipper.py) -
                     # replaced bytes fail JSON parsing naturally below and
                     # get dead-lettered there instead.
                     raw_line = msg.value().decode("utf-8", errors="replace")
+                    # Phase 5.6 Item 4: a missing header predates this change
+                    # (treated as version 1, the only shape that ever
+                    # existed before it) - a PRESENT header this writer
+                    # doesn't recognize is the real signal something newer
+                    # produced it (e.g. a future 5C envelope change) and
+                    # must not be silently misparsed the way the 46
+                    # pre-envelope dead letters were (VERSIONING.md).
+                    if envelope_version_raw is not None and envelope_version_raw != str(ENVELOPE_VERSION):
+                        metrics.incr("messages_failed")
+                        retry_with_backoff(
+                            lambda: send_to_dead_letter(
+                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=tenant_id,
+                                component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
+                                error=f"unsupported_envelope_version: got {envelope_version_raw!r}, this writer only understands {ENVELOPE_VERSION}",
+                                raw_event=raw_line, metrics=metrics,
+                            ),
+                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            on_retry=lambda attempt, exc2: logger.warning(
+                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
+                            ),
+                        )
+                        continue
                     # Phase 5C Step 0: a forged/stale/deleted tenant_key must
                     # never create silent orphaned ClickHouse rows - checked
                     # before normalize_alert, same permanent-bad-data path

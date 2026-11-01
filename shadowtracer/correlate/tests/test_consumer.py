@@ -475,3 +475,73 @@ def test_correlator_dead_letters_unknown_tenant_known_tenant_still_processes(
         thread.join(timeout=5)
         poll_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{unknown_tenant}'")
         poll_client.close()
+
+
+def test_correlator_dead_letters_unsupported_envelope_version_known_version_still_processes(
+    kafka_bootstrap, kafka_topic, database_url, db, ch_client, lab_env,
+):
+    """Phase 5.6 Item 4: an envelope_version header this correlator doesn't
+    recognize must be dead-lettered (error starts "unsupported_envelope_
+    version"), never create an incident - same shape as the unknown_tenant
+    test above."""
+    import clickhouse_connect
+    from shadowtracer_correlate.consumer import ENVELOPE_VERSION
+
+    tenant_key = f"test-flagged-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant_key)
+    marker = uuid.uuid4().hex[:8]
+    known_agent = f"agent-known-{marker}"
+    future_agent = f"agent-future-{marker}"
+
+    poll_client = clickhouse_connect.get_client(
+        host="127.0.0.1", port=8123, username=lab_env["CLICKHOUSE_USER"],
+        password=lab_env["CLICKHOUSE_PASSWORD"], database=TEST_CLICKHOUSE_DB,
+    )
+
+    stop_flag, thread, metrics = _start_consumer(kafka_bootstrap, kafka_topic, database_url, ch_client=ch_client)
+    try:
+        producer = Producer({"bootstrap.servers": kafka_bootstrap})
+        producer.produce(
+            kafka_topic, value=_alert(known_agent, "9.9.9.9", f"{marker}.known").encode(),
+            key=f"{tenant_key}:{known_agent}".encode(),
+            headers=[
+                ("tenant_id", tenant_key.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json"),
+                ("envelope_version", str(ENVELOPE_VERSION).encode()),
+            ],
+        )
+        producer.produce(
+            kafka_topic, value=_alert(future_agent, "9.9.9.9", f"{marker}.future").encode(),
+            key=f"{tenant_key}:{future_agent}".encode(),
+            headers=[
+                ("tenant_id", tenant_key.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json"),
+                ("envelope_version", b"99"),
+            ],
+        )
+        producer.flush(30)
+
+        deadline = time.monotonic() + 20
+        row = dl_count = None
+        while time.monotonic() < deadline:
+            row = db.execute(
+                select(incidents).where(incidents.c.tenant_key == tenant_key, incidents.c.agent_id == known_agent)
+            ).mappings().first()
+            dl_count = poll_client.query(
+                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{tenant_key}' "
+                f"AND error LIKE 'unsupported_envelope_version%'"
+            ).result_rows[0][0]
+            if row is not None and row["alert_count"] == 1 and dl_count == 1:
+                break
+            time.sleep(0.5)
+
+        assert row is not None and row["alert_count"] == 1, "the event at the real ENVELOPE_VERSION must still create an incident"
+        assert dl_count == 1, "the unsupported-version alert must be dead-lettered with error=unsupported_envelope_version..."
+        future_row = db.execute(
+            select(incidents).where(incidents.c.tenant_key == tenant_key, incidents.c.agent_id == future_agent)
+        ).mappings().first()
+        assert future_row is None, "the unsupported-version alert must never create an incident"
+        assert thread.is_alive(), "correlator must never crash on an unsupported envelope version"
+    finally:
+        stop_flag.set()
+        thread.join(timeout=5)
+        poll_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_key}'")
+        poll_client.close()

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from .. import health as health_checks
 from ..deps import get_db, get_settings
 from ..rbac import ADMIN_ONLY, mark_public
+from ..version import VERSION
 
 router = APIRouter(tags=["health"])
 
@@ -12,7 +13,7 @@ router = APIRouter(tags=["health"])
 def health():
     """Liveness only: the process is running and can answer HTTP. No
     dependency checks - that's /health/ready's job."""
-    return {"status": "ok"}
+    return {"status": "ok", "version": VERSION}
 
 
 @router.get("/health/ready", dependencies=[Depends(mark_public)])

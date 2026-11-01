@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AboutPage } from './AboutPage'
 import { AlertsPage } from './AlertsPage'
 import { AttackCoveragePage } from './AttackCoveragePage'
 import { AuthProvider, useAuth } from './AuthContext'
+import { fetchVersion } from './api'
 import { FingerprintDetailPage } from './FingerprintDetailPage'
 import { FingerprintsPage } from './FingerprintsPage'
 import { IncidentDetailPage } from './IncidentDetailPage'
@@ -60,6 +61,26 @@ function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => voi
   )
 }
 
+// Phase 5.6 Item 4: fetched from /health (the backend's own
+// shadowtracer/VERSION read), not a separately-hardcoded frontend
+// constant - one source of truth, no drift between what the API and the
+// console claim to be running.
+function Footer() {
+  const [version, setVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetchVersion()
+      .then((h) => setVersion(h.version))
+      .catch(() => setVersion(null)) // version display is best-effort, never blocks the UI
+  }, [])
+
+  return (
+    <footer className="px-6 py-3 text-xs text-gray-400 dark:text-gray-500">
+      ShadowTracer{version ? ` v${version}` : ''}
+    </footer>
+  )
+}
+
 function AppContent() {
   const { session, restoring } = useAuth()
   const [view, setView] = useState<View>({ name: 'alerts' })
@@ -85,6 +106,7 @@ function AppContent() {
       )}
       {view.name === 'attack-coverage' && <AttackCoveragePage />}
       {view.name === 'about' && <AboutPage />}
+      <Footer />
     </div>
   )
 }

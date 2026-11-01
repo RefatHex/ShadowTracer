@@ -127,6 +127,16 @@ async function handle<T>(resp: Response): Promise<T> {
   return resp.json() as Promise<T>
 }
 
+export interface HealthResponse {
+  status: string
+  version: string
+}
+
+export async function fetchVersion(): Promise<HealthResponse> {
+  const resp = await fetch(`${API_BASE}/health`)
+  return handle<HealthResponse>(resp)
+}
+
 export async function login(email: string, password: string): Promise<LoginResponse> {
   const resp = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
