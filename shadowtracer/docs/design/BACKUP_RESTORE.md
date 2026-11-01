@@ -139,3 +139,65 @@ to run, rather than just a plausible idea.
 
 Teardown: `docker compose down -v` in the separate stack. Main lab's 26 containers
 confirmed still running throughout.
+
+## 3. Upgrade/rollback policy (Phase 5.6 Item 6)
+
+**Policy: backup, then upgrade; rollback = restore.** VERSIONING.md Sec 3's real
+rollback test found that Postgres down-migrations work mechanically, but at least one
+(`8638c1abc22b`) does a real, one-way `drop_column` that would silently lose an
+operator's actual configured value on rollback - not a theoretical risk, a concrete
+one found by reading the downgrade. Checking every migration file in this project's
+history (`shadowtracer/ingest/alembic/versions/`) for a `drop_column`/`drop_table` in
+its `downgrade()` found **7 of 9** real downgrades do one. Treating down-migration as
+the exception rather than the rollback plan - backup before every upgrade, and use that
+backup (restore) to roll back - avoids relying on a path that frequently discards data
+by construction.
+
+**Enforced, not just documented**: `shadowtracer/ingest/alembic/env.py` now refuses
+`alembic downgrade` unless `SHADOWTRACER_FORCE_DESTRUCTIVE_DOWNGRADE=1` is set, with a
+message pointing at this policy and at restore as the supported path. Verified for
+real against a disposable, isolated Postgres database (never the real lab one) - `alembic
+upgrade head` unaffected, `alembic downgrade -1` without the flag refused before
+touching the database (exit 1, no migration ran), the same command with the flag set
+ran the downgrade normally. A single choke point in `env.py` rather than per-migration
+markers: classifying "destructive" per file would need every future migration to
+remember to flag itself, where nearly all of them are destructive anyway.
+
+## 4. Keeper replica cleanup, automated (Phase 5.6 Item 6)
+
+§2's restore above needed a human to notice the `REPLICA_ALREADY_EXISTS` failure, read
+`system.zookeeper` to find the stale registration, and run `SYSTEM DROP REPLICA`
+by hand per affected table. `deploy/ci/backup-test/restore_clickhouse.py` automates
+this: before `RESTORE DATABASE`, it lists whatever is actually registered under
+`/clickhouse/tables/{shard}` in Keeper right now and runs `SYSTEM DROP REPLICA ...
+FROM ZKPATH ...` for each one (swallowing failures for registrations that aren't
+actually stale) - generic over the table list, not a hardcoded copy of today's 5
+tables that would need updating every time a new Replicated table is added.
+
+**Re-ran the restore test for real, end to end, unattended**, in a fresh
+`deploy/ci/backup-test` instance: applied the real schema + Item 5's migration +
+all Postgres Alembic migrations, created a real tenant/admin via `cli.py
+create-admin`, inserted 5 real rows into `events`. Before-backup snapshot: 5 events,
+alert_ids `guardtest-alert-{0..4}-*`. `BACKUP DATABASE` succeeded, then `DROP DATABASE`
+(isolated stack only).
+
+**Negative control - confirmed the bug still reproduces without the fix**: calling
+`RESTORE DATABASE` directly (no cleanup) failed exactly as in §2:
+```
+Code: 253. DB::Exception: Replica /clickhouse/tables/01/dead_letter_events/replicas/01
+already exists: While creating table shadowtracer.dead_letter_events. (REPLICA_ALREADY_EXISTS)
+```
+
+**Then ran `restore_clickhouse.py --backup-name guardtest-backup-1`** - no manual
+commands:
+```
+cleaned stale Keeper replica registrations for: ['dead_letter_events', 'sequence_firings', 'events', 'fingerprint_occurrences', 'events_hourly_rollup_v2']
+RESTORE DATABASE shadowtracer succeeded
+```
+
+**After-restore verification**: `SELECT count() FROM events` = 5, same 5 alert_ids as
+the before-backup snapshot. Postgres (never dropped in this run - a ClickHouse-only
+disaster, same realistic scenario as §2) still had the real tenant/admin row
+untouched throughout. Main lab's 26 containers confirmed still running before and
+after (`docker compose -f deploy/lab/docker-compose.yml ps` -> 26, unaffected).
+Teardown: `docker compose down -v` in the separate stack.

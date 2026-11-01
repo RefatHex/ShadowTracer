@@ -86,6 +86,27 @@ def run_migrations_online() -> None:
             context.run_migrations()
 
 
+# Phase 5.6 Item 6: "backup, then upgrade; rollback = restore" - a
+# down-migration is the exception now, not the rollback plan, after
+# VERSIONING.md's real rollback test found a downgrade
+# (8638c1abc22b) that silently drops operator data on a column it's
+# dropping. Checking per-migration for an actual drop_column/drop_table
+# call would need to re-derive it every time a migration is added and
+# forgets to flag itself - cheaper and just as correct to require the
+# flag for every downgrade, since nearly all of them (7 of 9) really are
+# destructive; restore-from-backup is the documented safe path
+# (docs/design/BACKUP_RESTORE.md) for the rest.
+_cmd_opts = getattr(config, "cmd_opts", None)
+if _cmd_opts is not None and getattr(_cmd_opts, "cmd", None) and _cmd_opts.cmd[0].__name__ == "downgrade":
+    if not os.environ.get("SHADOWTRACER_FORCE_DESTRUCTIVE_DOWNGRADE"):
+        raise SystemExit(
+            "Refusing to run `alembic downgrade`: down-migrations can drop columns/tables "
+            "and silently lose operator data (see docs/design/VERSIONING.md Sec 3's real "
+            "example). The supported rollback is backup-then-restore, not downgrade - see "
+            "docs/design/BACKUP_RESTORE.md. If you really mean to downgrade anyway, set "
+            "SHADOWTRACER_FORCE_DESTRUCTIVE_DOWNGRADE=1 and re-run."
+        )
+
 if context.is_offline_mode():
     run_migrations_offline()
 else:
