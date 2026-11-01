@@ -29,6 +29,12 @@ INGEST_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ingest")
 # module and schema/events_schema.sql for the placeholders substituted
 # below and why.
 _CLICKHOUSE_SCHEMA_PATH = os.path.join(INGEST_DIR, "schema", "events_schema.sql")
+# Phase 5.6 Item 5: migrations applied the same read-by-path way, right
+# after the base schema - same reason clickhouse_schema can't be
+# imported here. No drift/tracking-table check needed in this fixture:
+# the test database is dropped and recreated fresh every session, so
+# there's never a previously-applied migration to drift against.
+_CLICKHOUSE_MIGRATIONS_DIR = os.path.join(INGEST_DIR, "schema", "migrations")
 
 # Session-unique, not a fixed "shadowtracer_test" - found the hard way
 # (2026-10-08, see MEMORY/project_test_suite_db_race.md): a shared fixed
@@ -180,6 +186,17 @@ def _isolated_clickhouse_test_database(lab_env):
         statement = statement.strip()
         if statement:
             admin_client.command(statement)
+
+    if os.path.isdir(_CLICKHOUSE_MIGRATIONS_DIR):
+        for filename in sorted(os.listdir(_CLICKHOUSE_MIGRATIONS_DIR)):
+            if not filename.endswith(".sql"):
+                continue
+            with open(os.path.join(_CLICKHOUSE_MIGRATIONS_DIR, filename)) as f:
+                migration_sql = f.read().replace("__DATABASE__", TEST_CLICKHOUSE_DB).replace("__KEEPER_PREFIX__", keeper_prefix)
+            for statement in re.sub(r"--.*$", "", migration_sql, flags=re.MULTILINE).split(";"):
+                statement = statement.strip()
+                if statement:
+                    admin_client.command(statement)
     yield
     admin_client.command(f"DROP DATABASE IF EXISTS {TEST_CLICKHOUSE_DB} ON CLUSTER lab_cluster")
     admin_client.close()

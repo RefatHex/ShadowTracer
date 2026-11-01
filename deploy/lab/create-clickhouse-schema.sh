@@ -15,12 +15,14 @@ import sys
 sys.path.insert(0, '$INGEST_DIR')
 import clickhouse_connect
 from shadowtracer_ingest.clickhouse_schema import apply_schema
+from shadowtracer_ingest.migrations import apply_migrations
 
 client = clickhouse_connect.get_client(
     host='127.0.0.1', port=8123,
     username='$CLICKHOUSE_USER', password='$CLICKHOUSE_PASSWORD',
 )
 apply_schema(client, database='shadowtracer', keeper_prefix='')
+applied = apply_migrations(client, database='shadowtracer', keeper_prefix='')
 client.close()
-print('schema applied to shadowtracer')
+print('schema applied to shadowtracer, migrations applied:', applied or '(none pending)')
 "

@@ -61,7 +61,9 @@ def admin_token(client, db, tenant_id):
 def test_health_liveness_requires_no_auth(client):
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert "version" in body
 
 
 def test_health_ready_requires_no_auth_and_reports_healthy(client):

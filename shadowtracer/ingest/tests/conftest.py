@@ -23,6 +23,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shadowtracer_ingest.clickhouse_schema import apply_schema
+from shadowtracer_ingest.migrations import apply_migrations
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "lab", ".env")
 INGEST_DIR = os.path.join(os.path.dirname(__file__), "..")
@@ -182,6 +183,7 @@ def _isolated_clickhouse_test_database(lab_env):
     # DROP's asynchronous Keeper cleanup.
     keeper_prefix = f"test-{uuid.uuid4().hex[:8]}/"
     apply_schema(admin_client, database=TEST_CLICKHOUSE_DB, keeper_prefix=keeper_prefix)
+    apply_migrations(admin_client, database=TEST_CLICKHOUSE_DB, keeper_prefix=keeper_prefix)
     yield
     admin_client.command(f"DROP DATABASE IF EXISTS {TEST_CLICKHOUSE_DB} ON CLUSTER lab_cluster")
     admin_client.close()
