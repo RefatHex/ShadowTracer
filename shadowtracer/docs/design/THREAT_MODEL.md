@@ -153,36 +153,60 @@ because this report found "nothing" and moved on.
 
 ## 10. Ranked top 10 (highest risk first)
 
+Phase 5.6 closeout status (see §12 for the decisions behind the #2/#7 changes
+and the full before-first-customer plan): **#1/#5 done** (Item 1, this
+session). **#2, #3, #6, #7: before first customer** - decided/specified now
+(§12), not yet built. **#4: before multi-host**, not before first customer -
+today's single-Docker-daemon deployment has no network segment for this
+traffic to cross that the operator doesn't already control, so it's real but
+not the most urgent gap for a first customer on the same topology as today's
+lab. **#8: the runbook alone, now** (§12.3) - not the secrets-manager
+integration its own "Higher effort" tier describes. **#9/#10: deferred**,
+unchanged - still nothing built to secure.
+
 1. **Kafka: plaintext, zero authentication, on every listener** (§3) - the widest-open
    boundary, and the one the tenant-isolation model (§6, `TENANCY.md`) most depends on
-   being closed.
+   being closed. **Done (Item 1)** - see `docs/design/KAFKA_AUTH.md`: TLS + SASL/SCRAM,
+   per-tenant topics, per-component ACLs.
 2. **Single shared `JWT_SECRET` for every tenant** (§6) - one compromise breaks
-   cross-tenant isolation in one step, for every tenant at once.
+   cross-tenant isolation in one step, for every tenant at once. **Before first
+   customer** - design revised in §12.1 (one EdDSA/RS256 pair + `kid`, not
+   per-tenant keys - the per-tenant design below in §11 is superseded).
 3. **ClickHouse: one shared admin-equivalent credential, no per-service least
    privilege** (§4) - confirmed via an empty grep for any role/grant statement.
+   **Before first customer** - unchanged design from §11 item 3.
 4. **Postgres/ClickHouse traffic is cleartext** (§4) - `ssl=off` confirmed directly;
    credentials and tenant data both exposed to anyone who can observe the network.
+   **Before multi-host**, not before first customer (see status note above).
 5. **Tenant identity is asserted by the shipper into an unauthenticated bus** (§3,
    compounding #1) - the thing that makes #1 specifically a tenant-isolation risk, not
-   just a generic "internal traffic is cleartext" risk.
+   just a generic "internal traffic is cleartext" risk. **Done (Item 1)** - same fix
+   as #1, signed envelopes / per-tenant topics close this specifically.
 6. **No network segmentation** - every service shares one flat Docker network/subnet;
    a compromised shipper (which only needs to reach Kafka) can reach Postgres/
    ClickHouse directly with whatever shared credential it has (§4's finding compounds
-   this - for ClickHouse, that's full admin access).
+   this - for ClickHouse, that's full admin access). **Before first customer** -
+   unchanged design from §11 item 6.
 7. **`agent -> manager` not independently re-audited** (§1) - lower risk because it's
    upstream Wazuh's own hardened protocol, but "inherited and trusted, not re-checked"
-   is itself worth naming as a residual risk, not a cleared one.
+   is itself worth naming as a residual risk, not a cleared one. **Before first
+   customer** - concrete decision made in §12.2 (keep the enrollment password, add
+   agent-side manager certificate verification), replacing §11 item 7's "or an
+   explicit documented decision to treat it as inherited" with that decision.
 8. **No consolidated secrets rotation/expiry story** - `.env` values are generated
    once (per `deploy/lab/.env.example`'s own instructions) with no documented rotation
    process; not independently scored above the items with confirmed exploitability,
-   but a real gap once this runs in production.
+   but a real gap once this runs in production. **Runbook written now** (§12.3); the
+   secrets-manager integration tier of §11 item 8 remains not scheduled.
 9. **Rule/feed update mechanism doesn't exist yet** (§8) - not a live risk today, ranked
    low specifically *because* nothing is there to attack yet, not because it's been
-   secured.
-10. **Future SOAR doesn't exist yet** (§9) - same reasoning as #9.
+   secured. **Deferred**, unchanged.
+10. **Future SOAR doesn't exist yet** (§9) - same reasoning as #9. **Deferred**,
+    unchanged.
 
-No fixes in this item, per instruction - this ranking is the input to whatever gets
-prioritized next.
+No fixes in this item originally, per instruction - this ranking was the input to
+whatever got prioritized next. §12 is that next step's decisions (doc-only, per Phase
+5.6 Item 2 - no implementation yet except where §12 says otherwise).
 
 ## 11. Proposed fix and effort per top-10 item (Phase 5.6 Item 2 - report only)
 
@@ -238,3 +262,194 @@ Phase 5.6 Item 1 - `docs/design/KAFKA_AUTH.md`, not yet approved/built).
 9. **Rule/feed update mechanism doesn't exist yet.** No fix proposed - nothing to
    secure until it's built (Phase 5C/5D). Revisit then.
 10. **Future SOAR doesn't exist yet.** Same as #9 - revisit when built.
+
+## 12. Phase 5.6 Item 2: revised decisions (doc only - no implementation yet)
+
+Doc update only, per instruction - none of §12.1/§12.2 is built. §12.3 is itself
+the deliverable (a runbook), not a pointer to one still to be written.
+
+### 12.1 JWT: superseding item 2's per-tenant-key design
+
+Confirmed today's actual implementation, not just the §6/§11 description:
+`app/security.py:57` - `jwt.encode(payload, jwt_secret, algorithm="HS256")`;
+`app/security.py:63` - `jwt.decode(token, jwt_secret, algorithms=["HS256"])`. One
+symmetric secret, one pinned algorithm already (the decode call was never
+alg-agile - `algorithms=["HS256"]` is a list with one fixed entry, not read from
+the token's own header), so today's code is not vulnerable to the classic
+alg-confusion downgrade (RS256-signed token re-presented as HS256, verified
+against the public key as if it were an HMAC secret) for the simple reason that
+there's no RS256 key anywhere yet for an attacker to retarget. That changes the
+moment any asymmetric key exists in this system, which is exactly why the design
+below pins the algorithm explicitly rather than relying on "there's nothing to
+confuse it with" by accident.
+
+**Superseded:** item 2's own proposed fix above (per-tenant HMAC keys, decode
+unverified claims first to learn `tenant_id`, look up that tenant's key, then
+verify) is **not** the design going forward - it was flagged there as having "a
+real implementation subtlety," and on reflection that subtlety is the problem,
+not a detail to get right carefully: any step that makes a security decision
+(which key to verify against) from data that hasn't been verified yet is a
+standing invitation to exactly the downgrade-attack shape §6 already named. A
+per-tenant-keyed design doesn't need that step to exist at all if the dispatch
+key is something the server already trusts before touching the token - but
+simpler still is not needing dispatch at all.
+
+**Decided instead: one EdDSA (Ed25519) key pair for the whole deployment**, not
+per-tenant:
+
+- **Asymmetric, not per-tenant-symmetric.** One private key signs every token
+  (console-backend, the only issuer); verification can use the public half alone
+  - useful if any other service ever needs to verify a token without holding
+    signing power, though nothing does yet. Still one shared cryptographic
+    identity across tenants, same as today's one `JWT_SECRET` - the thing this
+    actually fixes is algorithm/key hygiene, not re-introducing per-tenant
+    isolation at the JWT layer (`rbac.py`'s `tenant_id` claim scoping, §6's
+    "real, working control," still carries that weight; unchanged).
+- **`kid` (key ID) in the JWT header, for *rotation*, never for *dispatch*.**
+  Verification holds a small, server-controlled allowlist of currently-valid
+  `(kid -> public key)` pairs - normally one entry, briefly two during a
+  rotation window (old key still accepted for tokens issued before the
+  rotation, long enough for the longest-lived refresh token to expire). The
+  `kid` is read from the token's header only to pick WHICH already-trusted key
+  to verify against - never to look up something that then influences whether
+  verification is attempted at all, and never read from the payload (the
+  header is itself unverified too, but the allowlist it indexes into is fixed
+  and small, not attacker-influenceable the way a per-tenant key lookup is).
+- **Algorithm pinned, explicitly, at both ends.** `jwt.encode(..., algorithm="EdDSA")`
+  and `jwt.decode(..., algorithms=["EdDSA"])` (PyJWT's decode already requires
+  the caller to pass this list - today's code does; the fix is choosing EdDSA/
+  RS256 deliberately going in, not an API change). `RS256` is the fallback if
+  the eventual runtime's crypto stack doesn't support Ed25519 cleanly - either
+  is fine, HS256 is not, once any public/private split exists for a `kid`
+  rotation window to ever matter.
+- **Private key lives outside the repo, outside `.env` as a literal value.** Not
+  a new idea - `.env` is already gitignored (§7) - but a key pair's private half
+  is higher-value than a password: mount it as a file (same pattern Kafka's own
+  TLS material already uses - `generate-kafka-certs.sh`'s output, gitignored,
+  generated per environment) and reference it by **path**, the same
+  `_env_or_file()` convention `app/config.py` already has for `JWT_SECRET`/
+  `APP_DB_PASSWORD` (`NAME_FILE` wins over `NAME` when both are set) - no new
+  mechanism needed, just using the one that exists for the right kind of secret.
+- **Never decode unverified claims to pick a key.** Stated once above as the
+  specific thing wrong with the superseded design; restated here as the
+  standing rule for whatever replaces this again someday: a `kid`-keyed
+  allowlist is safe because the allowlist itself isn't derived from anything
+  the token claims - any future redesign that *does* need per-tenant keys again
+  must find a way to identify the tenant from something already trusted
+  (the request's own authenticated context, not the token being verified) or
+  this exact subtlety recurs.
+
+**Effort:** Low-Medium - `app/security.py`'s two call sites, `app/config.py`'s
+key-loading (mirrors existing `_env_or_file` pattern), one key-generation step
+added to lab bootstrap, and a rotation procedure (§12.3). No new migration -
+nothing about this touches `tenants` or any other table. Existing tokens are
+short-lived (`access_token_ttl_seconds`, `app/config.py`) so the cutover is a
+deploy, not a data migration.
+
+### 12.2 agent -> manager (item 7): a concrete decision, not just "inherited"
+
+Confirmed directly, not assumed: `entrypoint-agent.sh:128`'s `agent-auth` call
+passes `-m`/`-p`/`-A`/`-P`/`-a` - never `-v <ca-cert-path>` (confirmed in
+`agent-auth -h`'s own usage: `-v <path> Full path to CA certificate used to
+verify the server`). The manager's own `ossec.conf` already ships
+`<ssl_manager_cert>`/`<ssl_manager_key>` (confirmed in `etc/ossec.conf:256-257`)
+- it presents a certificate - but nothing on the agent side checks it against
+anything, so enrollment today trusts whoever answers on port 1515 by IP/
+hostname alone. The enrollment *password* (`ENROLL_PASSWORD`, `<use_password>`
+flipped on in `entrypoint-manager.sh`) is real and already required - this
+doesn't replace it, it closes the gap the password alone doesn't cover: a
+network-position attacker between agent and manager can't see the password in
+transit (Wazuh's own enrollment channel is encrypted, §1), but *could* stand up
+a fake manager, answer the agent's connection, and harvest whatever the agent
+sends on the (unverified) assumption it's talking to the real one.
+
+**Decided: keep the enrollment password as-is, add agent-side verification of
+the manager's certificate.** Concretely: a CA for manager certificates (same
+self-signed-lab-CA pattern `generate-kafka-certs.sh` already established for
+Kafka, not a new mechanism), the manager's `sslmanager.cert` signed by it
+instead of today's presumably-self-signed leaf, and `agent-auth`'s own `-v
+<ca-cert-path>` pointed at that CA's public cert. An agent whose enrollment
+fails closed against an unrecognized manager certificate is a real, if small,
+improvement over today's "whoever answers" trust model - still explicitly
+*not* a re-audit of Wazuh's underlying enrollment/secure-channel protocol
+itself (that remains "inherited, not independently re-verified," §1/§7's
+original framing, and stays out of scope here same as before).
+
+**Effort:** Low - one CA generation step (reusing existing tooling), one
+cert-signing change on the manager side, one new flag on the agent side. No
+code change in either `entrypoint-manager.sh`'s structure or
+`entrypoint-agent.sh`'s enrollment loop beyond that one flag.
+
+### 12.3 Secrets rotation runbook (item 8 - the runbook itself, written now)
+
+Scope: every credential this project generates into `deploy/lab/.env` as of
+Phase 5.6 Item 1's closeout - the original item 8 list
+(`CLUSTER_KEY`/`ENROLL_PASSWORD`/`CLICKHOUSE_PASSWORD`/`POSTGRES_PASSWORD`) plus
+the SASL/SCRAM credentials Item 1 added (`KAFKA_ADMIN_PASSWORD`,
+`KAFKA_SHIPPER_PASSWORD`, `KAFKA_SHIPPER_TEST_PASSWORD`,
+`KAFKA_WRITER_PASSWORD`, `KAFKA_CORRELATOR_PASSWORD`,
+`KAFKA_CONSOLE_BACKEND_PASSWORD`) and the JWT key pair from §12.1 once built.
+Each generated with `openssl rand -base64 24` (passwords) as `.env.example`
+already instructs, or a key-generation command (§12.1's key pair, once that
+exists).
+
+**Wazuh cluster/enrollment (`CLUSTER_KEY`, `ENROLL_PASSWORD`):**
+1. Generate the new value (`openssl rand -base64 24` for `ENROLL_PASSWORD`;
+   `CLUSTER_KEY` per Wazuh's own cluster-key format).
+2. Roll the manager and every worker together (`docker compose up -d
+   --force-recreate shadowtracer-master shadowtracer-worker1
+   shadowtracer-worker2 shadowtracer-worker-test`) - `CLUSTER_KEY` must match
+   across the whole cluster at all times, so this one has no zero-downtime
+   path with today's single-key-per-cluster design; a brief cluster-rejoin
+   window is expected.
+3. `ENROLL_PASSWORD` only affects *new* enrollments (§12.2's enrollment step) -
+   already-enrolled agents are unaffected, since their key material was issued
+   at enrollment time, not re-checked against the current password on every
+   connection. No agent restart needed for this one.
+
+**ClickHouse / Postgres (`CLICKHOUSE_PASSWORD`, `POSTGRES_PASSWORD`,
+`APP_DB_PASSWORD`):**
+1. Create the new credential in ClickHouse/Postgres directly first (`ALTER
+   USER ... IDENTIFIED BY`/`ALTER ROLE ... PASSWORD`) - both support changing a
+   password without dropping the session-holding connections already open.
+2. Update `.env`, then roll every connecting service in turn (writer,
+   correlator, closer, shipper, console-backend) - each picks up the new value
+   on its own restart; no need to restart all of them simultaneously, since the
+   OLD credential keeps working until the database-side change in step 1,
+   which should happen only once every connector is confirmed on the new value
+   (reverse the order from how it reads above in practice: roll the services
+   first against a database that still accepts BOTH old and new, confirm,
+   *then* revoke the old one - most DBs support having two valid passwords
+   mid-rotation only via two distinct role/user names, not two passwords on one
+   role, so a real zero-downtime rotation here needs a short-lived second
+   credential, not just this project's current one-password-per-role model).
+
+**Kafka SASL/SCRAM (`KAFKA_ADMIN_PASSWORD` and the per-role passwords):**
+1. `kafka-configs.sh --alter --add-config
+   'SCRAM-SHA-512=[password=<new>]' --entity-type users --entity-name <role>`
+   adds the new credential *alongside* the old one - SCRAM supports multiple
+   valid passwords per principal natively, unlike the Postgres/ClickHouse case
+   above. This is the one rotation in this list with a real zero-downtime path
+   already built into the tooling being used.
+2. Update `.env` and roll the affected service(s) - writer/writer-2 for
+   `KAFKA_WRITER_PASSWORD`, etc.
+3. Once every service using that role is confirmed on the new password,
+   `--delete-config 'SCRAM-SHA-512'` the old credential entry (`kafka-configs.sh
+   --describe --entity-type users` lists current entries per principal to
+   confirm which to remove).
+
+**JWT key pair (§12.1, once built):**
+1. Generate the new Ed25519/RS256 pair with a new `kid`.
+2. Deploy console-backend with BOTH keys in its verification allowlist (old
+   `kid` still accepted, new one added) but signing switched to the new key -
+   this is precisely what the `kid`-keyed allowlist in §12.1 exists to make
+   safe.
+3. Wait at least `access_token_ttl_seconds` + `refresh_token_ttl_seconds`
+   (`app/config.py`) past the cutover - every token signed with the old key
+   will have expired naturally - then remove the old `kid` from the allowlist
+   and retire the old private key.
+
+**Not covered by this runbook:** a secrets-manager integration (Vault or
+equivalent) remains the "Higher effort" tier of item 8's original estimate,
+unscheduled - this runbook is the "Low effort, versioned `.env` + manual steps"
+tier, the one decided as sufficient before first customer.
