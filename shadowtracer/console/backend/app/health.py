@@ -108,12 +108,64 @@ def check_clickhouse_replicas(settings: Settings) -> tuple[bool, str]:
     return False, f"{len(report['unhealthy'])} unhealthy replica/table pair(s): {report['unhealthy']}"
 
 
+def stuck_components(db: Session, threshold_seconds: int) -> dict:
+    """Phase 5.6 closeout item 3: a writer/correlator consumer paused in
+    its dead-letter retry-forever loop looks, from Kafka's own consumer-
+    group APIs, exactly like one that's just processing slowly - lag
+    goes up either way. component_retry_state (written directly by the
+    stuck component itself - retry_state.py's mark_stuck/clear_stuck,
+    called from writer.py's/consumer.py's on_retry callbacks) is the
+    one place that actually distinguishes them: a row only exists while
+    a retry is unresolved, and disappears the moment it succeeds.
+
+    over_threshold, not just non-empty: a retry that resolves in a few
+    seconds (a genuine transient blip) is normal and expected - this
+    only alerts once something's been stuck long enough that it's
+    unlikely to be anything but a real, persistent problem (a deleted
+    topic, a revoked ACL)."""
+    try:
+        rows = db.execute(text(
+            "SELECT component, group_id, partitions_paused, stuck_since, updated_at, last_error, "
+            "EXTRACT(EPOCH FROM (now() - stuck_since)) AS stuck_seconds "
+            "FROM component_retry_state ORDER BY stuck_since"
+        )).mappings().all()
+    except Exception as exc:  # noqa: BLE001 - a missing table (pre-migration) or DB hiccup must not crash /health
+        return {"error": str(exc), "components": [], "over_threshold": [], "alert": False}
+
+    components = [
+        {
+            "component": r["component"], "group_id": r["group_id"],
+            "partitions_paused": r["partitions_paused"],
+            "stuck_since": r["stuck_since"].isoformat(), "updated_at": r["updated_at"].isoformat(),
+            "last_error": r["last_error"], "stuck_seconds": r["stuck_seconds"],
+        }
+        for r in rows
+    ]
+    over_threshold = [c["component"] for c in components if c["stuck_seconds"] >= threshold_seconds]
+    return {
+        "threshold_seconds": threshold_seconds,
+        "components": components,
+        "over_threshold": over_threshold,
+        "alert": bool(over_threshold),
+    }
+
+
+def check_stuck_components(db: Session, threshold_seconds: int) -> tuple[bool, str]:
+    report = stuck_components(db, threshold_seconds)
+    if report.get("error"):
+        return True, f"check skipped: {report['error']}"
+    if report["alert"]:
+        return False, f"{len(report['over_threshold'])} component(s) stuck >{threshold_seconds}s: {report['over_threshold']}"
+    return True, "ok"
+
+
 def readiness_report(db: Session, settings: Settings) -> dict:
     checks = {
         "postgres": check_postgres(db),
         "clickhouse": check_clickhouse(settings),
         "clickhouse_replicas": check_clickhouse_replicas(settings),
         "kafka": check_kafka(settings),
+        "consumers_stuck": check_stuck_components(db, settings.stuck_retry_alert_seconds),
     }
     all_ok = all(ok for ok, _ in checks.values())
     return {

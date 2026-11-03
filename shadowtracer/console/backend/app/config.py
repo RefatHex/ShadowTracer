@@ -56,6 +56,16 @@ class Settings:
     writer_consumer_group: str
     dead_letter_alert_threshold: int = 50
     lag_retention_alert_fraction: float = 0.25
+    # Phase 5.6 closeout item 3: a writer/correlator stuck retrying the
+    # same dead-letter write is invisible to the lag checks above (lag
+    # and "stuck" look identical from a Kafka consumer-group API) -
+    # component_retry_state (written by retry_state.py) makes it
+    # visible, and /health/ready fails once a component's been stuck
+    # longer than this. 60s, not the max.poll.interval.ms default of
+    # 300s this session's own incident showed a stuck retry can run for
+    # before the consumer gets evicted from its group - the point of
+    # this check is to alert well before that eviction, not after it.
+    stuck_retry_alert_seconds: int = 60
     ruleset_dir: str = "/app/ruleset/rules"
     mitre_json_path: str = "/app/ruleset/mitre/enterprise-attack.json"
     access_token_ttl_seconds: int = 900  # 15 minutes
@@ -116,6 +126,7 @@ def load_settings() -> Settings:
         writer_consumer_group=os.environ.get("KAFKA_WRITER_GROUP", "shadowtracer-writer"),
         dead_letter_alert_threshold=int(os.environ.get("DEAD_LETTER_ALERT_THRESHOLD", "50")),
         lag_retention_alert_fraction=float(os.environ.get("LAG_RETENTION_ALERT_FRACTION", "0.25")),
+        stuck_retry_alert_seconds=int(os.environ.get("STUCK_RETRY_ALERT_SECONDS", "60")),
         ruleset_dir=os.environ.get("RULESET_DIR", "/app/ruleset/rules"),
         mitre_json_path=os.environ.get("MITRE_JSON_PATH", "/app/ruleset/mitre/enterprise-attack.json"),
         access_token_ttl_seconds=int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", "900")),

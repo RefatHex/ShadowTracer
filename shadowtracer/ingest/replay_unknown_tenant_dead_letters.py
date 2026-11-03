@@ -61,6 +61,23 @@ logger = logging.getLogger(__name__)
 
 POLL_TIMEOUT_SECONDS = 2.0
 CONSECUTIVE_EMPTY_POLLS_TO_STOP = 5
+# Real incident (Phase 5.6 closeout): replaying a now-known tenant's
+# event re-produces it onto its OWN alerts topic - if some OTHER
+# consumer sharing the broker (the real writer/correlator, pattern-
+# subscribed to every tenant's alerts topic) doesn't ALSO recognize
+# that tenant yet (e.g. it only exists in a database this script was
+# pointed at, not the one that other consumer checks), it dead-letters
+# the replay right back, which this script's own still-running
+# consumer immediately sees as a new "unknown_tenant" message for a
+# tenant that - per ITS snapshot - is known, and replays again: an
+# amplifying loop neither side will ever back off from on its own.
+# Confirmed directly: one run produced 50,000+ replay/dead-letter
+# round trips before being killed. CONSECUTIVE_EMPTY_POLLS_TO_STOP
+# alone can't catch this (the topic is never actually empty), so this
+# is a hard ceiling on total messages handled per invocation instead -
+# a one-shot operator tool that hits this should be re-run, not left
+# running forever against a broker still disagreeing with it.
+MAX_MESSAGES_PER_RUN = 5000
 
 
 def known_tenants(database_url: str) -> set[str]:
@@ -73,7 +90,7 @@ def replay(consumer: Consumer, producer: Producer, tenants: set[str]) -> dict:
     """tenants is a snapshot taken once at startup - a tenant created
     WHILE this script runs won't be picked up until the next invocation;
     fine for a one-shot operator tool. Returns a stats dict."""
-    stats = {"replayed": 0, "still_unknown": 0, "truncated": 0, "malformed": 0}
+    stats = {"replayed": 0, "still_unknown": 0, "truncated": 0, "malformed": 0, "messages_handled": 0}
     # Per (topic, partition) now, not just partition - Item 1 means
     # multiple tenants' dead-letter topics are in play at once, and
     # different tenants' topics can share the same partition number.
@@ -82,11 +99,20 @@ def replay(consumer: Consumer, producer: Producer, tenants: set[str]) -> dict:
 
     empty_polls = 0
     while empty_polls < CONSECUTIVE_EMPTY_POLLS_TO_STOP:
+        if stats["messages_handled"] >= MAX_MESSAGES_PER_RUN:
+            logger.warning(
+                "stopping after %d messages (MAX_MESSAGES_PER_RUN) - this is the amplifying-loop "
+                "safety cap, not CONSECUTIVE_EMPTY_POLLS_TO_STOP; re-run once whatever's still "
+                "re-dead-lettering these replays agrees the tenant is known",
+                MAX_MESSAGES_PER_RUN,
+            )
+            break
         msg = consumer.poll(POLL_TIMEOUT_SECONDS)
         if msg is None:
             empty_polls += 1
             continue
         empty_polls = 0
+        stats["messages_handled"] += 1
         if msg.error():
             logger.warning("consumer error, skipping: %s", msg.error())
             continue

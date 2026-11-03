@@ -40,13 +40,14 @@ import logging
 import time
 
 import clickhouse_connect
-from confluent_kafka import Consumer, Producer
+from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from sqlalchemy import create_engine
 
 from .dead_letter import send_to_dead_letter
 from .metrics import Metrics
 from .normalizer import normalize_alert
 from .retry import retry_with_backoff, consumer_heartbeat
+from .retry_state import mark_stuck, clear_stuck
 from .shipper import ENVELOPE_VERSION
 from .tenants import TenantCache
 from .topics import ALERTS_TOPIC_PATTERN, tenant_from_alerts_topic
@@ -196,11 +197,43 @@ def run(
     consumer.subscribe([ALERTS_TOPIC_PATTERN])
 
     ch = _FailoverClickHouse(clickhouse_hosts, clickhouse_user, clickhouse_password, clickhouse_database)
-    dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers, **kafka_client_config})
+    # Same tuning as the consumer above, same reason - confirmed for
+    # real on the PRODUCER side too, separately: a dead-letter topic
+    # that briefly didn't exist (deleted, then recreated moments later)
+    # kept failing with TOPIC_AUTHORIZATION_FAILED on every retry for
+    # several more minutes after recreation, even though a brand-new
+    # Producer against the exact same topic worked immediately - this
+    # producer's own cached "doesn't exist" metadata for that topic
+    # wasn't due to refresh yet. Only a process restart (a fresh
+    # Producer, no stale cache) cleared it before this fix.
+    dead_letter_producer = Producer({
+        "bootstrap.servers": bootstrap_servers,
+        "topic.metadata.refresh.interval.ms": 10000,
+        **kafka_client_config,
+    })
+    pg_engine = create_engine(database_url, pool_pre_ping=True)
     # Phase 5C Step 0: a forged/stale/deleted tenant_key must never create
     # silent orphaned ClickHouse rows - see tenants.py's own docstring for
     # why this is a periodically-refreshed cache, not a query per message.
-    tenant_cache = TenantCache(create_engine(database_url, pool_pre_ping=True))
+    tenant_cache = TenantCache(pg_engine)
+    # Phase 5.6 closeout item 3: console-backend's /health/detail reads
+    # this directly - see retry_state.py's own docstring. One small
+    # closure per retry kind (both log AND record the stuck-state row)
+    # instead of duplicating both calls at each of the 6 call sites below.
+    retry_component = f"writer:{group_id}"
+
+    def _on_dead_letter_retry(attempt, exc, tenant):
+        logger.warning("dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc)
+        # tenant identifies the TARGET dead-letter topic - confirmed the
+        # hard way this needed to be here: without it, a stuck retry's
+        # only clue is a bare KafkaError with no topic name, which (in
+        # a real incident chasing exactly this) took far longer to
+        # diagnose than it should have.
+        mark_stuck(pg_engine, retry_component, group_id, consumer.assignment(), f"dead_letter_publish tenant={tenant}: {exc}")
+
+    def _on_insert_retry(attempt, exc, msg_topic):
+        logger.warning("ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc)
+        mark_stuck(pg_engine, retry_component, group_id, consumer.assignment(), f"clickhouse_insert topic={msg_topic}: {exc}")
 
     if started_flag is not None:
         started_flag.set()
@@ -298,10 +331,9 @@ def run(
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
                             poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: logger.warning(
-                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
-                            ),
+                            on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, topic_tenant),
                         )
+                        clear_stuck(pg_engine, retry_component)
                         continue
                     # Phase 5.6 Item 4: a missing header predates this change
                     # (treated as version 1, the only shape that ever
@@ -322,10 +354,9 @@ def run(
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
                             poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: logger.warning(
-                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
-                            ),
+                            on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, topic_tenant),
                         )
+                        clear_stuck(pg_engine, retry_component)
                         continue
                     # Phase 5C Step 0: a forged/stale/deleted tenant_key must
                     # never create silent orphaned ClickHouse rows - checked
@@ -349,10 +380,9 @@ def run(
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
                             poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: logger.warning(
-                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
-                            ),
+                            on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, topic_tenant),
                         )
+                        clear_stuck(pg_engine, retry_component)
                         continue
                     try:
                         ev = normalize_alert(raw_line, topic_tenant or "")
@@ -372,10 +402,9 @@ def run(
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
                             poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: logger.warning(
-                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
-                            ),
+                            on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, topic_tenant),
                         )
+                        clear_stuck(pg_engine, retry_component)
                         continue
                     if ev.cluster_node_fell_back:
                         logger.warning(
@@ -414,10 +443,9 @@ def run(
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
                             poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc: logger.warning(
-                                "ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc,
-                            ),
+                            on_retry=lambda attempt, exc2: _on_insert_retry(attempt, exc2, msg_topic),
                         )
+                        clear_stuck(pg_engine, retry_component)
                         metrics.incr("messages_inserted", len(bucket_rows))
                     else:
                         # An incomplete bucket (the tail of what's currently
@@ -434,13 +462,30 @@ def run(
                                 max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                                 max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
                                 poll_fn=lambda: consumer_heartbeat(consumer),
-                                on_retry=lambda attempt, exc: logger.warning(
-                                    "ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc,
-                                ),
+                                on_retry=lambda attempt, exc2: _on_insert_retry(attempt, exc2, msg_topic),
                             )
+                            clear_stuck(pg_engine, retry_component)
                             metrics.incr("messages_inserted", 1)
 
-            consumer.commit(asynchronous=False)
+            # Real incident (Phase 5.6 closeout): a partition revoked
+            # between this batch's poll() calls and this commit() (the
+            # topic got deleted mid-batch - confirmed via the PARTCNT
+            # "partition count changed from 1 to 0" log line right
+            # before this) leaves librdkafka with nothing locally
+            # stored to commit for it, and commit() raises
+            # _NO_OFFSET/"Local: No offset stored" rather than silently
+            # skipping that one partition - uncaught, this crashed the
+            # whole writer process every time an ephemeral topic (a
+            # test's own, in this lab) disappeared mid-cycle. There is
+            # genuinely nothing to commit for a partition that no
+            # longer exists, so this is caught and skipped, never
+            # re-raised; any OTHER commit failure still propagates.
+            try:
+                consumer.commit(asynchronous=False)
+            except KafkaException as exc:
+                if exc.args[0].code() != KafkaError._NO_OFFSET:
+                    raise
+                logger.warning("commit skipped (partition revoked mid-batch, nothing to commit): %s", exc)
             metrics.incr("batches_committed")
     finally:
         consumer.close()

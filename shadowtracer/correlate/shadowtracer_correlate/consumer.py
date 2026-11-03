@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest")
 from shadowtracer_ingest.dead_letter import send_to_dead_letter  # noqa: E402
 from shadowtracer_ingest.normalizer import normalize_alert  # noqa: E402
 from shadowtracer_ingest.retry import consumer_heartbeat  # noqa: E402
+from shadowtracer_ingest.retry_state import mark_stuck, clear_stuck  # noqa: E402
 from shadowtracer_ingest.shipper import ENVELOPE_VERSION  # noqa: E402
 from shadowtracer_ingest.tenants import TenantCache  # noqa: E402
 from shadowtracer_ingest.topics import ALERTS_TOPIC_PATTERN, tenant_from_alerts_topic  # noqa: E402
@@ -75,7 +76,7 @@ def _wait_polling(stop_flag, delay, consumer) -> bool:
     return False
 
 
-def _dead_letter_with_retry(stop_flag, metrics, consumer, **kwargs) -> bool:
+def _dead_letter_with_retry(stop_flag, metrics, consumer, pg_engine, retry_component, group_id, **kwargs) -> bool:
     """Returns True once the dead-letter write succeeds durably (via the
     Kafka dead-letter topic - send_to_dead_letter only ever raises for
     that half, since a ClickHouse-side failure is already caught inside
@@ -84,15 +85,24 @@ def _dead_letter_with_retry(stop_flag, metrics, consumer, **kwargs) -> bool:
     with no durable record anywhere. Returns False only if stop_flag
     fires mid-retry (graceful shutdown) - the caller must NOT commit the
     triggering message's offset in that case, so it's genuinely
-    redelivered and retried again after restart."""
+    redelivered and retried again after restart.
+
+    pg_engine/component: Phase 5.6 closeout item 3 - console-backend's
+    /health/detail reads component_retry_state directly (see
+    retry_state.py's own docstring); mark_stuck/clear_stuck make this
+    retry loop visible there the same way writer.py's does."""
     attempt = 0
     while True:
         try:
             send_to_dead_letter(metrics=metrics, **kwargs)
+            clear_stuck(pg_engine, retry_component)
             return True
         except Exception as exc:  # noqa: BLE001 - the Kafka publish itself failing is transient, not bad data
             attempt += 1
             logger.warning("dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc)
+            # tenant_key identifies the TARGET dead-letter topic - see
+            # writer.py's identical comment for why this matters.
+            mark_stuck(pg_engine, retry_component, group_id, consumer.assignment(), f"dead_letter_publish tenant={kwargs.get('tenant_key')}: {exc}")
             delay = min(PROCESS_BASE_DELAY_SECONDS * (2 ** (attempt - 1)), PROCESS_MAX_DELAY_SECONDS)
             if _wait_polling(stop_flag, delay, consumer):
                 return False
@@ -145,11 +155,25 @@ def run(
 
     engine = create_engine(database_url, pool_pre_ping=True)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
-    dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers, **kafka_client_config})
+    # Same tuning as the consumer above, same reason - confirmed for
+    # real on the PRODUCER side too, separately (see writer.py's own
+    # identical comment): a dead-letter topic that briefly didn't
+    # exist kept failing TOPIC_AUTHORIZATION_FAILED on every retry for
+    # minutes after recreation, even though a brand-new Producer
+    # against the same topic worked immediately - this producer's own
+    # cached "doesn't exist" metadata wasn't due to refresh yet.
+    dead_letter_producer = Producer({
+        "bootstrap.servers": bootstrap_servers,
+        "topic.metadata.refresh.interval.ms": 10000,
+        **kafka_client_config,
+    })
     # Phase 5C Step 0: a forged/stale/deleted tenant_key must never create
     # silent orphaned incidents - see tenants.py's own docstring for why
     # this is a periodically-refreshed cache, not a query per message.
     tenant_cache = TenantCache(engine)
+    # Phase 5.6 closeout item 3: console-backend's /health/detail reads
+    # this directly - see retry_state.py's own docstring.
+    retry_component = f"correlator:{group_id}"
 
     if started_flag is not None:
         started_flag.set()
@@ -195,7 +219,7 @@ def run(
             if header_tenant_id is not None and header_tenant_id != tenant_key:
                 metrics.incr("messages_failed")
                 if not _dead_letter_with_retry(
-                    stop_flag, metrics, consumer,
+                    stop_flag, metrics, consumer, engine, retry_component, group_id,
                     kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                     component="correlator", source_location=source_location,
                     error=f"tenant_topic_mismatch: topic claims {tenant_key!r}, header claims {header_tenant_id!r}",
@@ -215,7 +239,7 @@ def run(
             if envelope_version_raw is not None and envelope_version_raw != str(ENVELOPE_VERSION):
                 metrics.incr("messages_failed")
                 if not _dead_letter_with_retry(
-                    stop_flag, metrics, consumer,
+                    stop_flag, metrics, consumer, engine, retry_component, group_id,
                     kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                     component="correlator", source_location=source_location,
                     error=f"unsupported_envelope_version: got {envelope_version_raw!r}, this correlator only understands {ENVELOPE_VERSION}",
@@ -232,7 +256,7 @@ def run(
             if not tenant_cache.is_known(tenant_key or ""):
                 metrics.incr("messages_failed")
                 if not _dead_letter_with_retry(
-                    stop_flag, metrics, consumer,
+                    stop_flag, metrics, consumer, engine, retry_component, group_id,
                     kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                     component="correlator", source_location=source_location,
                     error="unknown_tenant", raw_event=raw_line,
@@ -246,7 +270,7 @@ def run(
             except Exception as exc:  # noqa: BLE001 - permanent, bad data: dead-letter and move on, never retried
                 metrics.incr("messages_failed")
                 if not _dead_letter_with_retry(
-                    stop_flag, metrics, consumer,
+                    stop_flag, metrics, consumer, engine, retry_component, group_id,
                     kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                     component="correlator", source_location=source_location,
                     error=f"{type(exc).__name__}: {exc}", raw_event=raw_line,
@@ -277,7 +301,7 @@ def run(
                     logger.warning("alert %s has a permanently malformed field - dead-lettering, not retrying", event.alert_id)
                     metrics.incr("messages_failed")
                     if not _dead_letter_with_retry(
-                        stop_flag, metrics, consumer, consumer,
+                        stop_flag, metrics, consumer, engine, retry_component, group_id,
                         kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                         component="correlator", source_location=source_location,
                         error="UnparseableEvent: permanently malformed field", raw_event=raw_line,

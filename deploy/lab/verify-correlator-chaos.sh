@@ -72,12 +72,59 @@ check() {
 }
 
 describe_group() {
-    # Phase 5.6 Item 1: admin (super-user, bypasses ACLs) - this is an
-    # operator diagnostic, not a pipeline component, same credential
-    # create-kafka-topics.sh/create-kafka-acls.sh already use.
-    docker exec shadowtracer-lab-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh \
-        --bootstrap-server localhost:9092 --command-config /etc/kafka/certs/admin-client.properties \
-        --describe --group "$GROUP"
+    # Real incident (Phase 5.6 closeout): `kafka-consumer-groups.sh
+    # --describe` doesn't just list stale historical partitions for a
+    # long-deleted topic (live_alert_topics' own comment already covers
+    # that, filterable after the fact) - it can abort the ENTIRE command
+    # with a nonzero exit and zero output the moment it tries to resolve
+    # log-end-offsets for ANY partition whose topic no longer exists
+    # (confirmed directly: one pytest-created ephemeral topic, deleted
+    # at test teardown, made every subsequent --describe call for this
+    # group fail outright - not something live_alert_topics' post-hoc
+    # filtering can recover from, since there's no output to filter).
+    #
+    # AdminClient.describe_consumer_groups() doesn't have this problem -
+    # it reports the group's CURRENT live member assignment only, never
+    # historical committed-offset entries, so a long-gone topic never
+    # appears at all. Confirmed directly: the exact scenario above
+    # (group polluted by a deleted ephemeral topic) reproduces every
+    # time through the CLI tool and never once through this. Same
+    # 9-column layout the CLI tool prints (GROUP TOPIC PARTITION
+    # CURRENT-OFFSET LOG-END-OFFSET LAG CONSUMER-ID HOST CLIENT-ID,
+    # HOST as /x.x.x.x) so every existing caller (owner_of_partition,
+    # the live-partition-count checks) keeps working unchanged.
+    "$PY" - "$GROUP" "$KAFKA_BOOTSTRAP" <<'PYEOF'
+import sys
+from confluent_kafka import Consumer, TopicPartition, ConsumerGroupTopicPartitions
+from confluent_kafka.admin import AdminClient
+sys.path.insert(0, "../../shadowtracer/ingest")
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
+
+group, bootstrap = sys.argv[1], sys.argv[2]
+cfg = kafka_client_config_from_env()
+admin = AdminClient({"bootstrap.servers": bootstrap, **cfg})
+
+desc = admin.describe_consumer_groups([group])[group].result(timeout=10)
+consumer = Consumer({
+    "bootstrap.servers": bootstrap, "group.id": "verify-chaos-describe",
+    "enable.auto.commit": False, **cfg,
+})
+offs = admin.list_consumer_group_offsets([ConsumerGroupTopicPartitions(group)])[group].result(timeout=10)
+committed = {(tp.topic, tp.partition): tp.offset for tp in offs.topic_partitions}
+
+for m in desc.members:
+    if not m.assignment:
+        continue
+    for tp in m.assignment.topic_partitions:
+        try:
+            low, high = consumer.get_watermark_offsets(TopicPartition(tp.topic, tp.partition), timeout=5, cached=False)
+        except Exception:
+            continue  # the exact crash this replaces the CLI tool to avoid - skip, don't abort
+        cur = committed.get((tp.topic, tp.partition), low)
+        host = m.host if m.host.startswith("/") else f"/{m.host}"
+        print(group, tp.topic, tp.partition, cur, high, max(0, high - cur), m.member_id, host, m.client_id)
+consumer.close()
+PYEOF
 }
 
 live_alert_topics() {
