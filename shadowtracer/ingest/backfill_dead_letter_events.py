@@ -24,8 +24,9 @@ Usage: KAFKA_GROUP_ID=dead-letter-ch-backfill CLICKHOUSE_USER=... \\
 
 Env vars: same as run_writer.py (KAFKA_BOOTSTRAP_SERVERS, KAFKA_GROUP_ID,
 CLICKHOUSE_HOSTS, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD,
-CLICKHOUSE_DATABASE), plus DEAD_LETTER_TOPIC (defaults to
-dead_letter.DEAD_LETTER_TOPIC).
+CLICKHOUSE_DATABASE). No DEAD_LETTER_TOPIC env var any more (Phase 5.6
+Item 1) - every tenant has its own dead-letter topic (topics.py), so
+this pattern-subscribes across all of them at once.
 """
 
 import datetime
@@ -35,8 +36,8 @@ import os
 
 from confluent_kafka import Consumer
 
-from shadowtracer_ingest.dead_letter import DEAD_LETTER_TOPIC
 from shadowtracer_ingest.retry import retry_with_backoff
+from shadowtracer_ingest.topics import DEAD_LETTER_TOPIC_PATTERN
 from shadowtracer_ingest.writer import _FailoverClickHouse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -63,7 +64,7 @@ def _row_from_envelope(envelope: dict) -> list:
     ]
 
 
-def backfill(consumer: Consumer, ch, topic: str) -> int:
+def backfill(consumer: Consumer, ch) -> int:
     total_rows = 0
     empty_polls = 0
     while empty_polls < CONSECUTIVE_EMPTY_POLLS_TO_STOP:
@@ -85,11 +86,14 @@ def backfill(consumer: Consumer, ch, topic: str) -> int:
                 break
             batch.append(next_msg)
 
-        by_partition: dict[int, list] = {}
+        # Phase 5.6 Item 1: keyed by (topic, partition), not partition
+        # alone - multiple tenants' dead-letter topics are in play at
+        # once, and different tenants' topics can share a partition number.
+        by_partition: dict[tuple[str, int], list] = {}
         for m in batch:
-            by_partition.setdefault(m.partition(), []).append(m)
+            by_partition.setdefault((m.topic(), m.partition()), []).append(m)
 
-        for partition, msgs in sorted(by_partition.items()):
+        for (topic, partition), msgs in sorted(by_partition.items()):
             rows = []
             for m in msgs:
                 try:
@@ -113,8 +117,8 @@ def backfill(consumer: Consumer, ch, topic: str) -> int:
                 ),
             )
             total_rows += len(rows)
-            logger.info("backfilled %d row(s) from partition %d (offsets %d-%d)",
-                        len(rows), partition, min(offsets), max(offsets))
+            logger.info("backfilled %d row(s) from %s partition %d (offsets %d-%d)",
+                        len(rows), topic, partition, min(offsets), max(offsets))
 
         consumer.commit(asynchronous=False)
 
@@ -130,16 +134,15 @@ def main():
         os.environ.get("CLICKHOUSE_DATABASE", "shadowtracer"),
     )
 
-    topic = os.environ.get("DEAD_LETTER_TOPIC", DEAD_LETTER_TOPIC)
     consumer = Consumer({
         "bootstrap.servers": os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9094"),
         "group.id": os.environ.get("KAFKA_GROUP_ID", "dead-letter-ch-backfill"),
         "enable.auto.commit": False,
         "auto.offset.reset": "earliest",
     })
-    consumer.subscribe([topic])
+    consumer.subscribe([DEAD_LETTER_TOPIC_PATTERN])
     try:
-        total = backfill(consumer, ch, topic)
+        total = backfill(consumer, ch)
     finally:
         consumer.close()
 

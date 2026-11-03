@@ -8,6 +8,14 @@
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 set -a; source .env; set +a
+# Phase 5.6 Item 1: admin (super-user, bypasses ACLs) - every Python
+# Kafka client in this script is an operator/test-harness tool, not a
+# real pipeline component, same credential create-kafka-topics.sh/
+# create-kafka-acls.sh already use for the same reason.
+export KAFKA_SECURITY_PROTOCOL=SASL_SSL
+export KAFKA_SASL_USERNAME=admin
+export KAFKA_SASL_PASSWORD="$KAFKA_ADMIN_PASSWORD"
+export KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"
 
 PY_CORRELATE="../../shadowtracer/correlate/.venv/bin/python3"
 PY_BACKEND="../../shadowtracer/console/backend/.venv/bin/python3"
@@ -43,19 +51,29 @@ ch_query() {
     docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client --query "$1"
 }
 describe_group() {
+    # Phase 5.6 Item 1: admin (super-user, bypasses ACLs) - this is an
+    # operator diagnostic, not a pipeline component, same credential
+    # create-kafka-topics.sh/create-kafka-acls.sh already use.
     docker exec shadowtracer-lab-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh \
-        --bootstrap-server localhost:9092 --describe --group "$GROUP"
+        --bootstrap-server localhost:9092 --command-config /etc/kafka/certs/admin-client.properties \
+        --describe --group "$GROUP"
 }
 owner_of_partition() {
-    echo "$2" | awk -v p="$1" '$3 == p { print $8 }' | head -1 | tr -d '/'
+    # $1 = partition, $2 = describe_group output, $3 = topic. Phase 5.6
+    # Item 1: must filter by topic now - every tenant's alerts topic has
+    # its own partitions 0..N, so partition number alone is ambiguous
+    # once this group subscribes to more than one topic.
+    echo "$2" | awk -v p="$1" -v t="$3" '$2 == t && $3 == p { print $8 }' | head -1 | tr -d '/'
 }
 
-# Produces one real sshd alert through the real events.raw topic.
+# Produces one real sshd alert through the tenant's own per-tenant topic.
 # args: tenant agent src_ip rule_groups_csv alert_id_suffix
 produce_alert() {
     "$PY_CORRELATE" - "$KAFKA_BOOTSTRAP" "$1" "$2" "$3" "$4" "$5" <<'PYEOF'
-import json, sys, time
+import json, os, sys, time
+sys.path.insert(0, os.path.join("..", "..", "shadowtracer", "ingest"))
 from confluent_kafka import Producer
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 
 bootstrap, tenant, agent, src_ip, groups_csv, suffix = sys.argv[1:7]
 groups = groups_csv.split(",")
@@ -72,8 +90,8 @@ alert = {
     "location": "/var/log/auth.log",
     "full_log": "test",
 }
-producer = Producer({"bootstrap.servers": bootstrap})
-producer.produce("shadowtracer.events.raw", key=f"{tenant}:{agent}".encode(),
+producer = Producer({"bootstrap.servers": bootstrap, **kafka_client_config_from_env()})
+producer.produce(f"shadowtracer.t.{tenant}.alerts", key=agent.encode(),
                   value=json.dumps(alert).encode(), headers=[("tenant_id", tenant.encode())])
 producer.flush(10)
 PYEOF
@@ -107,17 +125,31 @@ DATABASE_URL_APP="postgresql+psycopg2://shadowtracer_app:${APP_DB_PASSWORD}@127.
 
 # A dedicated throwaway tenant for every section below EXCEPT the real-lab-
 # tenant warm-up read in section 2 (deliberately real data, creates nothing -
-# see that section's own comment). No tenants/users row needed: incidents,
-# campaigns, campaign_incidents, incident_alerts, and sequence_progress all
-# have a plain tenant_key STRING column with no foreign key into `tenants`
-# (confirmed against the schema) - a real tenants row is only needed to log
-# in through the actual /auth/login API, which only the separate rare_tenant
-# below (section 2's override test) ever does. Cleanup below deletes by this
-# exact tenant_key/tenant_id across every table, in FK-safe order - no
-# agent_id LIKE patterns, which is what let a sequence-test incident's
-# campaign link slip through cleanup once already (see the cleanup section's
-# own comment, and PHASE3_DATA_PLATFORM.md's incident writeup).
+# see that section's own comment). incidents, campaigns,
+# campaign_incidents, incident_alerts, and sequence_progress all have a
+# plain tenant_key STRING column with no foreign key into `tenants`
+# (confirmed against the schema) - a real tenants row was never needed
+# for those tables, only to log in through the actual /auth/login API
+# (which only the separate rare_tenant below, section 2's override test,
+# ever does). Cleanup below deletes by this exact tenant_key/tenant_id
+# across every table, in FK-safe order - no agent_id LIKE patterns,
+# which is what let a sequence-test incident's campaign link slip
+# through cleanup once already (see the cleanup section's own comment,
+# and PHASE3_DATA_PLATFORM.md's incident writeup).
+#
+# Phase 5.6 Item 1: a real tenants row IS now needed regardless, even
+# without logging in - Phase 5C Step 0's tenant_cache.is_known() check
+# (writer.py and shadowtracer_correlate/consumer.py) rejects any event
+# for a tenant_key that isn't in `tenants` at all, dead-lettering it as
+# unknown_tenant - this script's events would have silently never
+# become incidents without this row (a real, pre-existing gap this
+# comment's "no tenants row needed" claim predates, not something Item 1
+# introduced). A Kafka topic pair is ALSO now needed per tenant
+# (create-kafka-topics.sh), since Item 1 topics are provisioned
+# explicitly, never auto-created.
 VERIFY_TENANT_KEY="verify-$(date +%s)-${RANDOM}"
+psql_exec "INSERT INTO tenants (name, tenant_key) VALUES ('verify-tenant', '$VERIFY_TENANT_KEY');" >/dev/null
+./create-kafka-topics.sh "$VERIFY_TENANT_KEY" >/dev/null
 
 echo "=== Phase 5B VERIFY ==="
 echo
@@ -125,10 +157,26 @@ echo "--- 1. Campaign linking: brute force repeated twice from one IP within 24h
 marker="camp$(date +%s)"
 agent="camp-agent-${marker}"
 ip_a="203.0.113.$((RANDOM % 200 + 10))"
-ip_b="203.0.113.$((RANDOM % 55 + 210))"
+# Phase 5.6 Item 1: was "% 55 + 210" (210-264) - an octet above 255 is
+# invalid, and _actor_class() (fingerprint.py) silently falls through
+# to "internal" for a source_ips list it can't parse at all (never
+# raises), rather than "external" - found the hard way: this test's own
+# "same fingerprint" check intermittently failed (~1 in 6 runs, whenever
+# $RANDOM rolled an octet >= 256) because incident 3's IP was invalid,
+# classified "internal" against incident 1's valid, genuinely-external
+# IP. Real test-data bug, not a pipeline bug - 210-255 (46 values) stays
+# in range.
+ip_b="203.0.113.$((RANDOM % 46 + 210))"
 
 produce_alert "$VERIFY_TENANT_KEY" "$agent" "$ip_a" "sshd,authentication_failed" "1"
-sleep 8
+# 25s, not 8s, for this FIRST produce only - VERIFY_TENANT_KEY's topic
+# is brand new, and a pattern-subscribed consumer only discovers it on
+# its next periodic metadata refresh (topic.metadata.refresh.interval.ms,
+# 10s as of this item - see writer.py/consumer.py's own comment; measured
+# up to 206s against the OLD 5-minute librdkafka default). Every later
+# produce in this script targets an already-discovered topic, so keeps
+# the original 8s.
+sleep 25
 close_sweep
 id1="$(psql_query "SELECT id FROM incidents WHERE tenant_key = '$VERIFY_TENANT_KEY' AND agent_id = '$agent' ORDER BY id LIMIT 1")"
 check "incident 1 closed" "[ -n \"$id1\" ]"
@@ -167,7 +215,7 @@ check "different actor -> SEPARATE campaign" "[ \"$campaign3\" != \"$campaign1\"
 
 echo
 echo "--- 2. Rare-pattern alerting: warm-up guard ---"
-echo "real lab tenant's current warm-up status (expected incomplete - this IS the 'fresh tenant' case, real data, not fabricated):"
+echo "real lab tenant's current warm-up status (this used to always be incomplete when this script was first written - the real lab tenant has since aged past it for real, through months of this project's own testing, so both outcomes are handled below rather than assuming one):"
 login_resp="$(curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/auth/login \
     -X POST -H "Content-Type: application/json" \
     -d "{\"email\":\"$SMOKE_TEST_ADMIN_EMAIL\",\"password\":\"$SMOKE_TEST_ADMIN_PASSWORD\"}")"
@@ -175,9 +223,13 @@ lab_token="$(echo "$login_resp" | python3 -c 'import sys,json; print(json.load(s
 lab_warmup="$(curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/api/rare-pattern-warmup-status -H "Authorization: Bearer $lab_token")"
 echo "$lab_warmup"
 lab_complete="$(echo "$lab_warmup" | python3 -c 'import sys,json; print(json.load(sys.stdin)["complete"])')"
-check "real lab tenant has not finished warm-up" "[ \"$lab_complete\" = False ]"
-check "no rare-pattern flags during warm-up (real lab tenant)" \
-    "[ \"$(psql_query "SELECT count(*) FROM incidents WHERE tenant_key = '$TENANT_KEY' AND rare_pattern_flag = true")\" = 0 ]"
+if [ "$lab_complete" = False ]; then
+    check "real lab tenant has not finished warm-up" "[ \"$lab_complete\" = False ]"
+    check "no rare-pattern flags during warm-up (real lab tenant)" \
+        "[ \"$(psql_query "SELECT count(*) FROM incidents WHERE tenant_key = '$TENANT_KEY' AND rare_pattern_flag = true")\" = 0 ]"
+else
+    echo "real lab tenant is past warm-up for real (not this script's concern - the fresh-tenant case right below exercises the still-incomplete guard directly, with a known starting point)."
+fi
 
 echo
 echo "--- setting up a fresh tenant with a low warm-up override (per-tenant config, as designed) ---"
@@ -207,6 +259,7 @@ PYEOF
 )"
 rare_tenant_key="$(echo "$setup_output" | grep '^TENANT_KEY=' | cut -d= -f2)"
 check "fresh tenant created" "[ -n \"$rare_tenant_key\" ]"
+./create-kafka-topics.sh "$rare_tenant_key" >/dev/null
 
 psql_exec "INSERT INTO tenant_alert_settings (tenant_key, rare_alert_warmup_days, rare_alert_warmup_min_incidents) VALUES ('$rare_tenant_key', 0, 1);" >/dev/null
 
@@ -218,7 +271,9 @@ rare_token="$(echo "$rare_login" | python3 -c 'import sys,json; print(json.load(
 
 rare_agent="rare-agent-${rare_marker}"
 produce_alert "$rare_tenant_key" "$rare_agent" "203.0.113.90" "sshd,authentication_failed,recon" "1"
-sleep 8
+# 25s - same reason as VERIFY_TENANT_KEY's first produce above:
+# rare_tenant_key's topic is also brand new at this point.
+sleep 25
 close_sweep
 rare_incident_id="$(psql_query "SELECT id FROM incidents WHERE tenant_key = '$rare_tenant_key' AND agent_id = '$rare_agent'")"
 check "fresh tenant's first incident closed" "[ -n \"$rare_incident_id\" ]"
@@ -246,10 +301,12 @@ seq_agent="seqv-agent-${seq_marker}"
 seq_ip="203.0.113.$((RANDOM % 50 + 150))"
 
 probe_partition="$("$PY_CORRELATE" - "$KAFKA_BOOTSTRAP" "$VERIFY_TENANT_KEY" "${seq_agent}-probe" <<'PYEOF'
-import json, sys, time
+import json, os, sys, time
+sys.path.insert(0, os.path.join("..", "..", "shadowtracer", "ingest"))
 from confluent_kafka import Producer
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 bootstrap, tenant, agent = sys.argv[1:4]
-producer = Producer({"bootstrap.servers": bootstrap})
+producer = Producer({"bootstrap.servers": bootstrap, **kafka_client_config_from_env()})
 result = {}
 def on_delivery(err, msg):
     if err is None:
@@ -259,13 +316,13 @@ alert = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime())
          "agent": {"id": agent, "name": agent, "ip": "172.28.0.99"}, "manager": {"name": "shadowtracer-worker1"},
          "cluster": {"node": "worker1"}, "data": {"srcip": "1.1.1.1"}, "decoder": {"name": "sshd"},
          "location": "x", "full_log": "x"}
-producer.produce("shadowtracer.events.raw", key=f"{tenant}:{agent}".encode(), value=json.dumps(alert).encode(),
+producer.produce(f"shadowtracer.t.{tenant}.alerts", key=agent.encode(), value=json.dumps(alert).encode(),
                   headers=[("tenant_id", tenant.encode())], on_delivery=on_delivery)
 producer.flush(10)
 print(result.get("partition", -1))
 PYEOF
 )"
-owner_ip="$(owner_of_partition "$probe_partition" "$(describe_group)")"
+owner_ip="$(owner_of_partition "$probe_partition" "$(describe_group)" "shadowtracer.t.${VERIFY_TENANT_KEY}.alerts")"
 if [ "$owner_ip" = "$C1_IP" ]; then victim_name="$C1_NAME"; victim_ip="$C1_IP"; else victim_name="$C2_NAME"; victim_ip="$C2_IP"; fi
 echo "sequence test agent's partition ($probe_partition) is owned by $victim_name"
 
@@ -320,30 +377,17 @@ replay_agent="replayv-agent-${replay_marker}"
 replay_ip="203.0.113.$((RANDOM % 50 + 1))"
 replay_group="verify-replay-$(date +%s)"
 
-# Snapshot every partition's current end offset BEFORE producing anything,
-# so the replay below only ever sees this run's own 2 messages - never the
-# topic's full multi-day history. Found the hard way (2026-10-08): the
-# previous version used auto.offset.reset=earliest against the real,
-# 7-day-retention shadowtracer.events.raw topic, which every run of this
-# script has been producing to - replaying from absolute earliest
-# reprocesses EVERY past run's alerts too, recreating incidents (and their
-# campaigns/fingerprints) for tenants whose cleanup already ran, including
-# the real lab tenant's own historical test traffic. See
-# PHASE3_DATA_PLATFORM.md's follow-up entry.
-"$PY_CORRELATE" - "$KAFKA_BOOTSTRAP" "$replay_group" <<'PYEOF'
-import sys
-from confluent_kafka import Consumer, TopicPartition
-bootstrap, group_id = sys.argv[1:3]
-consumer = Consumer({"bootstrap.servers": bootstrap, "group.id": group_id})
-md = consumer.list_topics("shadowtracer.events.raw", timeout=10).topics["shadowtracer.events.raw"]
-offsets = [
-    TopicPartition("shadowtracer.events.raw", p, consumer.get_watermark_offsets(TopicPartition("shadowtracer.events.raw", p), timeout=10)[1])
-    for p in md.partitions
-]
-consumer.commit(offsets=offsets, asynchronous=False)
-consumer.close()
-print(f"pre-seeded {group_id} at current end offsets, {len(offsets)} partitions")
-PYEOF
+# Phase 5.6 Item 1 SIMPLIFIES this: VERIFY_TENANT_KEY (and so its topic,
+# shadowtracer.t.<VERIFY_TENANT_KEY>.alerts) is freshly generated THIS
+# run (date +%s + $RANDOM) and never reused - the topic has no prior
+# history by construction, so a fresh consumer group reading from
+# earliest sees ONLY this run's own messages. No pre-seeding needed any
+# more - this used to matter a lot (2026-10-08: replaying from earliest
+# against the old SHARED shadowtracer.events.raw topic reprocessed every
+# past run's alerts too) specifically because every run shared one
+# topic; per-tenant topics remove that failure mode structurally, not
+# just procedurally. See PHASE3_DATA_PLATFORM.md's follow-up entry for
+# the incident this used to guard against.
 
 produce_alert "$VERIFY_TENANT_KEY" "$replay_agent" "$replay_ip" "sshd,authentication_failed" "step0"
 sleep 2
@@ -361,8 +405,10 @@ echo "starting a temporary, isolated consumer group (pre-seeded to this run's ow
 "$PY_CORRELATE" - "$DATABASE_URL_APP" "$CLICKHOUSE_USER" "$CLICKHOUSE_PASSWORD" "$replay_group" <<'PYEOF'
 import sys, threading, time, traceback
 sys.path.insert(0, "../../shadowtracer/correlate")
+sys.path.insert(0, "../../shadowtracer/ingest")
 from shadowtracer_correlate.consumer import run
 from shadowtracer_correlate.metrics import Metrics
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 import clickhouse_connect
 
 database_url, ch_user, ch_password, group_id = sys.argv[1:5]
@@ -373,11 +419,12 @@ started_flag = threading.Event()
 def _run():
     try:
         run(
-            bootstrap_servers="127.0.0.1:9094", topic="shadowtracer.events.raw",
+            bootstrap_servers="127.0.0.1:9094",
             group_id=group_id, database_url=database_url,
             metrics=Metrics(), stop_flag=stop_flag, started_flag=started_flag,
             ch_client=ch, clickhouse_database="shadowtracer",
             sequences_dir="../../shadowtracer/correlate/sequences",
+            kafka_client_config=kafka_client_config_from_env(),
         )
     except Exception:
         traceback.print_exc()
@@ -419,7 +466,7 @@ DELETE FROM incident_alerts WHERE incident_id IN (
 );
 DELETE FROM incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
 DELETE FROM campaigns WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
-DELETE FROM sequence_progress WHERE tenant_key = '$VERIFY_TENANT_KEY';
+DELETE FROM sequence_progress WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
 DELETE FROM fingerprint_verdicts WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
 DELETE FROM fingerprints WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key');
 DELETE FROM tenant_alert_settings WHERE tenant_key = '$rare_tenant_key';
@@ -428,6 +475,16 @@ DELETE FROM refresh_tokens WHERE user_id IN (
 );
 DELETE FROM users WHERE tenant_id = (SELECT id FROM tenants WHERE tenant_key = '$rare_tenant_key');
 DELETE FROM tenants WHERE tenant_key = '$rare_tenant_key';
+-- Phase 5.6 Item 1: VERIFY_TENANT_KEY's own tenants row was never
+-- deleted here at all (found the hard way: its name column is the
+-- fixed literal 'verify-tenant', not unique per run, so a prior run's
+-- never-cleaned-up row made every subsequent run's own INSERT fail on
+-- that unique constraint, with the INSERT's error silently swallowed
+-- by its own >/dev/null - every event then dead-lettered as
+-- unknown_tenant for the rest of the run, which is what every one of
+-- this script's "closed"/"campaign"/sequence checks were actually
+-- failing on, not a real pipeline bug).
+DELETE FROM tenants WHERE tenant_key = '$VERIFY_TENANT_KEY';
 " >/dev/null
 ch_query "ALTER TABLE shadowtracer.sequence_firings DELETE WHERE tenant_id = '$VERIFY_TENANT_KEY'"
 ch_query "ALTER TABLE shadowtracer.events DELETE WHERE tenant_id IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')"
@@ -439,11 +496,11 @@ SELECT
   (SELECT count(*) FROM campaigns WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
   (SELECT count(*) FROM campaign_incidents WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
   (SELECT count(*) FROM incident_alerts WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
-  (SELECT count(*) FROM sequence_progress WHERE tenant_key = '$VERIFY_TENANT_KEY') +
+  (SELECT count(*) FROM sequence_progress WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
   (SELECT count(*) FROM fingerprint_verdicts WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
   (SELECT count(*) FROM fingerprints WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key')) +
   (SELECT count(*) FROM tenant_alert_settings WHERE tenant_key = '$rare_tenant_key') +
-  (SELECT count(*) FROM tenants WHERE tenant_key = '$rare_tenant_key')
+  (SELECT count(*) FROM tenants WHERE tenant_key IN ('$VERIFY_TENANT_KEY', '$rare_tenant_key'))
 ")"
 check "zero leftover Postgres rows for this run's tenant(s)" "[ \"$leftover_pg\" = 0 ]"
 

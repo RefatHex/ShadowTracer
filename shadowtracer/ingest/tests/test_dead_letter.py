@@ -10,10 +10,37 @@ clickhouse_connect/confluent_kafka."""
 import uuid
 
 import clickhouse_connect
+import pytest
 from confluent_kafka import Consumer, Producer
+from confluent_kafka.admin import AdminClient, NewTopic
 
 from shadowtracer_ingest.dead_letter import send_to_dead_letter
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 from shadowtracer_ingest.metrics import Metrics
+from shadowtracer_ingest.topics import alerts_topic_for_tenant, dead_letter_topic_for_tenant
+
+# Phase 5.6 Item 1: several tests below use the literal tenant_key
+# "test" (predates per-tenant topics) - provisioned once, idempotently,
+# rather than renaming every call site to a fresh per-test tenant for a
+# module that was never about tenant isolation in the first place.
+_SHARED_TEST_TENANT = "test"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _provision_shared_test_tenant_topics(kafka_bootstrap):
+    import time
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
+    futures = admin.create_topics([
+        NewTopic(alerts_topic_for_tenant(_SHARED_TEST_TENANT), num_partitions=1, replication_factor=1),
+        NewTopic(dead_letter_topic_for_tenant(_SHARED_TEST_TENANT), num_partitions=1, replication_factor=1),
+    ])
+    for future in futures.values():
+        try:
+            future.result()
+        except Exception as exc:  # noqa: BLE001 - idempotent across repeated test runs: already existing is fine, anything else isn't
+            if "already exists" not in str(exc):
+                raise
+    time.sleep(1)
 
 
 def _broken_ch_client(lab_env):
@@ -40,8 +67,9 @@ def _drain_dead_letter_topic(kafka_bootstrap, expected_alert_id, timeout=15):
         "bootstrap.servers": kafka_bootstrap,
         "group.id": f"test-dlt-drain-{uuid.uuid4().hex[:8]}",
         "auto.offset.reset": "earliest",
+        **kafka_client_config_from_env(),
     })
-    consumer.subscribe(["shadowtracer.events.dead-letter"])
+    consumer.subscribe([dead_letter_topic_for_tenant(_SHARED_TEST_TENANT)])
     deadline = time.monotonic() + timeout
     found = None
     while time.monotonic() < deadline:
@@ -59,7 +87,7 @@ def test_clickhouse_insert_failure_does_not_raise_increments_metric_kafka_copy_s
     dead-letter topic copy must still land (it's published first, before
     the ClickHouse attempt - see dead_letter.py's own ordering)."""
     marker = uuid.uuid4().hex
-    producer = Producer({"bootstrap.servers": kafka_bootstrap})
+    producer = Producer({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
     metrics = Metrics()
 
     send_to_dead_letter(
@@ -102,7 +130,7 @@ def test_dead_letter_preview_truncation_still_applies_when_clickhouse_is_broken(
     or corrupt it for the Kafka copy."""
     marker = uuid.uuid4().hex
     huge_raw_event = f'{{"id": "{marker}", "full_log": "' + ("x" * 100_000) + '"}'
-    producer = Producer({"bootstrap.servers": kafka_bootstrap})
+    producer = Producer({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
 
     send_to_dead_letter(
         kafka_producer=producer, ch_client=_broken_ch_client(lab_env), tenant_key="test",
@@ -125,7 +153,7 @@ def test_replaying_the_same_dead_letter_does_not_duplicate_the_row(kafka_bootstr
     only becomes correct after a merge, forced here with OPTIMIZE ... FINAL
     so the test doesn't depend on background merge timing."""
     tenant_key = f"test-{uuid.uuid4().hex[:8]}"
-    source_location = f"shadowtracer.events.raw:3:{uuid.uuid4().hex[:8]}"
+    source_location = f"shadowtracer.t.test.alerts:3:{uuid.uuid4().hex[:8]}"
 
     for _ in range(2):
         send_to_dead_letter(

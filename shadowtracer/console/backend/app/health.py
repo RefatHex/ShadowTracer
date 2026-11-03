@@ -5,6 +5,8 @@ without going through HTTP.
 """
 
 import datetime
+import os
+import sys
 
 import clickhouse_connect
 import httpx
@@ -12,6 +14,12 @@ from confluent_kafka import Consumer, ConsumerGroupTopicPartitions, TopicPartiti
 from confluent_kafka.admin import AdminClient, ConfigResource
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+# Phase 5.6 Item 1: same cross-package sys.path pattern
+# attack_coverage.py already uses for shadowtracer_ingest.ruleset - one
+# shared implementation of the TLS/SASL config block, never duplicated.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "ingest"))
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env  # noqa: E402
 
 from .config import Settings
 
@@ -40,7 +48,7 @@ def check_clickhouse(settings: Settings) -> tuple[bool, str]:
 
 def check_kafka(settings: Settings) -> tuple[bool, str]:
     try:
-        admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers})
+        admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers, **kafka_client_config_from_env()})
         metadata = admin.list_topics(timeout=3)
         if not metadata.brokers:
             return False, "no brokers in cluster metadata"
@@ -147,57 +155,77 @@ def writer_consumer_lag(settings: Settings) -> dict:
     falling off the retention window and losing data outright - this
     does, which is what actually matters operationally."""
     try:
-        admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers})
+        admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers, **kafka_client_config_from_env()})
         group_futures = admin.list_consumer_group_offsets(
             [ConsumerGroupTopicPartitions(settings.writer_consumer_group)]
         )
 
         results = {}
         for group_id, future in group_futures.items():
-            group_result = future.result(timeout=5)
-            consumer = Consumer({
-                "bootstrap.servers": settings.kafka_bootstrap_servers,
-                "group.id": "shadowtracer-console-lag-check",
-            })
-            total_lag = 0
-            partitions = []
-            lagging = []  # (topic, partition, committed) for partitions with lag > 0
-            for tp in group_result.topic_partitions:
-                low, high = consumer.get_watermark_offsets(TopicPartition(tp.topic, tp.partition), timeout=5)
-                committed = tp.offset if tp.offset >= 0 else low
-                lag = max(0, high - committed)
-                total_lag += lag
-                partitions.append({"topic": tp.topic, "partition": tp.partition, "committed": committed, "high_watermark": high, "lag": lag})
-                if lag > 0:
-                    lagging.append((tp.topic, tp.partition, committed))
+            try:
+                group_result = future.result(timeout=5)
+                consumer = Consumer({
+                    "bootstrap.servers": settings.kafka_bootstrap_servers,
+                    "group.id": "shadowtracer-console-lag-check",
+                    # Read-only diagnostic snapshot - never commits
+                    # anything, so it never needs Group Read permission
+                    # on top of the Describe grant this group already has.
+                    "enable.auto.commit": False,
+                    **kafka_client_config_from_env(),
+                })
+                total_lag = 0
+                partitions = []
+                lagging = []  # (topic, partition, committed) for partitions with lag > 0
+                for tp in group_result.topic_partitions:
+                    low, high = consumer.get_watermark_offsets(TopicPartition(tp.topic, tp.partition), timeout=5)
+                    committed = tp.offset if tp.offset >= 0 else low
+                    lag = max(0, high - committed)
+                    total_lag += lag
+                    partitions.append({"topic": tp.topic, "partition": tp.partition, "committed": committed, "high_watermark": high, "lag": lag})
+                    if lag > 0:
+                        lagging.append((tp.topic, tp.partition, committed))
 
-            # Separate pass (not interleaved with the watermark queries
-            # above): assigns the consumer to each lagging partition's
-            # committed offset and reads just that one message to get its
-            # timestamp - the AGE of the oldest thing not yet consumed.
-            oldest_age_seconds = 0.0
-            lagging_topic = None
-            for topic, partition, committed in lagging:
-                consumer.assign([TopicPartition(topic, partition, committed)])
-                msg = consumer.poll(5)
-                if msg is not None and msg.error() is None:
-                    _, ts_ms = msg.timestamp()
-                    age_seconds = max(0.0, datetime.datetime.now(datetime.timezone.utc).timestamp() - ts_ms / 1000)
-                    if age_seconds > oldest_age_seconds:
-                        oldest_age_seconds = age_seconds
-                        lagging_topic = topic
-            consumer.close()
+                # Separate pass (not interleaved with the watermark
+                # queries above): assigns the consumer to each lagging
+                # partition's committed offset and reads just that one
+                # message to get its timestamp - the AGE of the oldest
+                # thing not yet consumed. Needs real Read permission on
+                # the topic (Describe alone can't fetch message content) -
+                # caught on its own, separately from the lag/partitions
+                # above, so a permission gap (or any other transient
+                # failure) here degrades just this one group's age/
+                # retention fields instead of losing every group's
+                # total_lag too.
+                oldest_age_seconds = 0.0
+                lagging_topic = None
+                age_error = None
+                try:
+                    for topic, partition, committed in lagging:
+                        consumer.assign([TopicPartition(topic, partition, committed)])
+                        msg = consumer.poll(5)
+                        if msg is not None and msg.error() is None:
+                            _, ts_ms = msg.timestamp()
+                            age_seconds = max(0.0, datetime.datetime.now(datetime.timezone.utc).timestamp() - ts_ms / 1000)
+                            if age_seconds > oldest_age_seconds:
+                                oldest_age_seconds = age_seconds
+                                lagging_topic = topic
+                except Exception as exc:  # noqa: BLE001 - see comment above: degrade this group's age fields only
+                    age_error = str(exc)
+                consumer.close()
 
-            retention_ms = _topic_retention_ms(admin, lagging_topic) if lagging_topic else None
-            retention_seconds = (retention_ms / 1000) if retention_ms else None
-            fraction = (oldest_age_seconds / retention_seconds) if retention_seconds else 0.0
-            results[group_id] = {
-                "status": "ok", "total_lag": total_lag, "partitions": partitions,
-                "oldest_unconsumed_age_seconds": oldest_age_seconds,
-                "retention_seconds": retention_seconds,
-                "fraction_of_retention": fraction,
-                "alert": fraction >= settings.lag_retention_alert_fraction,
-            }
+                retention_ms = _topic_retention_ms(admin, lagging_topic) if lagging_topic else None
+                retention_seconds = (retention_ms / 1000) if retention_ms else None
+                fraction = (oldest_age_seconds / retention_seconds) if retention_seconds else 0.0
+                results[group_id] = {
+                    "status": "ok", "total_lag": total_lag, "partitions": partitions,
+                    "oldest_unconsumed_age_seconds": oldest_age_seconds if age_error is None else None,
+                    "retention_seconds": retention_seconds,
+                    "fraction_of_retention": fraction if age_error is None else None,
+                    "alert": (fraction >= settings.lag_retention_alert_fraction) if age_error is None else False,
+                    **({"age_error": age_error} if age_error is not None else {}),
+                }
+            except Exception as exc:  # noqa: BLE001 - one group's failure must not lose every other group's report
+                results[group_id] = {"status": "error", "error": str(exc)}
         return results
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}

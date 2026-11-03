@@ -3,7 +3,12 @@
 Step 1).
 
 Env vars:
-  KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
+  KAFKA_BOOTSTRAP_SERVERS, KAFKA_GROUP_ID (no KAFKA_TOPIC any more -
+    Phase 5.6 Item 1 subscribes by pattern across every tenant's own
+    topic)
+  KAFKA_SECURITY_PROTOCOL, KAFKA_SASL_MECHANISM, KAFKA_SASL_USERNAME,
+    KAFKA_SASL_PASSWORD, KAFKA_SSL_CA_LOCATION - optional, defaults to
+    PLAINTEXT if KAFKA_SECURITY_PROTOCOL isn't set (kafka_security.py)
   POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, APP_DB_PASSWORD
   SESSION_GAP_SECONDS (default 600), MAX_SPAN_SECONDS (default 14400)
   METRICS_PORT (default 9104)
@@ -41,6 +46,7 @@ import clickhouse_connect
 
 from shadowtracer_correlate.consumer import run
 from shadowtracer_correlate.metrics import Metrics, serve_metrics
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 from shadowtracer_ingest.retry import retry_with_backoff
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -83,7 +89,6 @@ sequences_dir = os.environ.get(
 
 run(
     bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9094"),
-    topic=os.environ.get("KAFKA_TOPIC", "shadowtracer.events.raw"),
     group_id=os.environ.get("KAFKA_GROUP_ID", "shadowtracer-correlate"),
     database_url=database_url,
     metrics=metrics,
@@ -94,4 +99,5 @@ run(
     clickhouse_database=clickhouse_database,
     sequences_dir=sequences_dir if os.path.isdir(sequences_dir) else None,
     sequence_lateness_seconds=float(os.environ.get("SEQUENCE_LATENESS_SECONDS", "30")),
+    kafka_client_config=kafka_client_config_from_env(),
 )

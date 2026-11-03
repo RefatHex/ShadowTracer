@@ -31,6 +31,7 @@ from confluent_kafka import KafkaException, Producer
 
 from .dead_letter import send_to_dead_letter
 from .metrics import Metrics
+from .topics import alerts_topic_for_tenant
 from .retry import retry_with_backoff
 
 BATCH_MAX_LINES = 500
@@ -153,16 +154,25 @@ def run(
     alerts_path: str,
     archives_path: str | None,
     bootstrap_servers: str,
-    topic: str,
     offset_file: str,
     metrics: Metrics,
     stop_flag,
     ch_client=None,
+    kafka_client_config: dict | None = None,
 ):
     """ch_client is optional (None is fine, e.g. in tests that don't care
     about dead-letter counts) - a malformed line still always goes to the
     Kafka dead-letter topic either way; ch_client only adds the
-    queryable-per-tenant-count side of send_to_dead_letter."""
+    queryable-per-tenant-count side of send_to_dead_letter.
+
+    Phase 5.6 Item 1: no `topic` parameter any more - this shipper only
+    ever produces to its OWN tenant's topic (topics.py), derived from
+    tenant_id, never passed in separately (there is no scenario where
+    they should differ). kafka_client_config carries whatever TLS/SASL
+    settings this deployment needs, merged into the producer config -
+    this shipper's credential only ever needs a producer ACL on its own
+    tenant's two topics (docs/design/KAFKA_AUTH.md)."""
+    topic = alerts_topic_for_tenant(tenant_id)
     offsets = load_offsets(offset_file)
     sources = {"alerts.json": TailSource(alerts_path, offsets.get("alerts.json", {}))}
     if archives_path:
@@ -178,6 +188,7 @@ def run(
         # real margin over the kind of broker restart/maintenance window
         # this shipper needs to ride out.
         "message.timeout.ms": 1200000,
+        **(kafka_client_config or {}),
     })
     delivery_errors = []
 
@@ -223,7 +234,12 @@ def run(
                         ),
                     )
                     continue
-                key = f"{tenant_id}:{agent_id}".encode()
+                # Phase 5.6 Item 1: just agent_id now - tenant is the
+                # topic itself (broker-enforced via ACL), not part of the
+                # partition key any more. Still keyed for the same reason
+                # as before: Kafka routes a given key to one partition
+                # consistently, keeping one agent's events in order.
+                key = agent_id.encode()
                 value = line.encode()
                 headers = [
                     ("tenant_id", tenant_id.encode()),

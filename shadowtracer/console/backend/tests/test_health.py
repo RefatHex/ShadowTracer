@@ -5,6 +5,25 @@ import clickhouse_connect
 from app import health as health_checks
 from app.config import Settings
 
+# Phase 5.6 Item 1: importing app.health above already inserted
+# shadowtracer_ingest's path as a side effect (same cross-package
+# pattern attack_coverage.py/health.py use) - safe to import from here now.
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
+
+
+def _delete_topics_and_wait(admin, topics: list[str], timeout: float = 10.0) -> None:
+    """confluent_kafka's delete_topics() returns immediately with a
+    future per topic - not waiting on them risks the broker never
+    actually receiving the request before the admin client gets torn
+    down, leaving the topic (and this test's own lag data) behind.
+    Same helper as shadowtracer/ingest/tests/conftest.py's own."""
+    futures = admin.delete_topics(topics)
+    for future in futures.values():
+        try:
+            future.result(timeout=timeout)
+        except Exception:
+            pass
+
 _EVENTS_COLUMNS = [
     "tenant_id", "time", "cluster_node", "manager_name", "alert_id",
     "agent_id", "agent_name", "agent_ip",
@@ -86,23 +105,38 @@ def test_writer_consumer_lag_reports_zero_when_caught_up(lab_env, test_clickhous
 
     settings = _real_settings(lab_env, test_clickhouse_db)
     group_id = f"test-lag-{uuid.uuid4().hex[:8]}"
-    topic = f"shadowtracer.test.lag.{uuid.uuid4().hex[:8]}"
+    # Phase 5.6 Item 1: must start with "shadowtracer.t." - the test
+    # credential's own ACL is a PREFIXED grant on exactly that string, so
+    # anything outside it (the old "shadowtracer.test.lag." name) gets
+    # silently-failed produce()s and a consumer that polls forever with
+    # no error and no message, never a loud auth exception.
+    topic = f"shadowtracer.t.lag-test-{uuid.uuid4().hex[:8]}"
     object.__setattr__(settings, "writer_consumer_group", group_id)
 
-    admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers})
+    admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers, **kafka_client_config_from_env()})
     admin.create_topics([NewTopic(topic, num_partitions=1, replication_factor=1)])
     time.sleep(1)
     try:
-        producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
+        producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers, **kafka_client_config_from_env()})
         producer.produce(topic, value=b"x")
         producer.flush(10)
 
         consumer = Consumer({
             "bootstrap.servers": settings.kafka_bootstrap_servers,
-            "group.id": group_id, "auto.offset.reset": "earliest", "enable.auto.commit": False,
+            "group.id": group_id, "auto.offset.reset": "earliest", "enable.auto.commit": False, **kafka_client_config_from_env(),
         })
         consumer.subscribe([topic])
-        msg = consumer.poll(10)
+        # A single poll() can legitimately return None while it's only
+        # completing the subscribe's join-group/assignment handshake
+        # (more so now, with the SASL_SSL handshake added to that same
+        # round trip) - loop within a bounded deadline instead of relying
+        # on exactly one call returning a real message.
+        deadline = time.monotonic() + 20
+        msg = None
+        while time.monotonic() < deadline:
+            msg = consumer.poll(1.0)
+            if msg is not None:
+                break
         assert msg is not None and msg.error() is None
         consumer.commit(msg)
         consumer.close()
@@ -113,7 +147,7 @@ def test_writer_consumer_lag_reports_zero_when_caught_up(lab_env, test_clickhous
         assert group["oldest_unconsumed_age_seconds"] == 0
         assert group["alert"] is False
     finally:
-        admin.delete_topics([topic])
+        _delete_topics_and_wait(admin, [topic])
 
 
 def test_writer_consumer_lag_reports_age_when_behind(lab_env, test_clickhouse_db):
@@ -130,25 +164,34 @@ def test_writer_consumer_lag_reports_age_when_behind(lab_env, test_clickhouse_db
 
     settings = _real_settings(lab_env, test_clickhouse_db)
     group_id = f"test-lag-{uuid.uuid4().hex[:8]}"
-    topic = f"shadowtracer.test.lag.{uuid.uuid4().hex[:8]}"
+    topic = f"shadowtracer.t.lag-test-{uuid.uuid4().hex[:8]}"
     object.__setattr__(settings, "writer_consumer_group", group_id)
 
-    admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers})
+    admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers, **kafka_client_config_from_env()})
     admin.create_topics([NewTopic(topic, num_partitions=1, replication_factor=1)])
     time.sleep(1)
     try:
-        producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
+        producer = Producer({"bootstrap.servers": settings.kafka_bootstrap_servers, **kafka_client_config_from_env()})
         for _ in range(5):
             producer.produce(topic, value=b"x")
         producer.flush(10)
 
         consumer = Consumer({
             "bootstrap.servers": settings.kafka_bootstrap_servers,
-            "group.id": group_id, "auto.offset.reset": "earliest", "enable.auto.commit": False,
+            "group.id": group_id, "auto.offset.reset": "earliest", "enable.auto.commit": False, **kafka_client_config_from_env(),
         })
         consumer.subscribe([topic])
+        # See test_writer_consumer_lag_reports_zero_when_caught_up's own
+        # comment: a single poll() can return None while only completing
+        # the join-group/assignment handshake, so each of the 2 messages
+        # this test wants gets its own bounded polling loop.
         for _ in range(2):  # consume+commit only 2 of 5 - leaves 3 behind
-            msg = consumer.poll(10)
+            deadline = time.monotonic() + 20
+            msg = None
+            while time.monotonic() < deadline:
+                msg = consumer.poll(1.0)
+                if msg is not None:
+                    break
             assert msg is not None and msg.error() is None
             consumer.commit(msg)
         consumer.close()
@@ -161,7 +204,7 @@ def test_writer_consumer_lag_reports_age_when_behind(lab_env, test_clickhouse_db
         assert group["fraction_of_retention"] >= 0
         assert group["alert"] is False
     finally:
-        admin.delete_topics([topic])
+        _delete_topics_and_wait(admin, [topic])
 
 
 def test_dead_letter_counts_per_tenant_zero_when_nothing_dead_lettered(lab_env, test_clickhouse_db):

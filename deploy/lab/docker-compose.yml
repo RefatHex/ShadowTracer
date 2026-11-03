@@ -53,6 +53,13 @@ x-console-backend-env: &console-backend-env
   CLICKHOUSE_DATABASE: shadowtracer
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   KAFKA_WRITER_GROUP: shadowtracer-writer
+  # Phase 5.6 Item 1: Describe-only credential (no topic Read/Write) -
+  # /health/detail's lag reporting needs group offsets and topic
+  # watermarks, never message content. See create-kafka-acls.sh.
+  KAFKA_SECURITY_PROTOCOL: SASL_SSL
+  KAFKA_SASL_USERNAME: console-backend
+  KAFKA_SASL_PASSWORD: ${KAFKA_CONSOLE_BACKEND_PASSWORD:?set KAFKA_CONSOLE_BACKEND_PASSWORD in deploy/lab/.env}
+  KAFKA_SSL_CA_LOCATION: /etc/kafka-certs/ca.crt
   CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-https://localhost:8443}
   # Phase 4 follow-up 2: shipper/writer are services on this same compose
   # network now, not host processes - reached by service name directly,
@@ -67,7 +74,13 @@ x-shipper-env: &shipper-env
   TENANT_ID: ${TENANT_KEY:?set TENANT_KEY in deploy/lab/.env, see .env.example}
   ALERTS_PATH: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts/alerts.json
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-  KAFKA_TOPIC: shadowtracer.events.raw
+  # Phase 5.6 Item 1: no KAFKA_TOPIC any more - derived from TENANT_ID
+  # (topics.py). Producer-only credential, scoped to this tenant's own
+  # two topics (create-kafka-acls.sh) - never another tenant's.
+  KAFKA_SECURITY_PROTOCOL: SASL_SSL
+  KAFKA_SASL_USERNAME: shipper
+  KAFKA_SASL_PASSWORD: ${KAFKA_SHIPPER_PASSWORD:?set KAFKA_SHIPPER_PASSWORD in deploy/lab/.env}
+  KAFKA_SSL_CA_LOCATION: /etc/kafka-certs/ca.crt
   # On the /offsets volume, not /tmp - must survive a container restart or
   # the shipper would re-read (and re-ship) its entire backlog every time.
   OFFSET_FILE: /offsets/offsets.json
@@ -88,7 +101,13 @@ x-shipper-test-env: &shipper-test-env
   TENANT_ID: ${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env, see .env.example}
   ALERTS_PATH: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts/alerts.json
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-  KAFKA_TOPIC: shadowtracer.events.raw
+  # Phase 5.6 Item 1: no KAFKA_TOPIC any more - derived from TENANT_ID
+  # (topics.py). Its OWN credential (shipper-test), never shipper's -
+  # scoped to TEST_TENANT_KEY's own two topics, never TENANT_KEY's.
+  KAFKA_SECURITY_PROTOCOL: SASL_SSL
+  KAFKA_SASL_USERNAME: shipper-test
+  KAFKA_SASL_PASSWORD: ${KAFKA_SHIPPER_TEST_PASSWORD:?set KAFKA_SHIPPER_TEST_PASSWORD in deploy/lab/.env}
+  KAFKA_SSL_CA_LOCATION: /etc/kafka-certs/ca.crt
   OFFSET_FILE: /offsets/offsets.json
   CLICKHOUSE_HOST: ch-clickhouse-1
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
@@ -99,8 +118,15 @@ x-shipper-test-env: &shipper-test-env
 # partitions between them (VERIFY in PHASE4_CONSOLE.md).
 x-writer-env: &writer-env
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-  KAFKA_TOPIC: shadowtracer.events.raw
+  # Phase 5.6 Item 1: no KAFKA_TOPIC any more - subscribes by pattern
+  # across every tenant's own topic (topics.py). Consumer (alerts
+  # pattern) + producer (dead-letter pattern) credential - never
+  # producer on alerts (create-kafka-acls.sh).
   KAFKA_GROUP_ID: shadowtracer-writer
+  KAFKA_SECURITY_PROTOCOL: SASL_SSL
+  KAFKA_SASL_USERNAME: writer
+  KAFKA_SASL_PASSWORD: ${KAFKA_WRITER_PASSWORD:?set KAFKA_WRITER_PASSWORD in deploy/lab/.env}
+  KAFKA_SSL_CA_LOCATION: /etc/kafka-certs/ca.crt
   CLICKHOUSE_HOSTS: ch-clickhouse-1:8123,ch-clickhouse-2:8123
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
@@ -121,8 +147,14 @@ x-writer-env: &writer-env
 # writer-1/writer-2.
 x-correlate-env: &correlate-env
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-  KAFKA_TOPIC: shadowtracer.events.raw
+  # Phase 5.6 Item 1: no KAFKA_TOPIC any more - subscribes by pattern
+  # across every tenant's own topic (topics.py). Own credential
+  # (correlator), same consumer+producer shape as writer's.
   KAFKA_GROUP_ID: shadowtracer-correlate
+  KAFKA_SECURITY_PROTOCOL: SASL_SSL
+  KAFKA_SASL_USERNAME: correlator
+  KAFKA_SASL_PASSWORD: ${KAFKA_CORRELATOR_PASSWORD:?set KAFKA_CORRELATOR_PASSWORD in deploy/lab/.env}
+  KAFKA_SSL_CA_LOCATION: /etc/kafka-certs/ca.crt
   POSTGRES_HOST: postgres
   POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
   APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
@@ -405,10 +437,69 @@ services:
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://127.0.0.1:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: BROKER://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:9092,EXTERNAL://127.0.0.1:9094
+      # Phase 5.6 Item 1: both client-facing listeners (BROKER - every
+      # in-network shipper/writer/correlate/console-backend; EXTERNAL -
+      # every host-side script, pytest suite, VERIFY script) are
+      # SASL_SSL now. CONTROLLER stays PLAINTEXT - KRaft's own internal
+      # metadata-quorum protocol, single broker, never exposed to a host
+      # port or carrying client data, so not in this item's threat model.
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: BROKER:SASL_SSL,CONTROLLER:PLAINTEXT,EXTERNAL:SASL_SSL
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-256
+      KAFKA_SSL_KEYSTORE_LOCATION: /etc/kafka/certs/broker.p12
+      KAFKA_SSL_KEYSTORE_PASSWORD: "${KAFKA_SSL_KEYSTORE_PASSWORD:?set KAFKA_SSL_KEYSTORE_PASSWORD in deploy/lab/.env}"
+      KAFKA_SSL_KEY_PASSWORD: "${KAFKA_SSL_KEYSTORE_PASSWORD}"
+      KAFKA_SSL_KEYSTORE_TYPE: PKCS12
+      # Found the hard way: the broker is ALSO a TLS client to itself on
+      # the inter-broker (BROKER) listener (self-registration, and any
+      # future real multi-broker traffic) - PKIX path validation failed
+      # outright without a truststore telling it to trust its own CA.
+      # PEM, pointed straight at ca.crt - no PKCS12/JKS conversion needed
+      # for a truststore (only a keystore needs the private-key format).
+      KAFKA_SSL_TRUSTSTORE_LOCATION: /etc/kafka/certs/ca.crt
+      KAFKA_SSL_TRUSTSTORE_TYPE: PEM
+      # No client certificate required - SASL/SCRAM (above) is the
+      # authentication mechanism; TLS here is encryption + a served cert
+      # clients can verify, not client auth (docs/design/KAFKA_AUTH.md).
+      KAFKA_SSL_CLIENT_AUTH: none
+      # KRaft-native ACL authorizer. super.users bypasses every ACL
+      # check - this project's one bootstrap/provisioning principal
+      # (create-kafka-topics.sh/create-kafka-acls.sh's --command-config),
+      # never a real pipeline component.
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      # User:ANONYMOUS is the principal an unauthenticated PLAINTEXT
+      # connection presents as - found the hard way, real evidence, not
+      # assumed: without this, enabling the authorizer at all broke
+      # KRaft's OWN internal controller-registration traffic over the
+      # (never externally exposed) CONTROLLER listener, which has no
+      # SASL on it by design (see KAFKA_LISTENER_SECURITY_PROTOCOL_MAP's
+      # own comment) - the single-node broker registering itself with
+      # its own controller role got CLUSTER_AUTHORIZATION_FAILED and
+      # crash-looped. Safe specifically because that listener is
+      # docker-network-internal only, carries no client data, and isn't
+      # in this item's threat model (same reasoning as leaving it
+      # PLAINTEXT at all) - this is NOT a blanket "ANONYMOUS can do
+      # anything" grant on the client-facing BROKER/EXTERNAL listeners,
+      # which still enforce SASL_SSL and have no PLAINTEXT path in for
+      # an ANONYMOUS principal to even reach.
+      KAFKA_SUPER_USERS: "User:admin;User:ANONYMOUS"
+      # Phase 5.6 Item 1: the JAAS entry every listener running the
+      # SCRAM mechanism needs, found missing the hard way too -
+      # "Could not find a 'KafkaServer' ... entry in the JAAS
+      # configuration" crashed the broker outright on first boot
+      # without this. BROKER (inter-broker listener) needs a real
+      # username/password since the broker acts as a SASL CLIENT on it
+      # too (fetches, registration) - reuses the admin credential
+      # (already a super-user, already provisioned). EXTERNAL is
+      # server-only from the broker's side (it only ever ACCEPTS client
+      # connections there, never initiates one) - no credential needed,
+      # just the module declaration, which activates SCRAM validation
+      # against whatever's already been provisioned via kafka-configs.sh.
+      KAFKA_LISTENER_NAME_BROKER_SCRAM-SHA-256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD:?set KAFKA_ADMIN_PASSWORD in deploy/lab/.env}";'
+      KAFKA_LISTENER_NAME_EXTERNAL_SCRAM-SHA-256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       # Lab: 1 broker, so replication/ISR must be 1. Production (3 brokers)
       # uses the real defaults (3/2) - see shadowtracer/docs/DECISIONS.md.
@@ -418,6 +509,9 @@ services:
       KAFKA_HEAP_OPTS: "-Xmx512m -Xms512m"
     volumes:
       - kafka-data:/var/lib/kafka/data
+      - ./kafka-certs/broker.p12:/etc/kafka/certs/broker.p12:ro
+      - ./kafka-certs/ca.crt:/etc/kafka/certs/ca.crt:ro
+      - ./kafka-certs/admin-client.properties:/etc/kafka/certs/admin-client.properties:ro
     ports:
       - "127.0.0.1:9094:9094"
     # Startup race fix (Step 2): previously no healthcheck at all, so
@@ -425,8 +519,14 @@ services:
     # every consumer was stuck with service_started, i.e. "the container
     # process launched", which for a JVM broker is well before it can
     # actually serve a bootstrap request.
+    #
+    # Phase 5.6 Item 1: --command-config authenticates this as the
+    # "admin" super-user, same credential create-kafka-topics.sh/
+    # create-kafka-acls.sh use via docker exec - the unauthenticated
+    # plaintext check this replaced stopped working the moment SASL_SSL
+    # became mandatory on every listener.
     healthcheck:
-      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092", "--command-config", "/etc/kafka/certs/admin-client.properties"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -569,6 +669,7 @@ services:
       # alert log, only tailing it.
       - ./alerts-worker1:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts:ro
       - shipper-worker1-offsets:/offsets
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       shadowtracer-worker1:
         condition: service_healthy
@@ -592,6 +693,7 @@ services:
     volumes:
       - ./alerts-worker2:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts:ro
       - shipper-worker2-offsets:/offsets
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       shadowtracer-worker2:
         condition: service_healthy
@@ -618,6 +720,7 @@ services:
     volumes:
       - ./alerts-worker-test:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts:ro
       - shipper-worker-test-offsets:/offsets
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       shadowtracer-worker-test:
         condition: service_healthy
@@ -636,6 +739,8 @@ services:
     command: ["python3", "run_writer.py"]
     restart: unless-stopped
     environment: *writer-env
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -654,6 +759,8 @@ services:
     command: ["python3", "run_writer.py"]
     restart: unless-stopped
     environment: *writer-env
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -674,6 +781,8 @@ services:
     command: ["python3", "run_correlator.py"]
     restart: unless-stopped
     environment: *correlate-env
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -692,6 +801,8 @@ services:
     command: ["python3", "run_correlator.py"]
     restart: unless-stopped
     environment: *correlate-env
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -747,6 +858,8 @@ services:
     hostname: console-backend-1
     restart: unless-stopped
     environment: *console-backend-env
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -766,6 +879,8 @@ services:
     hostname: console-backend-2
     restart: unless-stopped
     environment: *console-backend-env
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
     depends_on:
       postgres:
         condition: service_healthy

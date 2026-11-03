@@ -3,7 +3,11 @@
 ClickHouse (Step 5).
 
 Env vars:
-  KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, KAFKA_GROUP_ID
+  KAFKA_BOOTSTRAP_SERVERS, KAFKA_GROUP_ID (no KAFKA_TOPIC any more - Phase
+    5.6 Item 1 subscribes by pattern across every tenant's own topic)
+  KAFKA_SECURITY_PROTOCOL, KAFKA_SASL_MECHANISM, KAFKA_SASL_USERNAME,
+    KAFKA_SASL_PASSWORD, KAFKA_SSL_CA_LOCATION - optional, defaults to
+    PLAINTEXT if KAFKA_SECURITY_PROTOCOL isn't set (kafka_security.py)
   CLICKHOUSE_HOSTS ("host1:port1,host2:port2", tried in order - failover
     across replicas, see _FailoverClickHouse)
   CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, CLICKHOUSE_DATABASE, METRICS_PORT
@@ -18,6 +22,7 @@ import signal
 import threading
 
 from shadowtracer_ingest import writer
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 from shadowtracer_ingest.metrics import Metrics, serve_metrics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -43,7 +48,6 @@ database_url = (
 
 writer.run(
     bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9094"),
-    topic=os.environ.get("KAFKA_TOPIC", "shadowtracer.events.raw"),
     group_id=os.environ.get("KAFKA_GROUP_ID", "shadowtracer-writer"),
     clickhouse_hosts=clickhouse_hosts,
     clickhouse_user=os.environ["CLICKHOUSE_USER"],
@@ -52,4 +56,5 @@ writer.run(
     database_url=database_url,
     metrics=metrics,
     stop_flag=stop_flag,
+    kafka_client_config=kafka_client_config_from_env(),
 )

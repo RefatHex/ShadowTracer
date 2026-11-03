@@ -33,8 +33,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest"))
 from shadowtracer_ingest.dead_letter import send_to_dead_letter  # noqa: E402
 from shadowtracer_ingest.normalizer import normalize_alert  # noqa: E402
+from shadowtracer_ingest.retry import consumer_heartbeat  # noqa: E402
 from shadowtracer_ingest.shipper import ENVELOPE_VERSION  # noqa: E402
 from shadowtracer_ingest.tenants import TenantCache  # noqa: E402
+from shadowtracer_ingest.topics import ALERTS_TOPIC_PATTERN, tenant_from_alerts_topic  # noqa: E402
 
 from confluent_kafka import Consumer, Producer
 from sqlalchemy import create_engine
@@ -52,7 +54,28 @@ PROCESS_BASE_DELAY_SECONDS = 1.0
 PROCESS_MAX_DELAY_SECONDS = 30.0
 
 
-def _dead_letter_with_retry(stop_flag, metrics, **kwargs) -> bool:
+def _wait_polling(stop_flag, delay, consumer) -> bool:
+    """Waits up to delay seconds in <=1s steps, calling
+    consumer_heartbeat(consumer) each step - keeps the consumer's group
+    membership alive during a long backoff instead of one blocking
+    wait (consumer_heartbeat pauses first so this can never silently
+    dequeue-and-drop a real message the way a bare consumer.poll(0)
+    could). A real incident: an unbroken wait here let a consumer
+    exceed max.poll.interval.ms and fall out of its group, stalling
+    every partition it owned (not just the one retry) until the
+    process was restarted. Returns True if stop_flag fired (caller
+    should give up)."""
+    remaining = delay
+    while remaining > 0:
+        step = min(1.0, remaining)
+        consumer_heartbeat(consumer)
+        if stop_flag.wait(step):
+            return True
+        remaining -= step
+    return False
+
+
+def _dead_letter_with_retry(stop_flag, metrics, consumer, **kwargs) -> bool:
     """Returns True once the dead-letter write succeeds durably (via the
     Kafka dead-letter topic - send_to_dead_letter only ever raises for
     that half, since a ClickHouse-side failure is already caught inside
@@ -71,13 +94,12 @@ def _dead_letter_with_retry(stop_flag, metrics, **kwargs) -> bool:
             attempt += 1
             logger.warning("dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc)
             delay = min(PROCESS_BASE_DELAY_SECONDS * (2 ** (attempt - 1)), PROCESS_MAX_DELAY_SECONDS)
-            if stop_flag.wait(delay):
+            if _wait_polling(stop_flag, delay, consumer):
                 return False
 
 
 def run(
     bootstrap_servers: str,
-    topic: str,
     group_id: str,
     database_url: str,
     metrics: Metrics,
@@ -89,6 +111,7 @@ def run(
     clickhouse_database: str | None = None,
     sequences_dir: str | None = None,
     sequence_lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
+    kafka_client_config: dict | None = None,
 ):
     """ch_client is optional (None is fine, e.g. in tests that don't care
     about dead-letter counts) - a dead-lettered event still always goes to
@@ -98,19 +121,31 @@ def run(
     Phase 5B Step 4: sequences_dir/clickhouse_database are optional too -
     omitted, sequence detection is simply not evaluated (ch_client alone
     isn't enough; see process_event's own docstring for why both are
-    required together)."""
+    required together).
+
+    Phase 5.6 Item 1: no `topic` parameter any more - subscribes to
+    ALERTS_TOPIC_PATTERN (every tenant's own topic at once, see
+    shadowtracer_ingest/topics.py and writer.py's identical change).
+    kafka_client_config carries whatever TLS/SASL settings this
+    deployment needs."""
+    kafka_client_config = kafka_client_config or {}
     sequences = load_sequences(sequences_dir) if sequences_dir else None
     consumer = Consumer({
         "bootstrap.servers": bootstrap_servers,
         "group.id": group_id,
         "enable.auto.commit": False,
         "auto.offset.reset": "earliest",
+        # Phase 5.6 Item 1: see writer.py's own identical comment - a
+        # PATTERN subscription's new-topic discovery otherwise depends
+        # on librdkafka's default 5-minute refresh interval.
+        "topic.metadata.refresh.interval.ms": 10000,
+        **kafka_client_config,
     })
-    consumer.subscribe([topic])
+    consumer.subscribe([ALERTS_TOPIC_PATTERN])
 
     engine = create_engine(database_url, pool_pre_ping=True)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
-    dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers})
+    dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers, **kafka_client_config})
     # Phase 5C Step 0: a forged/stale/deleted tenant_key must never create
     # silent orphaned incidents - see tenants.py's own docstring for why
     # this is a periodically-refreshed cache, not a query per message.
@@ -128,11 +163,18 @@ def run(
                 metrics.incr("messages_failed")
                 continue
 
-            tenant_key = None
+            # Phase 5.6 Item 1: the TRUSTED identity is the topic this
+            # message was actually read from, not the header below - a
+            # per-tenant producer ACL is what makes it trustworthy
+            # (docs/design/KAFKA_AUTH.md). None here would mean a
+            # non-tenant topic matched ALERTS_TOPIC_PATTERN, which can't
+            # happen if every topic exists via topics.alerts_topic_for_tenant.
+            tenant_key = tenant_from_alerts_topic(msg.topic())
+            header_tenant_id = None
             envelope_version_raw = None
             for k, v in (msg.headers() or []):
                 if k == "tenant_id":  # header name predates tenant_key (Phase 4 follow-up 1); the VALUE is the tenant_key
-                    tenant_key = v.decode()
+                    header_tenant_id = v.decode()
                 elif k == "envelope_version":
                     envelope_version_raw = v.decode()
 
@@ -142,6 +184,26 @@ def run(
             # dead-lettered there.
             raw_line = msg.value().decode("utf-8", errors="replace")
             source_location = f"{msg.topic()}:{msg.partition()}:{msg.offset()}"
+
+            # Phase 5.6 Item 1: a header that's PRESENT but disagrees with
+            # the topic it actually arrived on is the one thing a
+            # per-tenant ACL alone can't catch (a shipper can still write
+            # a false claim into its OWN tenant's topic) - dead-lettered,
+            # trusting the topic, never the header. A MISSING header
+            # makes no claim to disagree with, so it's not an error - same
+            # backward-compat stance as a missing envelope_version header.
+            if header_tenant_id is not None and header_tenant_id != tenant_key:
+                metrics.incr("messages_failed")
+                if not _dead_letter_with_retry(
+                    stop_flag, metrics, consumer,
+                    kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
+                    component="correlator", source_location=source_location,
+                    error=f"tenant_topic_mismatch: topic claims {tenant_key!r}, header claims {header_tenant_id!r}",
+                    raw_event=raw_line,
+                ):
+                    continue
+                consumer.commit(msg)
+                continue
 
             # Phase 5.6 Item 4: a missing header predates this change
             # (version 1, the only shape that ever existed before it) - a
@@ -153,7 +215,7 @@ def run(
             if envelope_version_raw is not None and envelope_version_raw != str(ENVELOPE_VERSION):
                 metrics.incr("messages_failed")
                 if not _dead_letter_with_retry(
-                    stop_flag, metrics,
+                    stop_flag, metrics, consumer,
                     kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                     component="correlator", source_location=source_location,
                     error=f"unsupported_envelope_version: got {envelope_version_raw!r}, this correlator only understands {ENVELOPE_VERSION}",
@@ -170,7 +232,7 @@ def run(
             if not tenant_cache.is_known(tenant_key or ""):
                 metrics.incr("messages_failed")
                 if not _dead_letter_with_retry(
-                    stop_flag, metrics,
+                    stop_flag, metrics, consumer,
                     kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                     component="correlator", source_location=source_location,
                     error="unknown_tenant", raw_event=raw_line,
@@ -184,7 +246,7 @@ def run(
             except Exception as exc:  # noqa: BLE001 - permanent, bad data: dead-letter and move on, never retried
                 metrics.incr("messages_failed")
                 if not _dead_letter_with_retry(
-                    stop_flag, metrics,
+                    stop_flag, metrics, consumer,
                     kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                     component="correlator", source_location=source_location,
                     error=f"{type(exc).__name__}: {exc}", raw_event=raw_line,
@@ -215,7 +277,7 @@ def run(
                     logger.warning("alert %s has a permanently malformed field - dead-lettering, not retrying", event.alert_id)
                     metrics.incr("messages_failed")
                     if not _dead_letter_with_retry(
-                        stop_flag, metrics,
+                        stop_flag, metrics, consumer, consumer,
                         kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
                         component="correlator", source_location=source_location,
                         error="UnparseableEvent: permanently malformed field", raw_event=raw_line,
@@ -234,7 +296,7 @@ def run(
                         attempt_n, event.alert_id, exc,
                     )
                     delay = min(PROCESS_BASE_DELAY_SECONDS * (2 ** (attempt_n - 1)), PROCESS_MAX_DELAY_SECONDS)
-                    if stop_flag.wait(delay):
+                    if _wait_polling(stop_flag, delay, consumer):
                         result = None  # graceful shutdown mid-retry: leave uncommitted, genuinely redelivered on restart
                         break
                     continue

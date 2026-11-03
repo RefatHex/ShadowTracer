@@ -7,6 +7,7 @@ import uuid
 from confluent_kafka import Consumer
 
 from shadowtracer_ingest import shipper
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 from shadowtracer_ingest.metrics import Metrics
 
 
@@ -18,6 +19,7 @@ def _drain_topic(kafka_bootstrap, topic, expected_count, timeout=15):
         "bootstrap.servers": kafka_bootstrap,
         "group.id": f"test-drain-{topic}-{uuid.uuid4().hex[:8]}",
         "auto.offset.reset": "earliest",
+        **kafka_client_config_from_env(),
     })
     consumer.subscribe([topic])
     messages = []
@@ -30,21 +32,21 @@ def _drain_topic(kafka_bootstrap, topic, expected_count, timeout=15):
     return messages
 
 
-def _run_shipper_once(tmp_path, kafka_bootstrap, topic, alerts_path, offset_file):
+def _run_shipper_once(tmp_path, kafka_bootstrap, tenant_id, alerts_path, offset_file):
     metrics = Metrics()
     stop_flag = threading.Event()
     thread = threading.Thread(
         target=shipper.run,
         kwargs=dict(
-            tenant_id="lab",
+            tenant_id=tenant_id,
             manager_name="test-manager",
             alerts_path=str(alerts_path),
             archives_path=None,
             bootstrap_servers=kafka_bootstrap,
-            topic=topic,
             offset_file=str(offset_file),
             metrics=metrics,
             stop_flag=stop_flag,
+            kafka_client_config=kafka_client_config_from_env(),
         ),
         daemon=True,
     )
@@ -52,7 +54,7 @@ def _run_shipper_once(tmp_path, kafka_bootstrap, topic, alerts_path, offset_file
     return stop_flag, thread, metrics
 
 
-def test_shipper_is_actually_running_and_draining_not_just_callable(tmp_path, kafka_bootstrap, kafka_topic, real_alert_lines):
+def test_shipper_is_actually_running_and_draining_not_just_callable(tmp_path, kafka_bootstrap, kafka_tenant_key, kafka_topic, real_alert_lines):
     """Proves the shipper's main loop is live: we only start shipper.run()
     in a thread and write to the file it tails - never call its internal
     functions directly - then confirm messages actually arrive in Kafka."""
@@ -60,24 +62,26 @@ def test_shipper_is_actually_running_and_draining_not_just_callable(tmp_path, ka
     alerts_path.write_text("\n".join(real_alert_lines) + "\n")
     offset_file = tmp_path / "offsets.json"
 
-    stop_flag, thread, metrics = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_topic, alerts_path, offset_file)
+    stop_flag, thread, metrics = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_tenant_key, alerts_path, offset_file)
     messages = _drain_topic(kafka_bootstrap, kafka_topic, len(real_alert_lines))
     stop_flag.set()
     thread.join(timeout=5)
 
     assert len(messages) == len(real_alert_lines)
+    # Phase 5.6 Item 1: key is just the agent_id now - tenant is the topic
+    # itself (broker-enforced via ACL), not part of the partition key.
     keys = {m.key().decode() for m in messages}
-    assert all(k.startswith("lab:") for k in keys)
+    assert all(k for k in keys)
     assert metrics.snapshot()["lines_sent"] == len(real_alert_lines)
 
 
-def test_shipper_skips_malformed_lines_without_crashing(tmp_path, kafka_bootstrap, kafka_topic, real_alert_lines):
+def test_shipper_skips_malformed_lines_without_crashing(tmp_path, kafka_bootstrap, kafka_tenant_key, kafka_topic, real_alert_lines):
     alerts_path = tmp_path / "alerts.json"
     lines = [real_alert_lines[0], "{not valid json", real_alert_lines[1]]
     alerts_path.write_text("\n".join(lines) + "\n")
     offset_file = tmp_path / "offsets.json"
 
-    stop_flag, thread, metrics = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_topic, alerts_path, offset_file)
+    stop_flag, thread, metrics = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_tenant_key, alerts_path, offset_file)
     messages = _drain_topic(kafka_bootstrap, kafka_topic, 2)
     stop_flag.set()
     thread.join(timeout=5)
@@ -86,13 +90,12 @@ def test_shipper_skips_malformed_lines_without_crashing(tmp_path, kafka_bootstra
     assert metrics.snapshot()["lines_failed"] >= 1
 
 
-def test_shipper_dead_letters_bad_data_never_crashes(tmp_path, kafka_bootstrap, kafka_topic, ch_client, real_alert_lines):
+def test_shipper_dead_letters_bad_data_never_crashes(tmp_path, kafka_bootstrap, kafka_tenant_key, kafka_topic, ch_client, real_alert_lines):
     """No single event may stop the pipeline: a batch mixing permanently
     bad data (unparseable JSON, invalid UTF-8) with good lines must land
     every good line in Kafka, dead-letter every bad one (both to the Kafka
     dead-letter topic and ClickHouse's per-tenant-queryable table), and
     never crash the shipper thread."""
-    marker = uuid.uuid4().hex[:8]
     alerts_path = tmp_path / "alerts.json"
     bad_lines_bytes = [
         b"{not valid json",
@@ -115,9 +118,10 @@ def test_shipper_dead_letters_bad_data_never_crashes(tmp_path, kafka_bootstrap, 
     thread = threading.Thread(
         target=shipper.run,
         kwargs=dict(
-            tenant_id=f"test-{marker}", manager_name="test-manager", alerts_path=str(alerts_path),
-            archives_path=None, bootstrap_servers=kafka_bootstrap, topic=kafka_topic,
+            tenant_id=kafka_tenant_key, manager_name="test-manager", alerts_path=str(alerts_path),
+            archives_path=None, bootstrap_servers=kafka_bootstrap,
             offset_file=str(offset_file), metrics=metrics, stop_flag=stop_flag, ch_client=ch_client,
+            kafka_client_config=kafka_client_config_from_env(),
         ),
         daemon=True,
     )
@@ -129,7 +133,7 @@ def test_shipper_dead_letters_bad_data_never_crashes(tmp_path, kafka_bootstrap, 
         deadline = time.monotonic() + 15
         dl_count = 0
         while time.monotonic() < deadline:
-            dl_count = dl_client_count(ch_client, f"test-{marker}")
+            dl_count = dl_client_count(ch_client, kafka_tenant_key)
             if dl_count >= len(bad_lines_bytes):
                 break
             time.sleep(0.5)
@@ -138,7 +142,7 @@ def test_shipper_dead_letters_bad_data_never_crashes(tmp_path, kafka_bootstrap, 
     finally:
         stop_flag.set()
         thread.join(timeout=5)
-        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = 'test-{marker}'")
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{kafka_tenant_key}'")
 
 
 def dl_client_count(ch_client, tenant_id):
@@ -148,7 +152,7 @@ def dl_client_count(ch_client, tenant_id):
 
 
 def test_shipper_dead_letters_an_oversized_message_instead_of_crashing(
-    tmp_path, kafka_bootstrap, kafka_topic, ch_client, real_alert_lines,
+    tmp_path, kafka_bootstrap, kafka_tenant_key, kafka_topic, ch_client, real_alert_lines,
 ):
     """A message too large for Kafka's message.max.bytes (a hostile/edge
     case 10MB full_log) used to crash the shipper outright: producer.produce()
@@ -158,7 +162,6 @@ def test_shipper_dead_letters_an_oversized_message_instead_of_crashing(
     and the oversized raw_event itself must not blow up the dead-letter
     envelope the same way (dead_letter.py truncates it)."""
     marker = uuid.uuid4().hex[:8]
-    tenant_id = f"test-{marker}"
     good = json.loads(real_alert_lines[0])
     good["id"] = f"{good['id']}.{marker}"
     huge = json.loads(real_alert_lines[1])
@@ -174,9 +177,10 @@ def test_shipper_dead_letters_an_oversized_message_instead_of_crashing(
     thread = threading.Thread(
         target=shipper.run,
         kwargs=dict(
-            tenant_id=tenant_id, manager_name="test-manager", alerts_path=str(alerts_path),
-            archives_path=None, bootstrap_servers=kafka_bootstrap, topic=kafka_topic,
+            tenant_id=kafka_tenant_key, manager_name="test-manager", alerts_path=str(alerts_path),
+            archives_path=None, bootstrap_servers=kafka_bootstrap,
             offset_file=str(offset_file), metrics=metrics, stop_flag=stop_flag, ch_client=ch_client,
+            kafka_client_config=kafka_client_config_from_env(),
         ),
         daemon=True,
     )
@@ -188,7 +192,7 @@ def test_shipper_dead_letters_an_oversized_message_instead_of_crashing(
         deadline = time.monotonic() + 15
         dl_count = 0
         while time.monotonic() < deadline:
-            dl_count = dl_client_count(ch_client, tenant_id)
+            dl_count = dl_client_count(ch_client, kafka_tenant_key)
             if dl_count == 1:
                 break
             time.sleep(0.5)
@@ -197,15 +201,15 @@ def test_shipper_dead_letters_an_oversized_message_instead_of_crashing(
     finally:
         stop_flag.set()
         thread.join(timeout=5)
-        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_id}'")
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{kafka_tenant_key}'")
 
 
-def test_shipper_resumes_from_persisted_offset_after_restart(tmp_path, kafka_bootstrap, kafka_topic, real_alert_lines):
+def test_shipper_resumes_from_persisted_offset_after_restart(tmp_path, kafka_bootstrap, kafka_tenant_key, kafka_topic, real_alert_lines):
     alerts_path = tmp_path / "alerts.json"
     offset_file = tmp_path / "offsets.json"
     alerts_path.write_text(real_alert_lines[0] + "\n")
 
-    stop_flag, thread, metrics = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_topic, alerts_path, offset_file)
+    stop_flag, thread, metrics = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_tenant_key, alerts_path, offset_file)
     _drain_topic(kafka_bootstrap, kafka_topic, 1)
     stop_flag.set()
     thread.join(timeout=5)
@@ -214,7 +218,7 @@ def test_shipper_resumes_from_persisted_offset_after_restart(tmp_path, kafka_boo
     with open(alerts_path, "a") as f:
         f.write(real_alert_lines[1] + "\n")
 
-    stop_flag2, thread2, metrics2 = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_topic, alerts_path, offset_file)
+    stop_flag2, thread2, metrics2 = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_tenant_key, alerts_path, offset_file)
     messages = _drain_topic(kafka_bootstrap, kafka_topic, 2)
     stop_flag2.set()
     thread2.join(timeout=5)
@@ -223,12 +227,12 @@ def test_shipper_resumes_from_persisted_offset_after_restart(tmp_path, kafka_boo
     assert len(messages) == 2
 
 
-def test_shipper_survives_log_rotation(tmp_path, kafka_bootstrap, kafka_topic, real_alert_lines):
+def test_shipper_survives_log_rotation(tmp_path, kafka_bootstrap, kafka_tenant_key, kafka_topic, real_alert_lines):
     alerts_path = tmp_path / "alerts.json"
     offset_file = tmp_path / "offsets.json"
     alerts_path.write_text(real_alert_lines[0] + "\n")
 
-    stop_flag, thread, metrics = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_topic, alerts_path, offset_file)
+    stop_flag, thread, metrics = _run_shipper_once(tmp_path, kafka_bootstrap, kafka_tenant_key, alerts_path, offset_file)
     _drain_topic(kafka_bootstrap, kafka_topic, 1)
 
     # Simulate logrotate: rename the old file away, create a fresh one at

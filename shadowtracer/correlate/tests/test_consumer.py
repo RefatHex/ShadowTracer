@@ -7,11 +7,12 @@ import uuid
 from confluent_kafka import Consumer, Producer
 from sqlalchemy import select
 
-from conftest import TEST_CLICKHOUSE_DB, insert_tenant
+from conftest import TEST_CLICKHOUSE_DB, delete_topics_and_wait, insert_tenant
 from shadowtracer_correlate.consumer import run
 from shadowtracer_correlate.metrics import Metrics
 from shadowtracer_correlate.models import incident_alerts, incidents
-from shadowtracer_ingest.dead_letter import DEAD_LETTER_TOPIC
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
+from shadowtracer_ingest.topics import alerts_topic_for_tenant, dead_letter_topic_for_tenant, tenant_from_alerts_topic
 
 
 def _alert(agent_id: str, src_ip: str, alert_id: str, timestamp: str = "2026-01-01T12:00:00.000+0000") -> str:
@@ -29,33 +30,45 @@ def _alert(agent_id: str, src_ip: str, alert_id: str, timestamp: str = "2026-01-
     })
 
 
-def _produce(kafka_bootstrap, topic, lines, tenant_key="lab"):
-    """Keys each message by tenant:agent, exactly like the real shipper
-    (shipper.py) - this is what actually guarantees one agent's events
-    all land on the same partition, owned by exactly one worker. A test
-    that produced without this key would let two different workers
-    legitimately race on the same agent, which can't happen for real."""
-    producer = Producer({"bootstrap.servers": kafka_bootstrap})
+def _produce(kafka_bootstrap, topic, lines, tenant_key=None):
+    """Phase 5.6 Item 1: default tenant_key is the topic's OWN tenant now
+    (the trusted identity consumer.py actually checks against), not a
+    fixed "lab" - see shadowtracer_ingest/tests/test_writer.py's
+    identical _produce fix for why. Keys each message by agent_id alone
+    now - tenant is the topic itself, not part of the key - which is
+    what actually guarantees one agent's events all land on the same
+    partition, owned by exactly one worker. A test that produced without
+    this key would let two different workers legitimately race on the
+    same agent, which can't happen for real."""
+    if tenant_key is None:
+        tenant_key = tenant_from_alerts_topic(topic)
+    producer = Producer({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
     for line in lines:
         agent_id = json.loads(line)["agent"]["id"]
         producer.produce(
-            topic, value=line.encode(), key=f"{tenant_key}:{agent_id}".encode(),
+            topic, value=line.encode(), key=agent_id.encode(),
             headers=[("tenant_id", tenant_key.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json")],
         )
     producer.flush(30)
 
 
 def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None, ch_client=None):
+    # Phase 5.6 Item 1: `topic` is accepted but unused now - consumer.run()
+    # pattern-subscribes to every tenant's topic (same as writer.py);
+    # kept as a parameter so every existing call site in this file stays
+    # unchanged - the caller's kafka_topic fixture already created the
+    # real topic before this runs, which is what actually matters.
     metrics = Metrics()
     stop_flag = threading.Event()
     started_flag = threading.Event()
     thread = threading.Thread(
         target=run,
         kwargs=dict(
-            bootstrap_servers=kafka_bootstrap, topic=topic,
+            bootstrap_servers=kafka_bootstrap,
             group_id=group_id or f"test-correlate-{uuid.uuid4().hex[:8]}",
             database_url=database_url, metrics=metrics,
             stop_flag=stop_flag, started_flag=started_flag, ch_client=ch_client,
+            kafka_client_config=kafka_client_config_from_env(),
         ),
         daemon=True,
     )
@@ -64,12 +77,11 @@ def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None, ch_clie
     return stop_flag, thread, metrics
 
 
-def test_correlator_is_actually_running_and_draining_not_just_callable(kafka_bootstrap, kafka_topic, database_url, db):
+def test_correlator_is_actually_running_and_draining_not_just_callable(kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db):
     """Proves the consumer's main loop is live: we never call process_event
     directly here - we only start consumer.run() in a thread and produce
     to Kafka, exactly like a real deployment would."""
-    tenant = f"t-{uuid.uuid4().hex[:8]}"
-    insert_tenant(db, tenant)
+    tenant = kafka_tenant_key  # Phase 5.6 Item 1: kafka_topic's own tenant, not a separate one
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     alert_ids = [f"{marker}.{i}" for i in range(5)]
@@ -97,7 +109,7 @@ def test_correlator_is_actually_running_and_draining_not_just_callable(kafka_boo
         thread.join(timeout=5)
 
 
-def test_a_permanently_malformed_alert_is_skipped_not_wedging_the_partition(kafka_bootstrap, kafka_topic, database_url, db):
+def test_a_permanently_malformed_alert_is_skipped_not_wedging_the_partition(kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db):
     """Regression test for a real bug found in Phase 5A VERIFY: a bad
     timestamp (produced by a script bug, but the consumer can't tell that
     from a genuinely corrupt upstream alert) used to be treated as a
@@ -105,8 +117,7 @@ def test_a_permanently_malformed_alert_is_skipped_not_wedging_the_partition(kafk
     infinite retry loop that blocked every alert behind it, forever. One
     bad alert followed by 3 good ones on the same partition/agent must
     not lose the 3 good ones."""
-    tenant = f"t-{uuid.uuid4().hex[:8]}"
-    insert_tenant(db, tenant)
+    tenant = kafka_tenant_key  # Phase 5.6 Item 1: kafka_topic's own tenant, not a separate one
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     bad = _alert(agent, "9.9.9.9", f"{marker}.bad", timestamp="2026-10-04T05:00:118.000+0000")
@@ -134,7 +145,7 @@ def test_a_permanently_malformed_alert_is_skipped_not_wedging_the_partition(kafk
         thread.join(timeout=5)
 
 
-def test_bad_data_is_dead_lettered_not_silently_dropped(kafka_bootstrap, kafka_topic, database_url, db, ch_client):
+def test_bad_data_is_dead_lettered_not_silently_dropped(kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db, ch_client, lab_env):
     """No single event may stop the pipeline: both failure kinds this
     consumer treats as permanent (a normalize_alert failure - here a
     missing required field, since the real shipper already filters out
@@ -142,8 +153,19 @@ def test_bad_data_is_dead_lettered_not_silently_dropped(kafka_bootstrap, kafka_t
     permanently malformed field caught as UnparseableEvent) must land in
     dead_letter_events, not just bump a counter - someone needs to be able
     to find and inspect what got dropped."""
-    tenant = f"t-{uuid.uuid4().hex[:8]}"
-    insert_tenant(db, tenant)
+    tenant = kafka_tenant_key  # Phase 5.6 Item 1: kafka_topic's own tenant, not a separate one
+    # A second, dedicated client for this test's own polling - ch_client
+    # itself is handed to the background consumer thread below for its
+    # dead-letter writes, and clickhouse_connect's HTTP client isn't
+    # safe to query concurrently from two threads on the same session
+    # (confirmed empirically: "Attempt to execute concurrent queries
+    # within the same session").
+    import clickhouse_connect
+    poll_client = clickhouse_connect.get_client(
+        host="127.0.0.1", port=8123,
+        username=lab_env["CLICKHOUSE_USER"], password=lab_env["CLICKHOUSE_PASSWORD"],
+        database=TEST_CLICKHOUSE_DB,
+    )
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     missing_timestamp = json.loads(_alert(agent, "9.9.9.9", f"{marker}.missing-ts"))
@@ -170,7 +192,7 @@ def test_bad_data_is_dead_lettered_not_silently_dropped(kafka_bootstrap, kafka_t
         deadline = time.monotonic() + 15
         dl_count = 0
         while time.monotonic() < deadline:
-            dl_count = ch_client.query(
+            dl_count = poll_client.query(
                 f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{tenant}' AND component = 'correlator'"
             ).result_rows[0][0]
             if dl_count == 2:
@@ -181,17 +203,17 @@ def test_bad_data_is_dead_lettered_not_silently_dropped(kafka_bootstrap, kafka_t
     finally:
         stop_flag.set()
         thread.join(timeout=5)
-        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant}'")
+        poll_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant}'")
+        poll_client.close()
 
 
-def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kafka_bootstrap, kafka_topic, database_url, db):
+def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db):
     """Kills the consumer mid-stream (not a graceful stop_flag) and starts
     a fresh one in a new consumer group reading from the beginning - the
     open incident must keep accumulating the same incident_id, never
     split into two, since all state lives in Postgres, not the worker's
     memory."""
-    tenant = f"t-{uuid.uuid4().hex[:8]}"
-    insert_tenant(db, tenant)
+    tenant = kafka_tenant_key  # Phase 5.6 Item 1: kafka_topic's own tenant, not a separate one
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     group_id = f"test-correlate-kill-{marker}"
@@ -238,9 +260,8 @@ def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kaf
         thread2.join(timeout=5)
 
 
-def test_replaying_a_kafka_range_does_not_duplicate_membership_or_change_counts(kafka_bootstrap, kafka_topic, database_url, db):
-    tenant = f"t-{uuid.uuid4().hex[:8]}"
-    insert_tenant(db, tenant)
+def test_replaying_a_kafka_range_does_not_duplicate_membership_or_change_counts(kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db):
+    tenant = kafka_tenant_key  # Phase 5.6 Item 1: kafka_topic's own tenant, not a separate one
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     group_id = f"test-correlate-replay-{marker}"
@@ -265,7 +286,8 @@ def test_replaying_a_kafka_range_does_not_duplicate_membership_or_change_counts(
 
     subprocess.run(
         ["docker", "exec", "shadowtracer-lab-kafka-1", "/opt/kafka/bin/kafka-consumer-groups.sh",
-         "--bootstrap-server", "localhost:9092", "--group", group_id, "--topic", kafka_topic,
+         "--bootstrap-server", "localhost:9092", "--command-config", "/etc/kafka/certs/admin-client.properties",
+         "--group", group_id, "--topic", kafka_topic,
          "--reset-offsets", "--to-earliest", "--execute"],
         check=True, capture_output=True,
     )
@@ -292,13 +314,16 @@ def test_two_correlation_workers_split_partitions_nothing_processed_twice(kafka_
     lab's writer-1/writer-2 split of the 24-partition events topic."""
     from confluent_kafka.admin import AdminClient, NewTopic
 
-    topic = f"shadowtracer.test.multipart.{uuid.uuid4().hex[:8]}"
-    admin = AdminClient({"bootstrap.servers": kafka_bootstrap})
+    # Phase 5.6 Item 1: a real per-tenant topic name now (not an
+    # arbitrary "multipart" name) - writer.py/consumer.py only ever
+    # pattern-subscribe to shadowtracer.t.*.alerts.
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    topic = alerts_topic_for_tenant(tenant)
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
     admin.create_topics([NewTopic(topic, num_partitions=4, replication_factor=1)])
     time.sleep(1)
 
-    tenant = f"t-{uuid.uuid4().hex[:8]}"
-    insert_tenant(db, tenant)
     marker = uuid.uuid4().hex[:8]
     group_id = f"test-correlate-split-{marker}"
     n_agents = 8
@@ -338,16 +363,17 @@ def test_two_correlation_workers_split_partitions_nothing_processed_twice(kafka_
         stop_flag2.set()
         thread1.join(timeout=5)
         thread2.join(timeout=5)
-        admin.delete_topics([topic])
+        delete_topics_and_wait(admin, [topic])
 
 
-def _drain_dead_letter_topic(kafka_bootstrap, expected_marker, timeout=15):
+def _drain_dead_letter_topic(kafka_bootstrap, tenant_key, expected_marker, timeout=15):
     consumer = Consumer({
         "bootstrap.servers": kafka_bootstrap,
         "group.id": f"test-dlt-drain-{uuid.uuid4().hex[:8]}",
         "auto.offset.reset": "earliest",
+        **kafka_client_config_from_env(),
     })
-    consumer.subscribe([DEAD_LETTER_TOPIC])
+    consumer.subscribe([dead_letter_topic_for_tenant(tenant_key)])
     deadline = time.monotonic() + timeout
     found = None
     while time.monotonic() < deadline:
@@ -360,7 +386,7 @@ def _drain_dead_letter_topic(kafka_bootstrap, expected_marker, timeout=15):
 
 
 def test_correlator_stays_up_when_dead_letter_clickhouse_insert_fails(
-    kafka_bootstrap, kafka_topic, database_url, db, ch_client,
+    kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db, ch_client,
 ):
     """Dead-letter-ClickHouse incident (2026-10-08) hardening, at the real
     consumer.run() level: the dead_letter_events table itself is
@@ -373,8 +399,7 @@ def test_correlator_stays_up_when_dead_letter_clickhouse_insert_fails(
     attempt - see dead_letter.py), and must count dead_letter_ch_failures
     - and the good alert right behind it on the same partition must still
     process, proving the partition isn't wedged by this either."""
-    tenant = f"t-{uuid.uuid4().hex[:8]}"
-    insert_tenant(db, tenant)
+    tenant = kafka_tenant_key  # Phase 5.6 Item 1: kafka_topic's own tenant, not a separate one
     marker = uuid.uuid4().hex[:8]
     agent = f"agent-{marker}"
     bad_timestamp = _alert(agent, "9.9.9.9", f"{marker}.bad-ts", timestamp="2026-10-04T05:00:118.000+0000")
@@ -404,7 +429,7 @@ def test_correlator_stays_up_when_dead_letter_clickhouse_insert_fails(
             )
 
             assert thread.is_alive(), "correlator must never crash when the dead-letter ClickHouse insert fails"
-            found = _drain_dead_letter_topic(kafka_bootstrap, f"{marker}.bad-ts")
+            found = _drain_dead_letter_topic(kafka_bootstrap, tenant, f"{marker}.bad-ts")
             assert found is not None, "the Kafka dead-letter topic copy must still land even when ClickHouse fails"
             assert metrics.snapshot().get("dead_letter_ch_failures", 0) >= 1
         finally:
@@ -417,19 +442,26 @@ def test_correlator_stays_up_when_dead_letter_clickhouse_insert_fails(
 
 
 def test_correlator_dead_letters_unknown_tenant_known_tenant_still_processes(
-    kafka_bootstrap, kafka_topic, database_url, db, ch_client, lab_env,
+    kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db, ch_client, lab_env,
 ):
     """Phase 5C Step 0: a tenant_key with no backing tenants row must be
     dead-lettered (error="unknown_tenant"), never create an incident -
-    proven alongside a real, flagged-as-test tenant (created here, cleaned
-    up by `db`'s own teardown) whose otherwise-identical alert still
-    lands normally, so this isn't just "the correlator dead-letters
-    everything right now"."""
-    import clickhouse_connect
+    proven alongside kafka_topic's own real, flagged-as-test tenant
+    whose otherwise-identical alert still lands normally, so this isn't
+    just "the correlator dead-letters everything right now".
 
-    known_tenant = f"test-flagged-{uuid.uuid4().hex[:8]}"
-    unknown_tenant = f"test-unknown-{uuid.uuid4().hex[:8]}"  # deliberately never inserted into tenants
-    insert_tenant(db, known_tenant)
+    Phase 5.6 Item 1: "unknown tenant" needs its own topic (a real
+    producer ACL was granted for it) with no matching tenants row -
+    kafka_topic's own topic always has one by construction."""
+    import clickhouse_connect
+    from confluent_kafka.admin import AdminClient, NewTopic
+
+    known_tenant = kafka_tenant_key
+    unknown_tenant = f"test-unknown-{uuid.uuid4().hex[:8]}"  # topic provisioned below, deliberately never inserted into tenants
+    unknown_topic = alerts_topic_for_tenant(unknown_tenant)
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
+    admin.create_topics([NewTopic(unknown_topic, num_partitions=1, replication_factor=1)])
+    time.sleep(1)
     marker = uuid.uuid4().hex[:8]
     known_agent = f"agent-known-{marker}"
     unknown_agent = f"agent-unknown-{marker}"
@@ -448,7 +480,7 @@ def test_correlator_dead_letters_unknown_tenant_known_tenant_still_processes(
     stop_flag, thread, metrics = _start_consumer(kafka_bootstrap, kafka_topic, database_url, ch_client=ch_client)
     try:
         _produce(kafka_bootstrap, kafka_topic, [_alert(known_agent, "9.9.9.9", f"{marker}.known")], tenant_key=known_tenant)
-        _produce(kafka_bootstrap, kafka_topic, [_alert(unknown_agent, "9.9.9.9", f"{marker}.unknown")], tenant_key=unknown_tenant)
+        _produce(kafka_bootstrap, unknown_topic, [_alert(unknown_agent, "9.9.9.9", f"{marker}.unknown")], tenant_key=unknown_tenant)
 
         deadline = time.monotonic() + 20
         row = dl_count = None
@@ -475,10 +507,16 @@ def test_correlator_dead_letters_unknown_tenant_known_tenant_still_processes(
         thread.join(timeout=5)
         poll_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{unknown_tenant}'")
         poll_client.close()
+        # The dead-letter topic was never explicitly created above, but
+        # the correlator's own dead-letter produce for the unknown-tenant
+        # event brings it into existence anyway - confirmed left behind
+        # every run until this was added (same gap as writer.py's own
+        # equivalent test).
+        delete_topics_and_wait(admin, [unknown_topic, dead_letter_topic_for_tenant(unknown_tenant)])
 
 
 def test_correlator_dead_letters_unsupported_envelope_version_known_version_still_processes(
-    kafka_bootstrap, kafka_topic, database_url, db, ch_client, lab_env,
+    kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db, ch_client, lab_env,
 ):
     """Phase 5.6 Item 4: an envelope_version header this correlator doesn't
     recognize must be dead-lettered (error starts "unsupported_envelope_
@@ -487,8 +525,7 @@ def test_correlator_dead_letters_unsupported_envelope_version_known_version_stil
     import clickhouse_connect
     from shadowtracer_correlate.consumer import ENVELOPE_VERSION
 
-    tenant_key = f"test-flagged-{uuid.uuid4().hex[:8]}"
-    insert_tenant(db, tenant_key)
+    tenant_key = kafka_tenant_key  # Phase 5.6 Item 1: kafka_topic's own tenant, not a separate one
     marker = uuid.uuid4().hex[:8]
     known_agent = f"agent-known-{marker}"
     future_agent = f"agent-future-{marker}"
@@ -500,10 +537,10 @@ def test_correlator_dead_letters_unsupported_envelope_version_known_version_stil
 
     stop_flag, thread, metrics = _start_consumer(kafka_bootstrap, kafka_topic, database_url, ch_client=ch_client)
     try:
-        producer = Producer({"bootstrap.servers": kafka_bootstrap})
+        producer = Producer({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
         producer.produce(
             kafka_topic, value=_alert(known_agent, "9.9.9.9", f"{marker}.known").encode(),
-            key=f"{tenant_key}:{known_agent}".encode(),
+            key=known_agent.encode(),
             headers=[
                 ("tenant_id", tenant_key.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json"),
                 ("envelope_version", str(ENVELOPE_VERSION).encode()),
@@ -511,7 +548,7 @@ def test_correlator_dead_letters_unsupported_envelope_version_known_version_stil
         )
         producer.produce(
             kafka_topic, value=_alert(future_agent, "9.9.9.9", f"{marker}.future").encode(),
-            key=f"{tenant_key}:{future_agent}".encode(),
+            key=future_agent.encode(),
             headers=[
                 ("tenant_id", tenant_key.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json"),
                 ("envelope_version", b"99"),
@@ -519,7 +556,10 @@ def test_correlator_dead_letters_unsupported_envelope_version_known_version_stil
         )
         producer.flush(30)
 
-        deadline = time.monotonic() + 20
+        # 40s, not 20s - group-join latency under a busy shared test cluster;
+        # see test_writer.py's test_writer_is_actually_running_and_draining_
+        # not_just_callable's comment on this exact margin.
+        deadline = time.monotonic() + 40
         row = dl_count = None
         while time.monotonic() < deadline:
             row = db.execute(

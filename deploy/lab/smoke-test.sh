@@ -21,6 +21,13 @@ cd "$(dirname "$0")" || exit 1
 if [ -f .env ]; then
     set -a; source .env; set +a
 fi
+# Phase 5.6 Item 1: admin (super-user, bypasses ACLs) - the one Python
+# Kafka client in this script (dlt_watermark_sum) is an operator
+# diagnostic, not a real pipeline component.
+export KAFKA_SECURITY_PROTOCOL=SASL_SSL
+export KAFKA_SASL_USERNAME=admin
+export KAFKA_SASL_PASSWORD="${KAFKA_ADMIN_PASSWORD:-}"
+export KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"
 # Rebrand Pass C prep: one setting for the install dir, default unchanged -
 # see docs/design/REBRAND_PASS_C.md.
 SHADOWTRACER_INSTALL_DIR="${SHADOWTRACER_INSTALL_DIR:-/var/ossec}"
@@ -37,18 +44,22 @@ check() {
 }
 
 echo "--- bringing up the lab ---"
-# Kafka first, alone: the events topic must be explicitly provisioned
-# (create-kafka-topics.sh - 24 partitions, see DECISIONS.md) before
-# shipper/writer start and race it via auto.create.topics.enable's
-# implicit 1-partition default.
+# Kafka first, alone: each tenant's topic pair must be explicitly
+# provisioned (create-kafka-topics.sh - 3 partitions each, Phase 5.6
+# Item 1) before shipper/writer start and race it via
+# auto.create.topics.enable's implicit 1-partition default.
 docker compose up -d kafka
+# Phase 5.6 Item 1: kafka's own healthcheck already authenticates as
+# admin (docker-compose.yml) - waiting on docker's own health status
+# instead of a raw unauthenticated kafka-topics.sh call, which the
+# SASL_SSL broker now refuses outright (found the hard way: the old
+# unauthenticated check just hung until this script's own 60s timeout).
 waited=0
-until docker exec shadowtracer-lab-kafka-1 /opt/kafka/bin/kafka-topics.sh \
-    --bootstrap-server localhost:9092 --list >/dev/null 2>&1; do
+until [ "$(docker inspect -f '{{.State.Health.Status}}' shadowtracer-lab-kafka-1 2>/dev/null)" = "healthy" ]; do
     sleep 2
     waited=$((waited + 2))
-    if [ "$waited" -ge 60 ]; then
-        echo "FAIL: kafka did not become ready within 60s"
+    if [ "$waited" -ge 120 ]; then
+        echo "FAIL: kafka did not become healthy within 120s"
         exit 1
     fi
 done
@@ -225,10 +236,16 @@ dl_before="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client --
 dl_before2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client --query "$DLT_COUNT_QUERY")"
 
 dlt_watermark_sum() {
-    ../../shadowtracer/ingest/.venv/bin/python3 -c '
+    # Phase 5.6 Item 1: this batch is injected via shipper-worker-test
+    # (the test tenant), so its dead letters land on THAT tenant's own
+    # dead-letter topic now, not one shared shadowtracer.events.dead-letter.
+    ../../shadowtracer/ingest/.venv/bin/python3 -c "
+import sys
+sys.path.insert(0, '../../shadowtracer/ingest')
 from confluent_kafka import Consumer, TopicPartition
-consumer = Consumer({"bootstrap.servers": "127.0.0.1:9094", "group.id": "smoke-test-dlt-watermark"})
-topic = "shadowtracer.events.dead-letter"
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
+consumer = Consumer({'bootstrap.servers': '127.0.0.1:9094', 'group.id': 'smoke-test-dlt-watermark', **kafka_client_config_from_env()})
+topic = 'shadowtracer.t.${TEST_TENANT_KEY}.dead-letter'
 md = consumer.list_topics(topic, timeout=10).topics[topic]
 total = 0
 for p in md.partitions:
@@ -236,7 +253,7 @@ for p in md.partitions:
     total += high
 consumer.close()
 print(total)
-'
+"
 }
 dlt_offset_before="$(dlt_watermark_sum)"
 

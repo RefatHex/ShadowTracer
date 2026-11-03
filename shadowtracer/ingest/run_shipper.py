@@ -4,7 +4,11 @@
 Env vars:
   TENANT_ID, MANAGER_NAME, ALERTS_PATH (required)
   ARCHIVES_PATH (optional - only set for tenants with raw events enabled)
-  KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, OFFSET_FILE, METRICS_PORT
+  KAFKA_BOOTSTRAP_SERVERS, OFFSET_FILE, METRICS_PORT (no KAFKA_TOPIC any
+    more - Phase 5.6 Item 1 derives the topic from TENANT_ID)
+  KAFKA_SECURITY_PROTOCOL, KAFKA_SASL_MECHANISM, KAFKA_SASL_USERNAME,
+    KAFKA_SASL_PASSWORD, KAFKA_SSL_CA_LOCATION - optional, defaults to
+    PLAINTEXT if KAFKA_SECURITY_PROTOCOL isn't set (kafka_security.py)
   CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD,
   CLICKHOUSE_DATABASE - optional; a dead-lettered line always goes to the
   Kafka dead-letter topic regardless, these only add the queryable
@@ -20,6 +24,7 @@ import threading
 import clickhouse_connect
 
 from shadowtracer_ingest import shipper
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 from shadowtracer_ingest.metrics import Metrics, serve_metrics
 from shadowtracer_ingest.retry import retry_with_backoff
 
@@ -58,9 +63,9 @@ shipper.run(
     alerts_path=os.environ["ALERTS_PATH"],
     archives_path=os.environ.get("ARCHIVES_PATH") or None,
     bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9094"),
-    topic=os.environ.get("KAFKA_TOPIC", "shadowtracer.events.raw"),
     offset_file=os.environ.get("OFFSET_FILE", "/tmp/shipper-offsets.json"),
     metrics=metrics,
     stop_flag=stop_flag,
     ch_client=ch_client,
+    kafka_client_config=kafka_client_config_from_env(),
 )

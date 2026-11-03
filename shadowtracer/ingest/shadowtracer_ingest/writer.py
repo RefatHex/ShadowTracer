@@ -46,9 +46,10 @@ from sqlalchemy import create_engine
 from .dead_letter import send_to_dead_letter
 from .metrics import Metrics
 from .normalizer import normalize_alert
-from .retry import retry_with_backoff
+from .retry import retry_with_backoff, consumer_heartbeat
 from .shipper import ENVELOPE_VERSION
 from .tenants import TenantCache
+from .topics import ALERTS_TOPIC_PATTERN, tenant_from_alerts_topic
 
 INSERT_BASE_DELAY_SECONDS = 1.0
 INSERT_MAX_DELAY_SECONDS = 30.0
@@ -151,7 +152,6 @@ class _FailoverClickHouse:
 
 def run(
     bootstrap_servers: str,
-    topic: str,
     group_id: str,
     clickhouse_hosts: list[tuple[str, int]],
     clickhouse_user: str,
@@ -161,17 +161,42 @@ def run(
     metrics: Metrics,
     stop_flag,
     started_flag=None,
+    kafka_client_config: dict | None = None,
 ):
+    """Phase 5.6 Item 1: no single `topic` any more - every tenant has its
+    own (topics.py), so this subscribes to ALERTS_TOPIC_PATTERN (a regex,
+    not a literal name - the leading "^" is what tells confluent_kafka/
+    librdkafka to treat it as one) and picks up every tenant's alerts
+    topic at once, including ones created after this process started
+    (bounded by topic.metadata.refresh.interval.ms).
+
+    kafka_client_config carries whatever TLS/SASL settings this
+    deployment needs (security.protocol, sasl.mechanism, sasl.username/
+    password, ssl.ca.location, ...) - merged into both the Consumer and
+    the dead-letter Producer's config, same credential either way since
+    this component only ever needs one role's worth of ACLs."""
+    kafka_client_config = kafka_client_config or {}
     consumer = Consumer({
         "bootstrap.servers": bootstrap_servers,
         "group.id": group_id,
         "enable.auto.commit": False,
         "auto.offset.reset": "earliest",
+        # Phase 5.6 Item 1: librdkafka's default (300000ms/5min) is how
+        # often a PATTERN subscription re-checks the broker's topic list
+        # for new matches - confirmed for real (a brand-new tenant's
+        # topic, created and immediately produced to, took anywhere from
+        # ~27s to ~206s to even show up in this group's own `--describe`
+        # output across repeated measurements, both well within that 5min
+        # ceiling). 10s makes a brand-new tenant's first event land
+        # promptly and consistently instead of depending on where in a
+        # 5-minute window its topic happened to be created.
+        "topic.metadata.refresh.interval.ms": 10000,
+        **kafka_client_config,
     })
-    consumer.subscribe([topic])
+    consumer.subscribe([ALERTS_TOPIC_PATTERN])
 
     ch = _FailoverClickHouse(clickhouse_hosts, clickhouse_user, clickhouse_password, clickhouse_database)
-    dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers})
+    dead_letter_producer = Producer({"bootstrap.servers": bootstrap_servers, **kafka_client_config})
     # Phase 5C Step 0: a forged/stale/deleted tenant_key must never create
     # silent orphaned ClickHouse rows - see tenants.py's own docstring for
     # why this is a periodically-refreshed cache, not a query per message.
@@ -223,13 +248,25 @@ def run(
                 by_partition.setdefault((msg.topic(), msg.partition()), []).append(msg)
 
             for (msg_topic, partition), msgs in sorted(by_partition.items()):
+                # Phase 5.6 Item 1: the TRUSTED identity is the topic this
+                # message was actually read from - a per-tenant producer
+                # ACL is what makes it trustworthy (docs/design/
+                # KAFKA_AUTH.md), not the header below. Every message in
+                # this group shares one topic, so this is computed once.
+                # tenant_from_alerts_topic() returning None here would mean
+                # a non-tenant topic matched ALERTS_TOPIC_PATTERN, which
+                # can't happen if every topic this writer is subscribed to
+                # was actually created via topics.alerts_topic_for_tenant -
+                # loud enough to want a KeyError-shaped failure, not a
+                # silent skip.
+                topic_tenant = tenant_from_alerts_topic(msg_topic)
                 rows = []
                 for msg in msgs:
-                    tenant_id = None
+                    header_tenant_id = None
                     envelope_version_raw = None
                     for k, v in (msg.headers() or []):
                         if k == "tenant_id":
-                            tenant_id = v.decode()
+                            header_tenant_id = v.decode()
                         elif k == "envelope_version":
                             envelope_version_raw = v.decode()
                     # errors="replace", never strict: invalid UTF-8 bytes in
@@ -238,6 +275,34 @@ def run(
                     # replaced bytes fail JSON parsing naturally below and
                     # get dead-lettered there instead.
                     raw_line = msg.value().decode("utf-8", errors="replace")
+                    # Phase 5.6 Item 1: a header that's PRESENT but
+                    # disagrees with the topic it actually arrived on is
+                    # the one thing a per-tenant ACL alone can't catch (a
+                    # shipper can still write a false claim into its OWN
+                    # tenant's topic) - dead-lettered, trusting the topic,
+                    # never the header, for where this ships. A MISSING
+                    # header (every message produced before this item, or
+                    # any producer that just doesn't bother) makes no claim
+                    # to disagree with, so it's not an error - same
+                    # backward-compat stance Item 4 already took for a
+                    # missing envelope_version header.
+                    if header_tenant_id is not None and header_tenant_id != topic_tenant:
+                        metrics.incr("messages_failed")
+                        retry_with_backoff(
+                            lambda: send_to_dead_letter(
+                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=topic_tenant,
+                                component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
+                                error=f"tenant_topic_mismatch: topic claims {topic_tenant!r}, header claims {header_tenant_id!r}",
+                                raw_event=raw_line, metrics=metrics,
+                            ),
+                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            poll_fn=lambda: consumer_heartbeat(consumer),
+                            on_retry=lambda attempt, exc2: logger.warning(
+                                "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
+                            ),
+                        )
+                        continue
                     # Phase 5.6 Item 4: a missing header predates this change
                     # (treated as version 1, the only shape that ever
                     # existed before it) - a PRESENT header this writer
@@ -249,13 +314,14 @@ def run(
                         metrics.incr("messages_failed")
                         retry_with_backoff(
                             lambda: send_to_dead_letter(
-                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=tenant_id,
+                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=topic_tenant,
                                 component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
                                 error=f"unsupported_envelope_version: got {envelope_version_raw!r}, this writer only understands {ENVELOPE_VERSION}",
                                 raw_event=raw_line, metrics=metrics,
                             ),
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            poll_fn=lambda: consumer_heartbeat(consumer),
                             on_retry=lambda attempt, exc2: logger.warning(
                                 "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
                             ),
@@ -266,23 +332,30 @@ def run(
                     # before normalize_alert, same permanent-bad-data path
                     # (never retried: this tenant_key isn't about to start
                     # existing mid-retry any more than a bad timestamp is).
-                    if not tenant_cache.is_known(tenant_id or ""):
+                    # Phase 5.6 Item 1: checks topic_tenant now, not a
+                    # header value - a topic only exists because its
+                    # tenant was provisioned (create-kafka-topics.sh), so
+                    # this now only ever fires for a tenant deleted AFTER
+                    # its topic was created, not a forged claim (the
+                    # mismatch check above already catches that).
+                    if not tenant_cache.is_known(topic_tenant or ""):
                         metrics.incr("messages_failed")
                         retry_with_backoff(
                             lambda: send_to_dead_letter(
-                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=tenant_id,
+                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=topic_tenant,
                                 component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
                                 error="unknown_tenant", raw_event=raw_line, metrics=metrics,
                             ),
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            poll_fn=lambda: consumer_heartbeat(consumer),
                             on_retry=lambda attempt, exc2: logger.warning(
                                 "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
                             ),
                         )
                         continue
                     try:
-                        ev = normalize_alert(raw_line, tenant_id or "")
+                        ev = normalize_alert(raw_line, topic_tenant or "")
                     except Exception as exc:  # noqa: BLE001 - any parse/normalize failure is permanent, never retried: dead-letter and move on
                         metrics.incr("messages_failed")
                         # The dead-letter call itself only ever raises for
@@ -292,12 +365,13 @@ def run(
                         # never silently lost with no durable record at all.
                         retry_with_backoff(
                             lambda: send_to_dead_letter(
-                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=tenant_id,
+                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=topic_tenant,
                                 component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
                                 error=f"{type(exc).__name__}: {exc}", raw_event=raw_line, metrics=metrics,
                             ),
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            poll_fn=lambda: consumer_heartbeat(consumer),
                             on_retry=lambda attempt, exc2: logger.warning(
                                 "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
                             ),
@@ -339,6 +413,7 @@ def run(
                             ),
                             max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                             max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                            poll_fn=lambda: consumer_heartbeat(consumer),
                             on_retry=lambda attempt, exc: logger.warning(
                                 "ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc,
                             ),
@@ -358,6 +433,7 @@ def run(
                                 ),
                                 max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
                                 max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                                poll_fn=lambda: consumer_heartbeat(consumer),
                                 on_retry=lambda attempt, exc: logger.warning(
                                     "ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc,
                                 ),

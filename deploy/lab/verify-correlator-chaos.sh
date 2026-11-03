@@ -37,6 +37,14 @@
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 set -a; source .env; set +a
+# Phase 5.6 Item 1: admin (super-user, bypasses ACLs) - every Python
+# Kafka client in this script is an operator/test-harness tool, not a
+# real pipeline component, same credential create-kafka-topics.sh/
+# create-kafka-acls.sh already use for the same reason.
+export KAFKA_SECURITY_PROTOCOL=SASL_SSL
+export KAFKA_SASL_USERNAME=admin
+export KAFKA_SASL_PASSWORD="$KAFKA_ADMIN_PASSWORD"
+export KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"
 
 GROUP=shadowtracer-correlate
 KAFKA_BOOTSTRAP=127.0.0.1:9094
@@ -64,15 +72,38 @@ check() {
 }
 
 describe_group() {
+    # Phase 5.6 Item 1: admin (super-user, bypasses ACLs) - this is an
+    # operator diagnostic, not a pipeline component, same credential
+    # create-kafka-topics.sh/create-kafka-acls.sh already use.
     docker exec shadowtracer-lab-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh \
-        --bootstrap-server localhost:9092 --describe --group "$GROUP"
+        --bootstrap-server localhost:9092 --command-config /etc/kafka/certs/admin-client.properties \
+        --describe --group "$GROUP"
+}
+
+live_alert_topics() {
+    # `--describe` lists EVERY topic-partition this group has ever
+    # committed an offset for, forever (until offsets.retention.minutes
+    # expires them, default 7 days) - including ones from long-deleted
+    # ephemeral test topics (confirmed for real: hundreds of per-pytest-
+    # test topics created/deleted over this session still show up here,
+    # attributed to whichever member is currently in the group, even
+    # right after a fresh restart). A raw grep -c over `describe_group`
+    # output counts that historical noise too, so filter to topics that
+    # actually exist right now before counting anything.
+    docker exec shadowtracer-lab-kafka-1 /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server localhost:9092 --command-config /etc/kafka/certs/admin-client.properties \
+        --list 2>/dev/null | grep -E '^shadowtracer\.t\..+\.alerts$'
 }
 
 owner_of_partition() {
-    # $1 = partition number, $2 = a `describe_group` output to read from.
-    # Column layout: GROUP TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET
-    # LAG CONSUMER-ID HOST CLIENT-ID. HOST prints as /x.x.x.x.
-    echo "$2" | awk -v p="$1" '$3 == p { print $8 }' | head -1 | tr -d '/'
+    # $1 = partition number, $2 = a `describe_group` output to read from,
+    # $3 = topic. Column layout: GROUP TOPIC PARTITION CURRENT-OFFSET
+    # LOG-END-OFFSET LAG CONSUMER-ID HOST CLIENT-ID. HOST prints as
+    # /x.x.x.x. Phase 5.6 Item 1: must filter by topic now, not just
+    # partition - every tenant's alerts topic has its own partitions
+    # 0..N, so partition number alone is ambiguous across topics once
+    # this group subscribes to more than one.
+    echo "$2" | awk -v p="$1" -v t="$3" '$2 == t && $3 == p { print $8 }' | head -1 | tr -d '/'
 }
 
 psql_query() {
@@ -97,8 +128,10 @@ produce_probe() {
     # partition confluent_kafka's producer actually assigned it to -
     # read off the real delivery report, never computed/guessed locally.
     "$PY" - "$KAFKA_BOOTSTRAP" "$TEST_TENANT_KEY" "$1" <<'PYEOF'
-import json, sys, time
+import json, os, sys, time
+sys.path.insert(0, os.path.join("..", "..", "shadowtracer", "ingest"))
 from confluent_kafka import Producer
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 
 bootstrap, tenant, agent = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -116,15 +149,15 @@ def alert(alert_id):
         "full_log": "Failed password for invalid user root from 203.0.113.77 port 51000 ssh2",
     })
 
-producer = Producer({"bootstrap.servers": bootstrap})
-key = f"{tenant}:{agent}".encode()
+producer = Producer({"bootstrap.servers": bootstrap, **kafka_client_config_from_env()})
+key = agent.encode()  # Phase 5.6 Item 1: tenant is the topic now, not part of the key
 result = {}
 
 def on_delivery(err, msg):
     if err is None:
         result["partition"] = msg.partition()
 
-producer.produce("shadowtracer.events.raw", key=key, value=alert(f"{agent}.probe").encode(),
+producer.produce(f"shadowtracer.t.{tenant}.alerts", key=key, value=alert(f"{agent}.probe").encode(),
                   headers=[("tenant_id", tenant.encode())], on_delivery=on_delivery)
 producer.flush(10)
 print(result.get("partition", -1))
@@ -143,7 +176,7 @@ find_agent_for_owner() {
         local candidate="chaos-${marker}-try${attempt}"
         local partition owner
         partition="$(produce_probe "$candidate")"
-        owner="$(owner_of_partition "$partition" "$(describe_group)")"
+        owner="$(owner_of_partition "$partition" "$(describe_group)" "shadowtracer.t.${TEST_TENANT_KEY}.alerts")"
         echo "  attempt $attempt: agent=$candidate -> partition=$partition owned by $owner" >&2
         if [ "$owner" = "$target_ip" ]; then
             echo "AGENT=$candidate"
@@ -161,15 +194,24 @@ run_cycle() {
     echo
     echo "=== Run $run_label: target owner = $victim_name ($target_ip) ==="
     echo "--- initial correlator group split ---"
-    local initial_describe c1_count c2_count total
+    local initial_describe live_topics live_count live_rows c1_count c2_count total
     initial_describe="$(describe_group)"
     echo "$initial_describe"
-    c1_count="$(echo "$initial_describe" | grep -c "$C1_IP" || true)"
-    c2_count="$(echo "$initial_describe" | grep -c "$C2_IP" || true)"
+    live_topics="$(live_alert_topics)"
+    live_count="$(echo "$live_topics" | grep -c . || true)"
+    # Filtered to topics that actually exist right now (see
+    # live_alert_topics' own comment) - never a hardcoded expected
+    # count, since the real number of tenants/partitions changes as
+    # tenants get provisioned/torn down over the life of this lab.
+    live_rows="$(echo "$initial_describe" | awk -v topics="$live_topics" '
+        BEGIN { n = split(topics, arr, "\n"); for (i = 1; i <= n; i++) want[arr[i]] = 1 }
+        ($2 in want)
+    ')"
+    c1_count="$(echo "$live_rows" | grep -c "$C1_IP" || true)"
+    c2_count="$(echo "$live_rows" | grep -c "$C2_IP" || true)"
     total=$((c1_count + c2_count))
-    check "[$run_label] correlate-1 owns 12 partitions before this run" "[ \"$c1_count\" = 12 ]"
-    check "[$run_label] correlate-2 owns 12 partitions before this run" "[ \"$c2_count\" = 12 ]"
-    check "[$run_label] total owned = 24 before this run" "[ \"$total\" = 24 ]"
+    check "[$run_label] every live partition is owned by exactly one of correlate-1/correlate-2 (c1=$c1_count c2=$c2_count, $live_count live topics)" \
+        "[ \"$total\" -gt 0 ] && [ \"$total\" = \"\$(echo \"\$live_rows\" | grep -c .)\" ]"
 
     echo "--- searching for an agent whose partition is owned by $victim_name ---"
     local marker
@@ -194,9 +236,11 @@ run_cycle() {
     local stream_output
     stream_output="$("$PY" - "$KAFKA_BOOTSTRAP" "$TEST_TENANT_KEY" "$agent" "$victim_name" "$N_STREAM" "$KILL_AFTER" "$RATE_HZ" \
         127.0.0.1 5432 "$POSTGRES_USER" "$POSTGRES_PASSWORD" "$POSTGRES_DB" <<'PYEOF'
-import json, sys, time, subprocess
+import json, os, sys, time, subprocess
 import psycopg2
+sys.path.insert(0, os.path.join("..", "..", "shadowtracer", "ingest"))
 from confluent_kafka import Producer
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 
 (bootstrap, tenant, agent, victim, n_stream, kill_after, rate_hz,
  pg_host, pg_port, pg_user, pg_password, pg_db) = sys.argv[1:13]
@@ -225,8 +269,8 @@ def get_count():
     row = cur.fetchone()
     return row[0] if row else None
 
-producer = Producer({"bootstrap.servers": bootstrap})
-key = f"{tenant}:{agent}".encode()
+producer = Producer({"bootstrap.servers": bootstrap, **kafka_client_config_from_env()})
+key = agent.encode()  # Phase 5.6 Item 1: tenant is the topic now, not part of the key
 interval = 1.0 / rate_hz
 
 kill_time = None
@@ -234,7 +278,7 @@ count_before_kill = None
 t_resume = None
 
 for i in range(1, n_stream + 1):
-    producer.produce("shadowtracer.events.raw", key=key, value=alert(f"{agent}.s{i}").encode(),
+    producer.produce(f"shadowtracer.t.{tenant}.alerts", key=key, value=alert(f"{agent}.s{i}").encode(),
                       headers=[("tenant_id", tenant.encode())])
     producer.poll(0)
     if i == kill_after:
@@ -355,15 +399,21 @@ PYEOF
     done
     check "[$run_label] $victim_name rejoined the group (owns >0 partitions again)" "[ \"$rejoined_count\" -gt 0 ]"
 
-    # Let the group fully re-stabilize to a clean 12/12 before the next
-    # run starts - otherwise its own "12/12 before this run" check can
-    # catch a mid-rebalance snapshot and flake.
+    # Let the group fully re-stabilize before the next run starts -
+    # otherwise its own "every live partition owned" check can catch a
+    # mid-rebalance snapshot and flake. Live-topic-filtered, same reason
+    # as the initial split check above - no hardcoded partition count.
     deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         final_describe="$(describe_group)"
-        c1_count="$(echo "$final_describe" | grep -c "$C1_IP" || true)"
-        c2_count="$(echo "$final_describe" | grep -c "$C2_IP" || true)"
-        [ "$c1_count" = 12 ] && [ "$c2_count" = 12 ] && break
+        live_topics="$(live_alert_topics)"
+        live_rows="$(echo "$final_describe" | awk -v topics="$live_topics" '
+            BEGIN { n = split(topics, arr, "\n"); for (i = 1; i <= n; i++) want[arr[i]] = 1 }
+            ($2 in want)
+        ')"
+        c1_count="$(echo "$live_rows" | grep -c "$C1_IP" || true)"
+        c2_count="$(echo "$live_rows" | grep -c "$C2_IP" || true)"
+        [ $((c1_count + c2_count)) -gt 0 ] && [ $((c1_count + c2_count)) = "$(echo "$live_rows" | grep -c .)" ] && break
         sleep 3
     done
     echo "post-rejoin split: correlate-1=$c1_count correlate-2=$c2_count"

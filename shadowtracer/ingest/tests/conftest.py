@@ -23,7 +23,27 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shadowtracer_ingest.clickhouse_schema import apply_schema
+from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 from shadowtracer_ingest.migrations import apply_migrations
+from shadowtracer_ingest.topics import alerts_topic_for_tenant, dead_letter_topic_for_tenant
+
+def delete_topics_and_wait(admin: AdminClient, topics: list[str], timeout: float = 10.0) -> None:
+    """confluent_kafka's delete_topics() returns immediately with a
+    future per topic - not waiting on them risks the broker never
+    actually receiving the request before the admin client (and its
+    underlying rd_kafka handle) gets torn down. Confirmed the hard way
+    this session: topics deleted this way were still listed by the
+    broker, with their full backlog intact, long after the test that
+    "deleted" them had already returned - the real mechanism behind
+    hours of orphaned-topic accumulation. Swallows per-topic errors
+    (already-gone is fine; this is cleanup, not an assertion)."""
+    futures = admin.delete_topics(topics)
+    for future in futures.values():
+        try:
+            future.result(timeout=timeout)
+        except Exception:
+            pass
+
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "lab", ".env")
 INGEST_DIR = os.path.join(os.path.dirname(__file__), "..")
@@ -195,13 +215,35 @@ def kafka_bootstrap():
 
 
 @pytest.fixture
-def kafka_topic(kafka_bootstrap):
-    name = f"shadowtracer.test.{uuid.uuid4().hex[:8]}"
-    admin = AdminClient({"bootstrap.servers": kafka_bootstrap})
-    admin.create_topics([NewTopic(name, num_partitions=1, replication_factor=1)])
+def kafka_tenant_key(pg_db):
+    """Phase 5.6 Item 1: a fresh, random tenant per test - real tenants
+    row AND real topic pair (kafka_topic below), since tenant identity
+    is now bound to a topic, not just a header claim. Most tests only
+    need kafka_topic; this is exposed separately for tests that need to
+    reference the tenant_key itself (e.g. a dead-letter topic lookup, or
+    an explicit tenant_topic_mismatch test using a SECOND tenant)."""
+    tenant_key = f"test-{uuid.uuid4().hex[:8]}"
+    insert_tenant(pg_db, tenant_key)
+    return tenant_key
+
+
+@pytest.fixture
+def kafka_topic(kafka_bootstrap, kafka_tenant_key):
+    """Returns kafka_tenant_key's ALERTS topic name - same return shape
+    (a plain topic-name string) every existing test already expects, so
+    this stays a drop-in replacement for the pre-Item-1 arbitrary-name
+    topic. Also provisions the matching dead-letter topic, since
+    writer.py/consumer.py now dead-letter to it unconditionally."""
+    alerts_topic = alerts_topic_for_tenant(kafka_tenant_key)
+    dead_letter_topic = dead_letter_topic_for_tenant(kafka_tenant_key)
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
+    admin.create_topics([
+        NewTopic(alerts_topic, num_partitions=1, replication_factor=1),
+        NewTopic(dead_letter_topic, num_partitions=1, replication_factor=1),
+    ])
     time.sleep(1)  # topic metadata propagation
-    yield name
-    admin.delete_topics([name])
+    yield alerts_topic
+    delete_topics_and_wait(admin, [alerts_topic, dead_letter_topic])
 
 
 @pytest.fixture

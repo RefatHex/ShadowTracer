@@ -8,7 +8,25 @@ instead of hammering a down dependency in a tight loop.
 import time
 
 
-def retry_with_backoff(fn, *, max_attempts=5, base_delay=1.0, max_delay=30.0, stop_flag=None, on_retry=None):
+def consumer_heartbeat(consumer) -> None:
+    """Resets librdkafka's max.poll.interval.ms liveness timer without
+    risking message loss: a bare consumer.poll(0) can itself dequeue
+    and return a real message if one is already prefetched, which
+    would then be silently discarded by a caller that only wanted a
+    heartbeat - never processed, never committed, effectively lost for
+    the lifetime of the run. Pausing every currently-assigned partition
+    first guarantees poll(0) returns None, since there is nothing left
+    to fetch from - it still drives the group-liveness bookkeeping
+    poll() exists for."""
+    assignment = consumer.assignment()
+    if assignment:
+        consumer.pause(assignment)
+    consumer.poll(0)
+    if assignment:
+        consumer.resume(assignment)
+
+
+def retry_with_backoff(fn, *, max_attempts=5, base_delay=1.0, max_delay=30.0, stop_flag=None, on_retry=None, poll_fn=None):
     """Calls fn() up to max_attempts times total, with exponential
     backoff between attempts (base_delay * 2**attempt, capped at
     max_delay). Returns fn()'s result on the first success. Re-raises the
@@ -20,7 +38,15 @@ def retry_with_backoff(fn, *, max_attempts=5, base_delay=1.0, max_delay=30.0, st
     for a graceful shutdown. Checks stop_flag between attempts, if given,
     so a graceful shutdown isn't blocked by a long backoff sleep -
     returns early (raising the last exception) if it fires during the
-    wait."""
+    wait.
+
+    poll_fn, if given, is called at least once per second during the
+    wait (e.g. lambda: consumer_heartbeat(consumer), not a bare
+    consumer.poll(0) - see that function's own docstring for why) - a
+    real incident showed a single unbroken wait here let a Kafka
+    consumer exceed max.poll.interval.ms and fall out of its group,
+    stalling every partition it owned (not just the one retry) until
+    the process was restarted."""
     attempt = 0
     while True:
         try:
@@ -32,8 +58,18 @@ def retry_with_backoff(fn, *, max_attempts=5, base_delay=1.0, max_delay=30.0, st
             if max_attempts is not None and attempt >= max_attempts:
                 raise
             delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-            if stop_flag is not None:
-                if stop_flag.wait(delay):
-                    raise
-            else:
-                time.sleep(delay)
+            remaining = delay
+            gave_up = False
+            while remaining > 0:
+                step = min(1.0, remaining)
+                if poll_fn is not None:
+                    poll_fn()
+                if stop_flag is not None:
+                    if stop_flag.wait(step):
+                        gave_up = True
+                        break
+                else:
+                    time.sleep(step)
+                remaining -= step
+            if gave_up:
+                raise

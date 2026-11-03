@@ -1,9 +1,13 @@
 # Kafka authentication and tenant binding (Phase 5.6 Item 1)
 
-Status: **design only, report and stop for approval.** Nothing implemented. This
-directly closes the #1 finding from `docs/design/THREAT_MODEL.md`'s ranked top 10
-("Kafka: plaintext, zero authentication, on every listener") and the follow-on #5
-finding ("tenant identity is asserted by the shipper into an unauthenticated bus").
+Status: **implemented and verified.** §2's original recommendation (option b,
+signed envelopes on a shared topic) was **not** what got built - the user
+approved option (a), per-tenant topics, specifically so a cross-tenant produce
+attempt is refused by the broker itself, not just detected downstream. See §4
+for what's real now. This directly closes the #1 finding from
+`docs/design/THREAT_MODEL.md`'s ranked top 10 ("Kafka: plaintext, zero
+authentication, on every listener") and the follow-on #5 finding ("tenant
+identity is asserted by the shipper into an unauthenticated bus").
 
 ## 0. Baseline facts (real, checked against the running lab)
 
@@ -144,19 +148,72 @@ if/when per-tenant Kafka-level blast-radius containment becomes a real requireme
 just data-integrity binding) - the same kind of condition `TENANCY.md`'s own option
 (B) revisit note already names.
 
-## 3. VERIFY plan (after approval, not run yet)
+## 3. What actually got approved and built: option (a), not (b)
 
-1. **Unauthenticated client rejected**: attempt a plain `confluent_kafka.Producer`
-   connection with no SASL config against the `SASL_SSL` listener; expect a real
-   connection/auth failure, captured directly.
-2. **Tenant A's shipper credential cannot land data as tenant B**: run a real shipper
-   process with tenant A's credentials and signing key, but a forged `tenant_id`
-   header claiming tenant B (no valid signature for B) - confirm the message is
-   dead-lettered with `tenant_signature_mismatch`, not processed as tenant B's data,
-   and that zero rows land in tenant B's incidents/events.
-3. **Full `smoke-test.sh` and the chaos tests** (`verify-correlator-chaos.sh`,
-   `verify-phase5b.sh`) pass with auth fully on - proving this doesn't silently break
-   the failover/rebalance behavior those scripts already exercise.
+The user's own decision, verbatim: implement option (a) - per-tenant topics
+(`shadowtracer.t.<tenant_key>.alerts` / `.dead-letter`), TLS + SASL/SCRAM for every
+client, broker-enforced per-component ACLs, consumers bound by topic-name pattern
+rather than a shared topic. The signed-envelope idea (option b) was explicitly
+rejected in favor of broker-level enforcement: a cross-tenant produce attempt must be
+refused by Kafka itself, not merely detected by application code after the fact.
 
-Waiting for approval before any implementation. Continuing with Items 2-10 in the
-meantime, per instruction.
+**Partitions: 3 per topic** (both alerts and dead-letter), not the old global 24.
+Justification (replaces the old entry, which sized for every tenant sharing one
+topic): headroom for 2 writer + 2 correlate replicas each needs at least 2 partitions
+to split work at all; 3 (not 2) leaves the same "N+1 for an odd-replica split"
+headroom the old 24-partition entry used. Per-tenant, under-provisioning ONE tenant's
+blast radius is just that tenant, not the whole system, and a new tenant's own count
+can be chosen fresh at onboarding against its real expected load, rather than guessed
+once for every future tenant combined the way the old global 24 had to be. See
+`deploy/lab/create-kafka-topics.sh`'s own comment for the full reasoning.
+
+**Keying**: `agent_id` alone now (`shipper.py`) - tenant is the topic itself, not part
+of the partition key, since the whole point of per-tenant topics is that tenant
+identity no longer needs to ride inside message metadata to be trusted.
+
+**Tenant identity model**: the topic a message was actually read from is the TRUSTED
+identity everywhere downstream (ClickHouse rows, tenant-existence checks, dead-letter
+routing) - never the message's own `tenant_id` header taken at face value, even though
+the header is still sent and still checked. A header that's PRESENT but disagrees with
+the topic it arrived on is dead-lettered as `tenant_topic_mismatch` - the one thing a
+per-tenant producer ACL alone can't catch (a shipper can still write a false header
+claim into its OWN tenant's topic). A MISSING header makes no claim to disagree with,
+so it's not an error - same backward-compat stance as Item 4's missing
+`envelope_version` header.
+
+## 4. VERIFY - real evidence, run against the live lab
+
+1. **Unauthenticated client rejected**: a plain `confluent_kafka.Producer` with no
+   SASL config against the `SASL_SSL` EXTERNAL listener (127.0.0.1:9094) was refused
+   outright - `Disconnected: connection closed by peer... after 1ms in state
+   APIVERSION_QUERY` - the broker never even completes protocol negotiation with an
+   unauthenticated client.
+2. **Tenant A's shipper credential cannot land data as tenant B - refused by the
+   broker**: the real `shipper` SCRAM credential (scoped to `TENANT_KEY`'s own two
+   topics) attempting to produce to `TEST_TENANT_KEY`'s alerts topic got back
+   `KafkaError{code=TOPIC_AUTHORIZATION_FAILED, val=29, str="Broker: Topic
+   authorization failed"}` - the broker's ACL authorizer rejects the produce attempt
+   before the message is ever written, not an application-level check after the
+   fact. Confirmed `shipper` can still produce to its OWN topic (`err: None`,
+   delivered to a real partition) and cannot even join a consumer group at all
+   (`GROUP_AUTHORIZATION_FAILED` - no Group ACL was ever granted to a producer-only
+   principal), proving the ACLs are real role separation, not a blanket grant.
+3. **Full `smoke-test.sh`**: passed, including the Kafka-specific checks (all 12
+   dead-letter writes landed on both ClickHouse replicas AND on the real per-tenant
+   Kafka dead-letter topic; no pipeline container restarted; the main lab tenant
+   received zero new incidents from this run's test traffic). Two unrelated FAILs
+   found and confirmed pre-existing, not caused by this item: `agent-ubuntu-1`/`-2`
+   lost their manager enrollment at some earlier point in this session's many
+   `docker compose down` cycles (`wazuh-agentd: ERROR: Invalid password. Unable to
+   add agent` in the agent's own log) - Wazuh agent enrollment, a completely
+   different system from Kafka, never touched by this item. Flagged for separate
+   follow-up, not fixed here.
+4. **`verify-correlator-chaos.sh` and `verify-phase5b.sh`**: updated for per-tenant
+   topics (topic names, keying, `owner_of_partition` now disambiguates by topic since
+   partition numbers are no longer globally unique across tenants) and re-run with
+   auth on - see `DECISIONS.md`'s Item 1 entry for the pass/fail detail.
+5. **Full ingest/correlate/console-backend pytest suites**, updated for per-tenant
+   topics (`kafka_topic`/`kafka_tenant_key` fixtures now provision a real tenant +
+   topic pair per test, not an arbitrary shared name) and a shared broad `test` SCRAM
+   credential (Read/Write/Describe/Create/Delete, scoped to this role only, never used
+   by a real pipeline component) - see `DECISIONS.md` for the real pass counts.

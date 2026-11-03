@@ -34,11 +34,16 @@ Usage: KAFKA_GROUP_ID=replay-unknown-tenant POSTGRES_HOST=... \\
   APP_DB_PASSWORD=... ./replay_unknown_tenant_dead_letters.py
 
 Env vars: same as run_writer.py (KAFKA_BOOTSTRAP_SERVERS, KAFKA_GROUP_ID),
-KAFKA_TOPIC (the RAW topic to replay onto, defaults to
-shadowtracer.events.raw), POSTGRES_HOST/POSTGRES_PORT/POSTGRES_DB/
-APP_DB_PASSWORD (to read the current tenants table), and
-DEAD_LETTER_TOPIC (defaults to dead_letter.DEAD_LETTER_TOPIC).
-"""
+POSTGRES_HOST/POSTGRES_PORT/POSTGRES_DB/APP_DB_PASSWORD (to read the
+current tenants table).
+
+Phase 5.6 Item 1: no KAFKA_TOPIC/DEAD_LETTER_TOPIC env vars any more -
+every tenant has its own topic pair (topics.py), so this pattern-
+subscribes across every tenant's dead-letter topic at once and replays
+each envelope onto THAT SAME tenant's own alerts topic, derived from the
+dead-letter topic each envelope actually came from (the trusted
+identity, same as writer.py/consumer.py - never the envelope's own
+self-reported tenant_key field, which predates per-tenant topics)."""
 
 import json
 import logging
@@ -47,7 +52,9 @@ import os
 from confluent_kafka import Consumer, Producer, TopicPartition
 from sqlalchemy import create_engine, text
 
-from shadowtracer_ingest.dead_letter import DEAD_LETTER_TOPIC
+from shadowtracer_ingest.topics import (
+    DEAD_LETTER_TOPIC_PATTERN, alerts_topic_for_tenant, tenant_from_dead_letter_topic,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -62,15 +69,16 @@ def known_tenants(database_url: str) -> set[str]:
         return set(conn.execute(text("SELECT tenant_key FROM tenants")).scalars().all())
 
 
-def replay(consumer: Consumer, producer: Producer, dead_letter_topic: str, raw_topic: str, tenants: set[str]) -> dict:
+def replay(consumer: Consumer, producer: Producer, tenants: set[str]) -> dict:
     """tenants is a snapshot taken once at startup - a tenant created
     WHILE this script runs won't be picked up until the next invocation;
     fine for a one-shot operator tool. Returns a stats dict."""
     stats = {"replayed": 0, "still_unknown": 0, "truncated": 0, "malformed": 0}
-    # Per partition: the first offset this run must NOT commit past,
-    # because its tenant is still unknown. Absent = nothing holding it back.
-    hold_at: dict[int, int] = {}
-    max_seen: dict[int, int] = {}
+    # Per (topic, partition) now, not just partition - Item 1 means
+    # multiple tenants' dead-letter topics are in play at once, and
+    # different tenants' topics can share the same partition number.
+    hold_at: dict[tuple[str, int], int] = {}
+    max_seen: dict[tuple[str, int], int] = {}
 
     empty_polls = 0
     while empty_polls < CONSECUTIVE_EMPTY_POLLS_TO_STOP:
@@ -83,8 +91,14 @@ def replay(consumer: Consumer, producer: Producer, dead_letter_topic: str, raw_t
             logger.warning("consumer error, skipping: %s", msg.error())
             continue
 
-        partition, offset = msg.partition(), msg.offset()
-        max_seen[partition] = offset
+        dead_letter_topic, partition, offset = msg.topic(), msg.partition(), msg.offset()
+        key = (dead_letter_topic, partition)
+        max_seen[key] = offset
+        # The trusted identity - which topic this envelope actually came
+        # from - never the envelope's own self-reported tenant_key field
+        # (predates per-tenant topics; same stance as writer.py/
+        # consumer.py's tenant_topic_mismatch check).
+        tenant_key = tenant_from_dead_letter_topic(dead_letter_topic)
 
         try:
             envelope = json.loads(msg.value().decode("utf-8"))
@@ -97,10 +111,9 @@ def replay(consumer: Consumer, producer: Producer, dead_letter_topic: str, raw_t
         if envelope.get("error") != "unknown_tenant":
             continue  # not this script's concern
 
-        tenant_key = envelope.get("tenant_key") or ""
         if tenant_key not in tenants:
             stats["still_unknown"] += 1
-            hold_at.setdefault(partition, offset)
+            hold_at.setdefault(key, offset)
             continue
 
         preview = envelope.get("raw_event_preview", "")
@@ -114,14 +127,17 @@ def replay(consumer: Consumer, producer: Producer, dead_letter_topic: str, raw_t
             )
             continue
 
-        producer.produce(raw_topic, value=preview.encode("utf-8"), headers=[("tenant_id", tenant_key.encode())])
+        producer.produce(
+            alerts_topic_for_tenant(tenant_key), value=preview.encode("utf-8"),
+            headers=[("tenant_id", tenant_key.encode())],
+        )
         stats["replayed"] += 1
 
     producer.flush(30)
 
     offsets_to_commit = [
-        TopicPartition(dead_letter_topic, partition, hold_at.get(partition, last_offset + 1))
-        for partition, last_offset in max_seen.items()
+        TopicPartition(topic, partition, hold_at.get((topic, partition), last_offset + 1))
+        for (topic, partition), last_offset in max_seen.items()
     ]
     if offsets_to_commit:
         consumer.commit(offsets=offsets_to_commit, asynchronous=False)
@@ -139,8 +155,6 @@ def main():
     logger.info("%d known tenant(s) at startup", len(tenants))
 
     bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9094")
-    raw_topic = os.environ.get("KAFKA_TOPIC", "shadowtracer.events.raw")
-    dead_letter_topic = os.environ.get("DEAD_LETTER_TOPIC", DEAD_LETTER_TOPIC)
 
     consumer = Consumer({
         "bootstrap.servers": bootstrap,
@@ -148,11 +162,11 @@ def main():
         "enable.auto.commit": False,
         "auto.offset.reset": "earliest",
     })
-    consumer.subscribe([dead_letter_topic])
+    consumer.subscribe([DEAD_LETTER_TOPIC_PATTERN])
     producer = Producer({"bootstrap.servers": bootstrap})
 
     try:
-        stats = replay(consumer, producer, dead_letter_topic, raw_topic, tenants)
+        stats = replay(consumer, producer, tenants)
     finally:
         consumer.close()
 

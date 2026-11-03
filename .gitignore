@@ -189,3 +189,7 @@ deploy/lab/alerts-worker-test/
 # committed, since it binds ports to 0.0.0.0 and only makes sense on
 # whichever host actually has a VM enrolling against this lab.
 deploy/lab/docker-compose.vm.yml
+# Phase 5.6 Item 1: self-signed lab CA + broker keystore for Kafka's
+# SASL_SSL listeners (generate-kafka-certs.sh) - generated per
+# environment, never committed, same as .env.
+deploy/lab/kafka-certs/

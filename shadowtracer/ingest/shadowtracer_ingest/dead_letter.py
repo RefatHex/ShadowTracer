@@ -43,9 +43,9 @@ import hashlib
 import json
 import logging
 
-logger = logging.getLogger(__name__)
+from .topics import dead_letter_topic_for_tenant
 
-DEAD_LETTER_TOPIC = "shadowtracer.events.dead-letter"
+logger = logging.getLogger(__name__)
 
 # Stored (both sinks) as a CAPPED PREVIEW plus the full payload's real size
 # and sha256 - never the full payload. Two reasons: a raw_event that's
@@ -83,6 +83,13 @@ def send_to_dead_letter(
     on `metrics` as dead_letter_ch_failures if given, but swallowed)."""
     failed_at = datetime.datetime.now(datetime.timezone.utc)
     tenant_key = tenant_key or ""
+    # Phase 5.6 Item 1: per-tenant topic, not one shared
+    # shadowtracer.events.dead-letter - every caller passes a tenant_key
+    # derived from a per-tenant ACL'd topic (or, for the shipper, its own
+    # configured tenant), so this is never actually "" in practice any
+    # more - unlike before per-tenant topics, there's no "unknown tenant"
+    # case left where the caller doesn't already know which tenant this is.
+    dead_letter_topic = dead_letter_topic_for_tenant(tenant_key)
     encoded = raw_event.encode("utf-8", errors="replace")
     raw_event_size = len(encoded)
     raw_event_sha256 = hashlib.sha256(encoded).hexdigest()
@@ -115,7 +122,7 @@ def send_to_dead_letter(
                 delivery_error.append(err)
 
         kafka_producer.produce(
-            DEAD_LETTER_TOPIC, value=json.dumps(envelope).encode(),
+            dead_letter_topic, value=json.dumps(envelope).encode(),
             headers=[("tenant_id", tenant_key.encode())], on_delivery=_on_delivery,
         )
         still_pending = kafka_producer.flush(5)
