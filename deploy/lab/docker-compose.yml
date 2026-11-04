@@ -573,6 +573,7 @@ services:
       - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
       - ./clickhouse/config.d/resources.xml:/etc/clickhouse-server/config.d/resources.xml:ro
       - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/durability.xml:/etc/clickhouse-server/config.d/durability.xml:ro
       - ./clickhouse/config.d/macros-1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ch1-data:/var/lib/clickhouse
     depends_on:
@@ -610,6 +611,7 @@ services:
       - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
       - ./clickhouse/config.d/resources.xml:/etc/clickhouse-server/config.d/resources.xml:ro
       - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/durability.xml:/etc/clickhouse-server/config.d/durability.xml:ro
       - ./clickhouse/config.d/macros-2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ch2-data:/var/lib/clickhouse
     depends_on:

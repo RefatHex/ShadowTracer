@@ -722,3 +722,76 @@ The scratch copy is still in `shadowtracer_repair` on node 1.
 - **Leftover test databases:** the 31 `shadowtracer_test_*` /
   `shadowtracer_dedupwindow_*` databases should be dropped and the suites
   that leave them behind should clean up.
+
+### 11.6 Two more power cuts on 2026-11-04, and the durability fix
+
+The owner confirmed that the host resets are electricity outages. Windows
+logs `Kernel-Power 41` with `BugcheckCode=0` and `PowerButtonTimestamp=0`
+for 2026-11-02 13:06 and 18:38 and 2026-11-04 19:30 local, each followed by
+`EventLog 6008 "The previous system shutdown ... was unexpected"`.
+
+**Outage 2 (≈13:09 UTC), fsync still off.** It came during the item-2 A/B
+run. Part directories written in the last ~13 s (mtime 13:09:28–13:09:41)
+came back 0-byte on both replicas, and ClickHouse refused to load three
+tables:
+
+```
+load table shadowtracer.events                FAILED  Code: 231 ... Suspiciously many (361 parts, 0.00 B in total) broken parts ...   (node1; node2: 328)
+load table shadowtracer.events_hourly_rollup  FAILED  ... (374 parts, 1.95 KiB in total) ...                                       (node2: 338)
+load table shadowtracer.fingerprint_occurrences FAILED ... (473 parts, 0.00 B in total) ...                                        (node2: 430)
+```
+
+A part-by-part scan of both nodes' disks found 328/338/430 of those names
+broken on **both** replicas. All of the loss was in the test tenant's events
+and rollup partitions (2026-10 and 2026-11) and the all-tenant fingerprint
+partition (2026-11); the real tenant's events lost nothing.
+`dead_letter_events` and `sequence_firings` loaded intact.
+
+What was done (supported only):
+
+1. `deploy/lab/clickhouse/config.d/durability.xml`, mounted on both nodes:
+   `fsync_after_insert=1`, `fsync_part_directory=1`,
+   `min_compressed_bytes_to_fsync_after_merge=1`,
+   `min_compressed_bytes_to_fsync_after_fetch=1`. For that restart only, it
+   also set `max_suspicious_broken_parts=1000`, the remedy the error message
+   names. The tables then loaded, with broken parts moved to `detached/`
+   (`broken-on-start`, nothing deleted) and their healthy sources detached
+   as `covered-by-broken`. That line is removed again.
+2. The same lost-part deadlock as §11.3 came back for those partitions
+   (25 `GET_PART` entries per node). `deploy/lab/recover-ch-after-crash.sh`
+   rebuilds each affected partition from every surviving copy:
+   - both replicas' active rows;
+   - every detached non-broken part (`ATTACH PART` into scratch tables with
+     the real partition and sort keys: 1,943/2,616 parts on node 1,
+     1,975/2,651 on node 2, **0 unreadable**);
+   - the item-1 scratch copy;
+   - for fingerprints, the closer's own source of truth in Postgres.
+
+   The distinct union then replaces the partition via `DROP PARTITION` +
+   `INSERT`. Load-generator rows are not carried over.
+
+   Dry run (`RESUME=1 DRY_RUN=1`, nothing replaced):
+
+   ```
+   events 7ee693fa… (test, 2026-10): active node1 1766376 / node2 1766381 -> recovered distinct 3323
+   events 24a53b97… (test, 2026-11): active node1 1947937 / node2 1947944 -> recovered distinct 3455
+   fingerprints 202611:              active node1 34522 / node2 34540     -> recovered distinct 34927
+   ok: recovered events contain no old-benchmark rows = 0
+   ```
+
+   3,323 is exactly the test tenant's pre-crash 2026-10 row count; the
+   2026-11 figure is the pre-crash 3,332 plus manager alerts since. The
+   fingerprint union is larger than either replica.
+
+   **Not applied.** The destructive swap (`DROP PARTITION`) was refused by
+   this session's permission policy. It is ready to run, stops at the
+   first failed check, and restarts the five paused services on exit:
+   `cd deploy/lab && RESUME=1 ./recover-ch-after-crash.sh`. Until then the
+   25 stuck entries keep every new mutation on these tables "unfinished".
+   Inserts and reads are unaffected.
+
+**Outage 3 (≈17:48 UTC), fsync on.** All tables loaded on both nodes;
+`system.text_log` shows **0** "is broken" / "Detaching broken part" messages
+since the restart; the only queue entries are the 25 pre-existing ones
+above. The same reset that cost 300–470 parts per table four hours earlier
+cost nothing with fsync on.
