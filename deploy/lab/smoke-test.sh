@@ -121,8 +121,16 @@ echo "$agent_out"
 # Only the two Ubuntu agents are expected Active - Rocky agents have a known,
 # documented glibc bug (PHASE1_FINDINGS.md, Step 2) and are not a smoke-test
 # regression on their own.
-check "agent-ubuntu-1 Active" "echo \"\$agent_out\" | grep agent-ubuntu-1 | grep -q Active"
-check "agent-ubuntu-2 Active" "echo \"\$agent_out\" | grep agent-ubuntu-2 | grep -q Active"
+for a in agent-ubuntu-1 agent-ubuntu-2; do
+    check "$a Active" "echo \"\$agent_out\" | grep $a | grep -q Active"
+    if ! echo "$agent_out" | grep "$a" | grep -q Active; then
+        # A recreated agent container has lost its client.keys and is refused
+        # re-enrollment under its still-registered name (authd's default,
+        # kept on purpose) - the fix is removing the old registration first.
+        echo "  hint: if $a's container was recreated, run ./recreate-agent.sh $a"
+        docker logs --tail 3 "shadowtracer-lab-$a-1" 2>&1 | sed 's/^/  agent log: /'
+    fi
+done
 
 echo "--- ClickHouse replica health (dead-letter-ClickHouse incident, 2026-10-08) ---"
 # The smoke test's own hostile-input check below only ever queried

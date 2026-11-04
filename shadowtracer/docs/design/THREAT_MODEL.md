@@ -380,6 +380,23 @@ cert-signing change on the manager side, one new flag on the agent side. No
 code change in either `entrypoint-manager.sh`'s structure or
 `entrypoint-agent.sh`'s enrollment loop beyond that one flag.
 
+**Same-name re-enrollment stays refused (2026-11-04).** The Phase 5.6
+closeout had injected `<force><disconnected_time enabled="no">` into authd
+(`entrypoint-manager.sh`) so that a recreated lab agent container, which loses
+its `client.keys`, could re-enroll at once under its still-registered name.
+With that check off, authd hands an *active* agent's name - and ID - to any
+enrollment that presents the shared password: the requester gets that
+agent's identity re-keyed to itself, feeds events and receives active
+responses as that agent, and the real agent is silently cut off. The
+password does not stop that; the "still connected / recently disconnected"
+check does. Reverted to Wazuh's defaults (`disconnected_time` 1h,
+`after_registration_time` 1h). Lab agents are recreated with
+`deploy/lab/recreate-agent.sh` instead: stop the container, remove the old
+registration on the master (`manage_agents -r <id>`), recreate, wait for
+Active. Verified: a plain recreate is now refused (`agent-auth: ERROR:
+Duplicate agent name: agent-ubuntu-2`), the script brings the agent back
+Active under a new ID.
+
 ### 12.3 Secrets rotation runbook (item 8 - the runbook itself, written now)
 
 Scope: every credential this project generates into `deploy/lab/.env` as of

@@ -48,35 +48,19 @@ if grep -q "<node>NODE_IP</node>" "$OSSEC_CONF"; then
     chmod 640 "${SHADOWTRACER_INSTALL_DIR}/etc/authd.pass"
     chown root:wazuh "${SHADOWTRACER_INSTALL_DIR}/etc/authd.pass" || true
 
-    # Real incident (Phase 5.6 closeout): neither this manager's nor the
-    # agents' own /var/ossec state survives a container recreate (no
-    # named volume for either - see docker-compose.yml's agent-config-
-    # mounts/manager-config-mounts, both just the two entrypoint/
-    # healthcheck script bind mounts) - confirmed directly: force-
-    # recreating an already-enrolled agent without touching this manager
-    # wipes the agent's client.keys, it retries agent-auth under its same
-    # name every 3s (entrypoint-agent.sh), and every attempt was rejected
-    # with "ERROR: Duplicate agent name" from authd's own ossec.log.
-    #
-    # Lowering <disconnected_time> does NOT fix this - confirmed by
-    # reading src/os_auth/auth.c's w_auth_replace_agent: when
-    # disconnected_time_enabled is true and the existing agent's
-    # wdb connection_status isn't already "disconnected" (disconnection_
-    # time == 0, i.e. still shows "active" - exactly the case right after
-    # a healthy agent's container is recreated, since remoted hasn't
-    # noticed the drop yet), replacement is rejected UNCONDITIONALLY,
-    # regardless of how low the threshold is set - that whole code path
-    # only ever gates an agent already marked disconnected, never a
-    # still-"active" one. The only way to skip it is disabling the check
-    # outright (disconnected_time_enabled="no"), confirmed by re-reading
-    # the same function: with it off, this entire block (both branches)
-    # is skipped and replace_agent stays true. A real production
-    # deployment should NOT disable this - it's the only thing standing
-    # between "an agent's container restarted" and "an attacker's forged
-    # enrollment request silently inherits a real agent's identity." This
-    # lab recreates agent containers often enough, with no other identity
-    # to protect, that immediate same-name replacement is worth it.
-    sed -i '/<\/auth>/i\    <force>\n      <enabled>yes</enabled>\n      <disconnected_time enabled="no">10s</disconnected_time>\n      <after_registration_time>10s</after_registration_time>\n    </force>' "$OSSEC_CONF"
+    # authd's same-name replacement policy is deliberately left at Wazuh's
+    # defaults (<force> enabled, disconnected_time 1h, after_registration_time
+    # 1h): a new enrollment may NOT take over the name of an agent that is
+    # still active or only recently disconnected. With that check off,
+    # anyone holding the shared enrollment password can re-enroll under a
+    # live agent's name, get that agent's identity (and ID) re-keyed to
+    # themselves, and from then on feed events and receive active responses
+    # as that agent - while the real agent is silently cut off. The
+    # password alone does not prevent that; this check is what does.
+    # A lab agent container that is recreated loses its client.keys (no
+    # volume) and is refused under that same rule - recreate agents with
+    # deploy/lab/recreate-agent.sh, which removes the old registration on
+    # the master first (manage_agents -r), instead of weakening authd here.
 fi
 
 # Step 3 item 14 (data volume) temporarily flipped <logall>/<logall_json> on
