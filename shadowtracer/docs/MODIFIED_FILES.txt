@@ -3,6 +3,7 @@ A	.gitattributes
 A	.github/workflows/ci.yml
 A	UPSTREAM.md
 A	check-project.sh
+A	docs/THROUGHPUT_BASELINE.md
 A	src/init/templates/shadowtracer-agent.service
 A	src/init/templates/shadowtracer-manager.service
 D	.github/workflows/.python-version

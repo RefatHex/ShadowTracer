@@ -196,3 +196,6 @@ deploy/lab/kafka-certs/
 
 # one-off repair run logs
 deploy/lab/repair-ch-lost-parts.*.log
+
+# raw lab-tenant export the load fixture is anonymised from (deploy/load/anonymize.py) - never commit
+deploy/load/fixtures/real_alerts_sample.jsonl

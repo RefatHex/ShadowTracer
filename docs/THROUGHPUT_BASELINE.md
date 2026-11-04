@@ -64,11 +64,38 @@ CPUs=12 Mem=12111888384
 
 | File | What it does |
 |---|---|
-| `fixtures/real_alerts_sample.jsonl` | 3,000 real `raw_event` rows sampled (read-only) from the lab tenant's own ClickHouse history: `SELECT raw_event FROM shadowtracer.events WHERE tenant_id='eec7…bb72' ORDER BY rand() LIMIT 3000`. 3000/3000 valid JSON, 6 `location`s, 73 distinct `full_log` prefixes, 19 rule ids, sizes as they occur (~2.1 KB avg on disk). |
+| `fixtures/alerts_sample.anon.jsonl` | The committed corpus: 3,000 real `raw_event` rows sampled (read-only) from the lab tenant's ClickHouse history (`SELECT raw_event FROM shadowtracer.events WHERE tenant_id='eec7…bb72' ORDER BY rand() LIMIT 3000` → `fixtures/real_alerts_sample.jsonl`, **gitignored, never committed**), anonymised by `anonymize.py`. 3000/3000 valid JSON, 6 `location`s, 73 distinct `full_log` prefixes, 19 rule ids, ~2.1 KB avg. The baseline runs in §3–§6 used the raw export; §2.1 shows the anonymised one gives the same results. |
+| `anonymize.py` | Replaces IPv4 with RFC 5737 addresses (same string length where possible), IPv6 with 2001:db8::/32, and hostnames, usernames and agent ids with same-length, same-shape pseudonyms, consistently across every field and inside `full_log`/`previous_output`. Policy prose under `rule.*`/`data.sca.*` is left alone (CIS numbers look like IPs). A built-in check fails if any original value survives (plain substring search), a field path changes, or the total size drifts ≥1%. |
 | `generate_load.py` | Fixed-rate load at `--rate` events/s, `--run-id` tag in every event. `--target syslog` (raw sshd `full_log` over UDP to the manager), `shipper` (append to alerts.json), `kafka` (produce to the tenant topic). Events are paced evenly (`t0 + seq/rate`), not bursted — see §3.1 for why. JSON targets rotate 50 agent ids `load-<run>-<n>` (the Kafka key) so load spreads across partitions like real agents. Prints achieved rate every 10 s. |
 | `sample_pipeline.py` | Read-only sampler, one line per interval: analysisd `.state` deltas, shipper byte lag, writer/correlator group lag on the test topic, topic ingress, ClickHouse InsertQuery/InsertedRows and active parts, Postgres tx/s and lock-waiters. |
 | `skip_test_backlog.sh` | Between stages: stops writers+correlators, moves **only the test topic's** committed offsets for both groups to the high watermark, restarts them (approved by the owner for this run). Prints old → new offset per partition. |
 | `e2e_step.sh` | One end-to-end step: syslog load + sampler + `docker stats` ×3 + latency percentiles + disk + dead letters + error log lines + restart counts. |
+
+### 2.1 Anonymised fixture gives the same results (A/B, 2026-11-04)
+
+Same step twice, back to back, with only the fixture changed:
+`generate_load.py --target kafka --rate 100 --duration 120 --seed 42` (same
+sample sequence), writers and correlators running, measured after both lags
+drained.
+
+| | raw export (`ab2-raw`) | anonymised (`ab2-anon`) |
+|---|---|---|
+| delivered | 12,000 / 0 failed | 12,000 / 0 failed |
+| writer / correlator lag (every 15 s) | 224/124 342/158 361/344 339/143 159/190 184/122 281/111 → 0/0 | 237/151 129/126 287/93 153/100 116/109 267/224 160/132 → 0/0 |
+| ClickHouse alerts (`uniqExact`) | 12,000 | 12,000 |
+| distinct rules / agents | 19 / 50 | 19 / 50 |
+| per-rule counts | 24010:3602 19008:3268 19007:3045 19009:1362 5710:301 502:70 503:66 … 5712:3 | identical, every rule |
+| alerts with a source IP / distinct IPs / distinct users | 304 / 6 / 31 | 304 / 6 / 31 |
+| `raw_event` bytes | 22,634,660 | 22,671,098 (+0.16%) |
+| Postgres memberships / Σ alert_count / distinct correlation keys | 12,000 / 12,000 / 322 | 12,000 / 12,000 / 322 |
+| incidents (open + closed) | 3,446 (1,402 + 2,044) | 3,157 (3,038 + 119) |
+
+The incident totals differ because of the closer, not the fixture. The
+corpus carries its original (October) timestamps, so the closer's
+inactivity cutoff applies to these incidents while the run is still going.
+It closed 2,044 of the first run's incidents and 119 of the second's, and an
+alert whose incident was just closed starts a new one. The memberships,
+counts and the 322 correlation keys are identical.
 
 Test-only lab change (not committed, lost on recreate): a syslog listener
 on the test manager so analysisd can be fed raw lines —
