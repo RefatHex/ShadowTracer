@@ -20,6 +20,12 @@ Modes (--target):
             syslog listener (analysisd's input when there's no agent
             forwarding it - see docs/THROUGHPUT_BASELINE.md for the
             one-time <remote> block this needs on the target manager).
+            One process is one syslog device (one source IP = one
+            `location`); syslog_fleet.sh runs many devices.
+
+Many agents: the shipper and kafka targets give events --agents distinct
+agent identities, as if alerts.json/Kafka were fed by that many real
+agents (agent.id is their Kafka key).
 
 Rate control: a fixed target events/s, held by sleeping the remainder of
 each 1-second tick after sending that tick's share - never a tight loop,
@@ -43,15 +49,18 @@ def load_corpus(path=FIXTURES_PATH):
         return [json.loads(line) for line in f if line.strip()]
 
 
+AGENTS = 50  # distinct simulated agents (--agents)
+
+
 def tag_json_event(event: dict, run_id: str, seq: int) -> dict:
     """Returns a copy with agent identity rewritten to carry run_id - the
     one thing every cleanup query below keys on. Everything else (rule,
     data, decoder, full_log) stays as sampled, for realistic variety."""
     event = dict(event)
     event["agent"] = dict(event.get("agent") or {})
-    # 50 distinct agents, not one: the Kafka key is agent.id, so a single id
-    # would pin every event to one partition and one consumer replica.
-    event["agent"]["id"] = f"load-{run_id}-{seq % 50}"
+    # Many distinct agents (--agents), not one: the Kafka key is agent.id, so a
+    # single id would pin every event to one partition and one consumer replica.
+    event["agent"]["id"] = f"load-{run_id}-{seq % AGENTS}"
     event["agent"]["name"] = event["agent"]["id"]
     event["id"] = f"load-{run_id}.{seq}"
     return event
@@ -63,7 +72,7 @@ def tag_syslog_line(raw: dict, run_id: str, seq: int) -> str:
     run_id into the username so Postgres/ClickHouse rows this produces
     are findable by actor_user LIKE 'load-<run_id>-%' afterward."""
     full_log = raw.get("full_log", "")
-    user_tag = f"load-{run_id}-{seq % 50}"
+    user_tag = f"load-{run_id}-{seq % AGENTS}"
     if " user " in full_log:
         prefix, _, rest = full_log.partition(" user ")
         _, _, after_user = rest.partition(" ")
@@ -199,8 +208,12 @@ def main():
     p.add_argument("--port", type=int, default=5514, help="syslog target: destination UDP port")
     p.add_argument("--fixture", default=FIXTURES_PATH, help="corpus file (default: the anonymised fixture)")
     p.add_argument("--seed", type=int, help="fix the sample sequence, e.g. to A/B two fixtures")
+    p.add_argument("--agents", type=int, default=50,
+                   help="shipper/kafka targets: distinct simulated agent identities (agent.id) to spread events over")
     args = p.parse_args()
 
+    global AGENTS
+    AGENTS = args.agents
     if args.seed is not None:
         random.seed(args.seed)
     corpus = load_corpus(args.fixture)

@@ -140,12 +140,25 @@ class TailSource:
         return {"inode": self.inode, "offset": self.offset}
 
 
-def extract_agent_id(line: str) -> str:
-    """Just enough parsing to build the Kafka key - full parsing happens
-    in the normaliser, in the writer. Raises on anything not even
-    JSON-shaped; caller counts and skips."""
+def partition_key(line: str, tenant_id: str) -> str:
+    """The Kafka key: Kafka keeps one key's messages on one partition, in order.
+
+    Real agents: agent.id, so one agent's events stay ordered.
+    agent.id "000" is the manager itself - every syslog device it receives
+    from plus its own logs - and keying on it put one manager's whole syslog
+    volume on a single partition (docs/THROUGHPUT_BASELINE.md 12.5). For
+    "000" the key is tenant + `location`: for remote syslog Wazuh's remoted
+    sets `location` to the sending device's IP (from the connection, not the
+    message text, so a device can't pick another's key); for the manager's
+    own logs it is the log source. Each device keeps its own order; ordering
+    ACROSS devices of agent 000 is no longer guaranteed (docs/design/
+    THROUGHPUT_FIXES.md 4c). Raises on anything not JSON-shaped; the caller
+    dead-letters it."""
     alert = json.loads(line)
-    return alert.get("agent", {}).get("id", "")
+    agent_id = alert.get("agent", {}).get("id", "")
+    if agent_id == "000":
+        return f"{tenant_id}|{alert.get('location', '')}"
+    return agent_id
 
 
 def run(
@@ -213,7 +226,7 @@ def run(
             delivery_errors.clear()
             for line, byte_offset in batch:
                 try:
-                    agent_id = extract_agent_id(line)
+                    key = partition_key(line, tenant_id).encode()
                 except Exception as exc:  # noqa: BLE001 - any parse failure is permanent, never retried: dead-letter and move on (deeply nested JSON, invalid UTF-8, wrong types, ... none of these succeed on a retry)
                     metrics.incr("lines_failed")
                     # send_to_dead_letter only ever raises for its Kafka-
@@ -234,12 +247,6 @@ def run(
                         ),
                     )
                     continue
-                # Phase 5.6 Item 1: just agent_id now - tenant is the
-                # topic itself (broker-enforced via ACL), not part of the
-                # partition key any more. Still keyed for the same reason
-                # as before: Kafka routes a given key to one partition
-                # consistently, keeping one agent's events in order.
-                key = agent_id.encode()
                 value = line.encode()
                 headers = [
                     ("tenant_id", tenant_id.encode()),

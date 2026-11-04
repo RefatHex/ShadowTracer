@@ -76,6 +76,7 @@ CPUs=12 Mem=12111888384
 | `sample_pipeline.py` | Read-only sampler, one line per interval: analysisd `.state` deltas, shipper byte lag, writer/correlator group lag on the test topic, topic ingress, ClickHouse InsertQuery/InsertedRows and active parts, Postgres tx/s and lock-waiters. |
 | `skip_test_backlog.sh` | Between stages: stops writers+correlators, moves **only the test topic's** committed offsets for both groups to the high watermark, restarts them (approved by the owner for this run). Prints old → new offset per partition. |
 | `e2e_step.sh` | One end-to-end step: syslog load + sampler + `docker stats` ×3 + latency percentiles + disk + dead letters + error log lines + restart counts. |
+| `syslog_fleet.sh` | Many syslog devices: N generator containers on the lab network, each with its own IP, so the manager sees N senders (`location` = sender IP) instead of the single one a host-side generator is. The shipper/kafka targets take `--agents N` to spread events over N simulated agent identities. |
 
 ### 2.1 Anonymised fixture gives the same results (A/B, 2026-11-04)
 

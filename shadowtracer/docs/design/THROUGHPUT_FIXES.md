@@ -157,33 +157,42 @@ without creating anything.
   harmless: `dead_letter_events` deduplicates on `source_location`
   (ReplacingMergeTree).
 
-## 4c. Partitioning — proposal only (changes an ordering guarantee)
+## 4c. Partitioning — agent "000" keyed by sender (implemented 2026-11-05, owner decision)
 
-**Today's key** (`shipper.py`): `agent.id`. Every alert a manager produces
-from syslog, its own logs or remote syslog carries `agent.id = "000"`.
-Measured skew in the baseline's Stage 1: partition 2 high watermark 532,893
-vs 79 and 124 on partitions 0 and 1, with one writer and one correlator
-replica busy and the others idle.
+**Old key** (`shipper.py`): `agent.id`. Every alert a manager produces from
+remote syslog, or from its own logs, carries `agent.id = "000"`. Measured
+skew: 100% of a syslog end-to-end run landed on partition 2, while
+partitions 0 and 1 got 0 (`THROUGHPUT_BASELINE.md` §12.5).
 
-**Proposed key:** for `agent.id == "000"` only, key by `000|<source host>`,
-where the source host is `predecoder.hostname` (syslog) or `location`.
-Real agents keep `agent.id`.
+**New key** (`shipper.partition_key`), for `agent.id == "000"` only:
+`<tenant_key>|<location>`. For remote syslog, Wazuh's remoted sets
+`location` to the **sending device's IP**. Example from ClickHouse:
+`{"agent": {"id": "000", "name": "shadowtracer-worker-test"},
+"location": "172.28.0.1", "predecoder.hostname": "load-test-host"}`.
 
-**Why it is not implemented:** it changes a guarantee the correlator relies
-on. Today one agent's events are consumed in order by one consumer; the
-`FOR UPDATE` comment in `correlator.py` describes that as the normal case.
-With the new key, agent `000`'s events from different source hosts are
-consumed by different replicas in no fixed relative order:
+That IP comes from the connection, not from the message text, so a device
+can't claim another device's key. `predecoder.hostname` was rejected: it
+comes from the syslog header text, which can be forged, and is missing in
+some formats. For the manager's own logs, `location` is the log source
+(e.g. `rootcheck`, a file path). Real agents keep `agent.id`.
 
-- Incidents keyed `(000, srcip)` or `(000, user)` can be updated by two
-  replicas at once. That is still correct under `FOR UPDATE`, but it becomes
-  the normal case instead of the rebalance edge case.
-- 5B sequence progress for agent `000` would see cross-host events
-  reordered beyond what the lateness window was sized for.
+**What changed in guarantees** (owner-accepted): one device's events stay
+ordered; agent `000`'s events from *different* devices are no longer
+consumed in a fixed relative order, or by one replica. Incidents keyed
+`(000, srcip/user)` can therefore be updated from two partitions. That
+stays correct because each batch locks its correlation keys in sorted
+order (`SELECT … FOR UPDATE`).
 
-This needs a decision before it ships. Options: accept per-source-host
-ordering for `000`; or keep `000` on one partition and spread load by giving
-heavy syslog sources their own manager.
+**Measured** (12-device syslog fleet, 600/s × 60 s, `deploy/load/syslog_fleet.sh`):
+
+- **Spread:** test topic partition growth `[18000, 6000, 12001]` = 50.0% /
+  16.7% / 33.3%, against 100% on one partition before. 12 distinct `location`s,
+  3,000 alerts each.
+- **Correctness**, in Postgres for those agent-000 incidents:
+  - 5 incidents for 5 keys;
+  - Σ alert_count 36,001 = 36,001 memberships;
+  - 0 duplicate memberships;
+  - 0 overlapping open incidents for the same key.
 
 **Partitions per tenant by size (proposal):** partitions ≥ 2 × consumer
 replicas, and ≥ peak events/s ÷ the per-partition consumer ceiling measured

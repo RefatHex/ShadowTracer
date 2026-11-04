@@ -245,3 +245,26 @@ def test_shipper_survives_log_rotation(tmp_path, kafka_bootstrap, kafka_tenant_k
     thread.join(timeout=5)
 
     assert len(messages) == 2
+
+
+def test_partition_key_spreads_agent_000_by_sender_and_keeps_real_agents_on_agent_id():
+    """docs/design/THROUGHPUT_FIXES.md 4c: agent "000" (the manager: remote
+    syslog devices and its own logs) is keyed by tenant + location (the
+    sending device's IP, set by remoted), so one manager's syslog no longer
+    lands on one partition; real agents keep agent.id."""
+    import json
+    import pytest
+    from shadowtracer_ingest.shipper import partition_key
+
+    def alert(agent_id, location):
+        return json.dumps({"agent": {"id": agent_id, "name": "x"}, "location": location, "full_log": "x"})
+
+    assert partition_key(alert("005", "/var/log/auth.log"), "t1") == "005"
+    assert partition_key(alert("005", "/var/log/secure"), "t1") == "005", "a real agent's sources share its key"
+    a = partition_key(alert("000", "192.0.2.10"), "t1")
+    b = partition_key(alert("000", "192.0.2.11"), "t1")
+    assert a == "t1|192.0.2.10" and b == "t1|192.0.2.11", "one key per syslog device"
+    assert partition_key(alert("000", "192.0.2.10"), "t1") == a, "the same device always maps to the same key"
+    assert partition_key(alert("000", "rootcheck"), "t1") == "t1|rootcheck", "the manager's own logs group by source"
+    with pytest.raises(Exception):
+        partition_key("not json", "t1")
