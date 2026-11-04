@@ -971,3 +971,49 @@ partition 2: 12550646 -> 12610646 -> 12910646 -> 13510647 -> 14710645 -> 1539094
 and one correlator replica. Re-keying is proposed, not done (it changes the
 per-agent ordering guarantee); see `THROUGHPUT_FIXES.md` 4c.
 
+### 12.6 Housekeeping re-measurements (2026-11-05)
+
+**analysisd after rotating the test manager's alerts files.** `alerts.json`
+and `alerts.log` are hard links to the day files under
+`alerts/2026/Nov/ossec-alerts-04.{json,log}`, so renaming `alerts.json`
+alone doesn't help: analysisd re-links it to the same 32 GB day file on
+restart (seen: inode 472224 again).
+
+The procedure that worked:
+1. Confirm the shipper had shipped everything (offset 32,570,103,899 =
+   size).
+2. Stop the manager.
+3. Rename the day files to `ossec-alerts-04.pre-rotation.{json,log}`
+   (32,570,104,464 and 4,854,060,151 B, kept, not deleted).
+4. Remove the extra links and start the manager.
+5. The new `alerts.json` was inode 826151, 556 B, and the shipper switched
+   to it by itself (`{"inode": 826151, "offset": 556}`).
+
+Then analysisd alone (writers and correlators stopped), single syslog
+sender, 120 s per step:
+
+```
+2000/s: ad_recv 2000  ad_proc 2000  ad_drop 0  ad_q 0.00   wazuh-analysisd  66.7% CPU
+3000/s: ad_recv 3001  ad_proc 3001  ad_drop 0  ad_q 0.00   wazuh-analysisd  86.7% CPU
+4000/s: ad_recv 4001  ad_proc 4001  ad_drop 0  ad_q 0.00   wazuh-analysisd 226.7% CPU
+5000/s: ad_recv 5001  ad_proc 4716-4828, then the queue fills (ad_q 0.75 -> 1.00) and
+        ad_drop 811-1288/s after ~80 s                     wazuh-analysisd 373.3% CPU
+```
+
+**analysisd ≈ 4,000/s sustained again**, the same as §3.3, against
+1,400–2,000/s at 440% CPU before the rotation (§12.3). The 32 GB file was
+the cause. The mechanism is not proven; a file three times the host's RAM
+evicting the page cache that analysisd and the shipper both need is the
+likely one. Rotation is daily (at midnight in the manager's UTC clock);
+multi-hour load tests should rotate between runs.
+
+**Was fsync on during the writer measurement (§12.1)?** Yes. Both
+ClickHouse containers were created at 2026-11-04 13:39:50 UTC with
+`durability.xml` mounted (`docker inspect … durability_mount=yes`), and
+ClickHouse started with it at 13:39:57 (`text_log` "Starting
+ClickHouse"). §12.1 ran 15:23–15:49 UTC in those containers; today,
+`system.merge_tree_settings` shows `fsync_after_insert=1`,
+`fsync_part_directory=1`, `min_compressed_bytes_to_fsync_after_merge=1`.
+The writer's "after" numbers therefore include the fsync cost. The §5
+"before" numbers (04:44–05:01 UTC) predate it, so fsync was off then. No
+re-measurement needed.
