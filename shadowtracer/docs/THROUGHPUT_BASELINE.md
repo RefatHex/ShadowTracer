@@ -789,12 +789,38 @@ What was done (supported only):
    2026-11 figure is the pre-crash 3,332 plus manager alerts since. The
    fingerprint union is larger than either replica.
 
-   **Not applied.** The destructive swap (`DROP PARTITION`) was refused by
-   this session's permission policy. It is ready to run, stops at the
-   first failed check, and restarts the five paused services on exit:
-   `cd deploy/lab && RESUME=1 ./recover-ch-after-crash.sh`. Until then the
-   25 stuck entries keep every new mutation on these tables "unfinished".
-   Inserts and reads are unaffected.
+   **Applied 2026-11-05, owner-approved, after a backup.** First, a
+   ClickHouse `BACKUP` of the three tables on each replica, to the server's
+   allowed backup path on its own volume, then copied to
+   `/home/refat/st-backups/` on the host (both outside the repo):
+
+   ```
+   BACKUP TABLE shadowtracer.events, TABLE shadowtracer.events_hourly_rollup,
+          TABLE shadowtracer.fingerprint_occurrences TO File('pre-recovery-20261105-node<N>')
+   node1: status BACKUP_CREATED  num_files 4506  total_size 404.12 MiB  error ''
+   node2: status BACKUP_CREATED  num_files 4903  total_size 404.19 MiB  error ''
+   ```
+
+   Then `RESUME=1 ./recover-ch-after-crash.sh`:
+
+   ```
+   events 7ee693fa…: active node1 1766386 / node2 1766391 -> recovered distinct 3333
+   events 24a53b97…: active node1 4788281 / node2 4788288 -> recovered distinct 3497
+   fingerprints 202611: active node1 34552 / node2 34570  -> recovered distinct 34962
+   ok: GET_PART queue entries (both nodes) = 0
+   ok: events restored on node1 / node2 = 6830 14960362792087131044
+   ok: fingerprints restored on node1 / node2 = 34962 7831412718340237058
+   ok: events / fingerprint_occurrences / dead_letter_events / sequence_firings node1 == node2
+   ok: events_hourly_rollup finalized node1 == node2 = 1177 13897924295887689833
+   ok: rebuilt test-tenant rollup identities == base identities (2026-10/11) = 6830
+   RECOVERY OK
+   ```
+
+   Afterwards, on both nodes: `system.replication_queue` 0 rows and
+   unfinished `system.mutations` 0, across all databases; 0 read-only or
+   session-expired replicas. Load-generator rows in the two test-tenant
+   partitions were not carried over (§11.6 step 2), which is why the
+   finalized rollup shrank to 1,177 groups.
 
 **Outage 3 (≈17:48 UTC), fsync on.** All tables loaded on both nodes;
 `system.text_log` shows **0** "is broken" / "Detaching broken part" messages
