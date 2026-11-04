@@ -151,6 +151,8 @@ x-correlate-env: &correlate-env
   # across every tenant's own topic (topics.py). Own credential
   # (correlator), same consumer+producer shape as writer's.
   KAFKA_GROUP_ID: shadowtracer-correlate
+  # Per-batch time breakdown in the logs (shadowtracer_correlate/profiling.py); off unless set.
+  SHADOWTRACER_PROFILE_BATCHES: ${SHADOWTRACER_PROFILE_BATCHES:-0}
   KAFKA_SECURITY_PROTOCOL: SASL_SSL
   KAFKA_SASL_USERNAME: correlator
   KAFKA_SASL_PASSWORD: ${KAFKA_CORRELATOR_PASSWORD:?set KAFKA_CORRELATOR_PASSWORD in deploy/lab/.env}

@@ -50,6 +50,7 @@ from .correlator import (
 )
 from .sequences import DEFAULT_LATENESS_SECONDS
 from .metrics import Metrics
+from .profiling import BatchProfiler
 from .sequences import load_sequences
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,7 @@ def run(
     consumer.subscribe([topic_pattern])
 
     engine = create_engine(database_url, pool_pre_ping=True)
+    profiler = BatchProfiler(engine)  # no-op unless SHADOWTRACER_PROFILE_BATCHES=1
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     # Same tuning as the consumer above, same reason - confirmed for
     # real on the PRODUCER side too, separately (see writer.py's own
@@ -204,9 +206,11 @@ def run(
 
     try:
         while not stop_flag.is_set():
+            profiler.start()
             msgs = consumer.consume(num_messages=BATCH_MAX_MESSAGES, timeout=POLL_TIMEOUT_SECONDS)
             if not msgs:
                 continue
+            profiler.mark("consume")
 
             # Per-message checks first. Permanent bad data is dead-lettered
             # here, never retried, and its offset is committed together with
@@ -272,6 +276,7 @@ def run(
 
             if shutting_down:
                 continue
+            profiler.mark("prepare")
 
             # The whole batch in one transaction, retried in place forever with
             # capped backoff for a transient failure (e.g. the database is
@@ -301,6 +306,7 @@ def run(
                     db.close()
             if shutting_down:
                 continue
+            profiler.mark("process")
 
             for result in results:
                 metrics.incr(f"alerts_{result.status}")
@@ -311,6 +317,8 @@ def run(
             # Asynchronous, like the per-message commits before: a commit lost to a
             # rebalance only means a redelivery, which process_batch makes a no-op.
             consumer.commit(offsets=[TopicPartition(t, p, o + 1) for (t, p), o in offsets.items()])
+            profiler.mark("commit")
+            profiler.emit(len(msgs), len(good))
             metrics.incr("batches_committed")
     finally:
         consumer.close()

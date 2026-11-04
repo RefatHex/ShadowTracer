@@ -213,3 +213,97 @@ knob.
 
 The same tooling (`deploy/load/`), stage tests and end-to-end steps.
 Before/after side by side in `docs/THROUGHPUT_BASELINE.md` §12.
+
+## 5. Correlator profile at its ceiling (2026-11-05) — and the next fix (proposal, not implemented)
+
+**How measured:**
+- **Correlator side:** `shadowtracer_correlate/profiling.py`, opt-in with
+  `SHADOWTRACER_PROFILE_BATCHES=1` and a no-op by default. It writes one JSON
+  line per batch with:
+  - wall time per phase (consume / prepare / `process_batch` / commit);
+  - process CPU time during `process_batch`;
+  - time inside SQL round trips, classified by statement.
+- **Postgres side:** `pg_stat_activity` sampled every 0.25 s for the two
+  correlator connections, with `pg_blocking_pids()` naming the blocker.
+- **Load and setup:** Stage-4 style (writers stopped), Kafka-direct 1,600/s
+  for 160 s, about twice the ceiling, 50 agents. The test topic had 3
+  partitions at the time, split 1:2 between the two replicas.
+
+**Per replica:**
+- correlate-2 (two partitions) was saturated: 241 batches of 500,
+  **720 msg/s**, `process_batch` 96.0% of wall.
+- correlate-1 (one partition) spent 92.5 of 161 s waiting in `consume`.
+  That is partition imbalance, not a cost.
+
+**Inside `process_batch`** on the saturated replica (160.7 s):
+
+| | seconds | share |
+|---|---|---|
+| SQL round trips | 102.7 | 63.9% |
+| Python CPU | 76.4 | 47.5% |
+| (overlap: CPU spent inside psycopg2 calls) | −18.4 | |
+
+| statement kind | per batch | ms each | share of SQL time |
+|---|---|---|---|
+| incident lock `SELECT … FOR UPDATE` (one per correlation key) | 79.0 | 2.43 | **45.1%** |
+| membership lookup (one, 500 identity tuples) | 1.0 | **104.4** | **24.5%** |
+| incident `UPDATE` (one per touched incident) | 241.8 | 0.37 | **20.8%** |
+| membership bulk insert | 1.0 | 26.8 | 6.3% |
+| sequence progress | 22.4 | 0.34 | 1.8% |
+| incident insert | 10.2 | 0.60 | 1.4% |
+
+Median batch: wall 0.665 s, CPU 0.315 s, SQL 0.387 s. That is ~340 SQL
+statements per 500-alert batch on this synthetic stream: 50 agents × many
+source IPs/users means ~240 distinct incidents per batch.
+
+**Postgres side** (673 samples). Correlator connections were often "idle in
+transaction" (Postgres waiting on the correlator's Python), and
+**`active | Lock | transactionid`** appeared in 130 samples. Every lock wait
+was a correlator `SELECT … FROM incidents … FOR UPDATE` blocked by a
+**closer** (closer-1/2), shown "idle in transaction" on
+`SELECT tenant_alert_settings…` / `SELECT fingerprints.suppression_state…`.
+
+**Two findings behind the numbers:**
+
+- **The membership lookup is 90% planning.** `EXPLAIN ANALYZE` of the same
+  500-tuple `(tenant_key, node, alert_id) IN ((…),(…),…)` against the
+  3.2M-row `incident_alerts`: **Planning 74.9 / 76.2 / 78.9 ms,
+  Execution 9.2 / 9.9 / 9.5 ms**. The planner builds a 500-branch bitmap
+  OR. The same identities as `JOIN (VALUES …) v(t,n,a)` take
+  **Planning 2.0 ms, Execution 3.1 ms**, using index nested-loop lookups.
+- **The closer holds incident row locks across ClickHouse round trips.**
+  `closer.py` takes `SELECT … FOR UPDATE` on the incident, then, in the
+  same transaction, evaluates rarity (Postgres settings plus a ClickHouse
+  `uniqExact` query), inserts `fingerprint_occurrences` (an fsynced
+  ClickHouse insert), updates the incident and links campaigns. A
+  correlator alert for that incident waits the whole time. The load
+  generator's historical timestamps make every incident closable while
+  it is still receiving alerts, which exaggerates this. In production
+  only incidents inactive for `session_gap` get closed, but a late alert
+  still waits.
+
+**Proposed next fix, in order of measured payoff:**
+
+1. **Lookup as a `VALUES` (or `unnest` of three arrays) join.** About −100 ms
+   per batch, ~25% of SQL time, ~15% of batch wall. One-line change in
+   `process_batch`.
+2. **Lock all of a batch's keys in one statement.** `SELECT … WHERE
+   (tenant_key, agent_id, correlation_key, correlation_basis) IN (VALUES …)
+   AND state = 'open' ORDER BY tenant_key, agent_id, correlation_key,
+   correlation_basis, id FOR UPDATE`. That is 79 round trips → 1, with the
+   same deterministic lock order. Expect most of the 45%.
+3. **Update all touched incidents in one statement.** `UPDATE incidents SET
+   … FROM (VALUES …) v WHERE incidents.id = v.id`. That is 242 round trips →
+   1, and much of the Python CPU, which is mostly per-statement SQLAlchemy
+   construction.
+4. **Closer: no row lock across ClickHouse.** Compute the fingerprint and
+   evaluate rarity before taking the incident lock, then lock, re-check
+   `last_seen`, write and commit. Alternatively, lock with `SKIP LOCKED` so
+   the closer never makes a correlator wait.
+5. **Partitions ≥ 2 × replicas.** 3 partitions over 2 replicas left one
+   replica idle 57% of the time.
+
+Together, items 1–3 take a batch from ~340 SQL statements to ~6. The
+estimate (not measured) is that the correlator becomes CPU-bound on its
+in-memory work, with its ceiling set by Python CPU and the single bulk
+statements rather than by round trips.
