@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import threading
 import time
@@ -52,7 +53,8 @@ def _produce(kafka_bootstrap, topic, lines, tenant_key=None):
     producer.flush(30)
 
 
-def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None, ch_client=None):
+def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None, ch_client=None, kafka_config_extra=None,
+                    topic_pattern=TEST_TOPIC_PATTERN):
     # Phase 5.6 Item 1: `topic` is accepted but unused now - consumer.run()
     # pattern-subscribes to every tenant's topic (same as writer.py);
     # kept as a parameter so every existing call site in this file stays
@@ -68,8 +70,8 @@ def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None, ch_clie
             group_id=group_id or f"test-correlate-{uuid.uuid4().hex[:8]}",
             database_url=database_url, metrics=metrics,
             stop_flag=stop_flag, started_flag=started_flag, ch_client=ch_client,
-            kafka_client_config=kafka_client_config_from_env(),
-            topic_pattern=TEST_TOPIC_PATTERN,
+            kafka_client_config={**kafka_client_config_from_env(), **(kafka_config_extra or {})},
+            topic_pattern=topic_pattern,
         ),
         daemon=True,
     )
@@ -335,14 +337,25 @@ def test_two_correlation_workers_split_partitions_nothing_processed_twice(kafka_
         for i in range(alerts_per_agent):
             lines.append(_alert(agent, f"5.5.5.{a}", f"{marker}.{a}.{i}"))
 
-    stop_flag1, thread1, metrics1 = _start_consumer(kafka_bootstrap, topic, database_url, group_id=group_id)
-    stop_flag2, thread2, metrics2 = _start_consumer(kafka_bootstrap, topic, database_url, group_id=group_id)
+    # This topic only: other tests creating/deleting test- topics would
+    # otherwise trigger rebalances mid-test (one worker briefly owning all).
+    only_this = "^" + re.escape(topic) + "$"
+    stop_flag1, thread1, metrics1 = _start_consumer(kafka_bootstrap, topic, database_url, group_id=group_id, topic_pattern=only_this)
+    stop_flag2, thread2, metrics2 = _start_consumer(kafka_bootstrap, topic, database_url, group_id=group_id, topic_pattern=only_this)
     try:
-        # started_flag only means subscribe() was called, not that the
-        # group's rebalance has settled with both members - give it a
-        # moment, or one worker can grab every partition before the
-        # second one finishes joining the generation.
-        time.sleep(5)
+        # started_flag only means subscribe() was called, not that the group's
+        # rebalance has settled. A batching worker that is alone even briefly
+        # takes every message in one consume(), so wait until the group really
+        # has both members, each owning partitions of this topic.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            members = admin.describe_consumer_groups([group_id])[group_id].result(timeout=10).members
+            owned = [m for m in members
+                     if m.assignment and any(tp.topic == topic for tp in m.assignment.topic_partitions)]
+            if len(owned) == 2:
+                break
+            time.sleep(1)
+        assert len(owned) == 2, f"both workers must own partitions before producing ({len(owned)} do)"
         _produce(kafka_bootstrap, topic, lines, tenant_key=tenant)
 
         deadline = time.monotonic() + 20
@@ -461,7 +474,11 @@ def test_correlator_dead_letters_unknown_tenant_known_tenant_still_processes(
     unknown_tenant = f"test-unknown-{uuid.uuid4().hex[:8]}"  # topic provisioned below, deliberately never inserted into tenants
     unknown_topic = alerts_topic_for_tenant(unknown_tenant)
     admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
-    admin.create_topics([NewTopic(unknown_topic, num_partitions=1, replication_factor=1)])
+    # Both topics, as create-kafka-topics.sh provisions them: the tenant row is
+    # what's missing here, not its topics (an offboarded tenant whose topics
+    # are gone too is test_offboarded_tenant_message_does_not_stall_other_tenants).
+    admin.create_topics([NewTopic(unknown_topic, num_partitions=1, replication_factor=1),
+                         NewTopic(dead_letter_topic_for_tenant(unknown_tenant), num_partitions=1, replication_factor=1)])
     time.sleep(1)
     marker = uuid.uuid4().hex[:8]
     known_agent = f"agent-known-{marker}"
@@ -586,3 +603,47 @@ def test_correlator_dead_letters_unsupported_envelope_version_known_version_stil
         thread.join(timeout=5)
         poll_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_key}'")
         poll_client.close()
+
+
+def test_offboarded_tenant_message_does_not_stall_other_tenants(kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db, ch_client):
+    """Tenant offboarding (docs/design/TENANCY.md §6), correlator side: a
+    message left in an offboarded tenant's alerts topic (tenants row gone,
+    dead-letter topic deleted) is recorded in ClickHouse and skipped; the
+    other tenant's alerts still become incidents."""
+    from confluent_kafka.admin import AdminClient, NewTopic
+
+    marker = uuid.uuid4().hex[:8]
+    offboarded = f"test-off-{marker}"
+    off_topic = alerts_topic_for_tenant(offboarded)
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
+    admin.create_topics([NewTopic(off_topic, num_partitions=1, replication_factor=1)])[off_topic].result(30)
+    agent = f"agent-{marker}"
+    try:
+        _produce(kafka_bootstrap, off_topic, [_alert(agent, "7.7.7.7", f"{marker}.off")], tenant_key=offboarded)
+        stop_flag, thread, metrics = _start_consumer(
+            kafka_bootstrap, kafka_topic, database_url, ch_client=ch_client,
+            kafka_config_extra={"allow.auto.create.topics": False},  # as the lab's correlator principal
+        )
+        try:
+            time.sleep(3)
+            _produce(kafka_bootstrap, kafka_topic, [_alert(agent, "7.7.7.7", f"{marker}.{i}") for i in range(3)],
+                     tenant_key=kafka_tenant_key)
+            deadline = time.monotonic() + 60
+            row = None
+            while time.monotonic() < deadline:
+                row = db.execute(select(incidents).where(incidents.c.tenant_key == kafka_tenant_key,
+                                                         incidents.c.agent_id == agent)).mappings().first()
+                if row is not None and row["alert_count"] == 3:
+                    break
+                time.sleep(0.5)
+        finally:
+            stop_flag.set()
+            thread.join(timeout=10)
+        assert row is not None and row["alert_count"] == 3, "the other tenant's alerts must keep correlating"
+        rows = ch_client.query("SELECT error FROM dead_letter_events WHERE tenant_id = {t:String}",
+                               parameters={"t": offboarded}).result_rows
+        assert rows and "tenant offboarded" in rows[0][0], rows
+        assert metrics.snapshot().get("dead_letter_topic_missing", 0) >= 1
+    finally:
+        delete_topics_and_wait(admin, [off_topic])
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{offboarded}'")

@@ -513,13 +513,17 @@ def test_writer_dead_letters_unknown_tenant_known_tenant_still_processes(
     topic always has one by construction."""
     import json
     from confluent_kafka.admin import AdminClient, NewTopic
-    from shadowtracer_ingest.topics import alerts_topic_for_tenant
+    from shadowtracer_ingest.topics import alerts_topic_for_tenant, dead_letter_topic_for_tenant
     marker = uuid.uuid4().hex[:8]
     known_tenant = kafka_tenant_key
     unknown_tenant = f"test-unknown-{marker}"  # topic provisioned below, deliberately never inserted into tenants
     unknown_topic = alerts_topic_for_tenant(unknown_tenant)
     admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
-    admin.create_topics([NewTopic(unknown_topic, num_partitions=1, replication_factor=1)])
+    # Both topics, as create-kafka-topics.sh provisions them: the tenant row is
+    # what's missing here, not its topics (an offboarded tenant whose topics
+    # are gone too is test_offboarded_tenant_message_does_not_stall_other_tenants).
+    admin.create_topics([NewTopic(unknown_topic, num_partitions=1, replication_factor=1),
+                         NewTopic(dead_letter_topic_for_tenant(unknown_tenant), num_partitions=1, replication_factor=1)])
     time.sleep(1)
 
     known_event = json.loads(real_alert_lines[0])
@@ -737,3 +741,106 @@ def test_a_brand_new_tenants_first_event_sent_right_away_is_stored_not_dead_lett
         thread.join(timeout=5)
         delete_topics_and_wait(admin, [brand_new_topic])
         ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id = '{event['id']}'")
+
+
+def test_offboarded_tenant_message_does_not_stall_other_tenants(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, database_url):
+    """Tenant offboarding (docs/design/TENANCY.md §6): a message still in an
+    offboarded tenant's alerts topic - tenants row gone, dead-letter topic
+    deleted - must be recorded and skipped, while another tenant's alerts
+    keep landing. Before the fix the writer retried the dead-letter publish
+    forever and every partition it owned stopped."""
+    import json
+    from confluent_kafka.admin import AdminClient, NewTopic
+    from shadowtracer_ingest.topics import alerts_topic_for_tenant
+
+    marker = uuid.uuid4().hex[:8]
+    offboarded = f"test-off-{marker}"  # no tenants row, no dead-letter topic
+    off_topic = alerts_topic_for_tenant(offboarded)
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
+    admin.create_topics([NewTopic(off_topic, num_partitions=1, replication_factor=1)])[off_topic].result(30)
+
+    good_ids, good_lines = [], []
+    for i, line in enumerate(real_alert_lines):
+        alert = json.loads(line)
+        alert["id"] = f"{alert['id']}.{marker}.{i}"
+        good_ids.append(alert["id"])
+        good_lines.append(json.dumps(alert))
+    try:
+        _produce(kafka_bootstrap, off_topic, [real_alert_lines[0]])
+        stop_flag, started_flag, metrics = threading.Event(), threading.Event(), Metrics()
+        thread = threading.Thread(target=writer.run, daemon=True, kwargs=dict(
+            bootstrap_servers=kafka_bootstrap, group_id=f"test-writer-off-{marker}",
+            clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
+            clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
+            clickhouse_database=TEST_CLICKHOUSE_DB, database_url=database_url, metrics=metrics,
+            stop_flag=stop_flag, started_flag=started_flag,
+            # As the lab's writer principal: no topic creation.
+            kafka_client_config={**kafka_client_config_from_env(), "allow.auto.create.topics": False},
+        ))
+        thread.start()
+        assert started_flag.wait(10)
+        time.sleep(3)  # let it reach the offboarded message first
+        _produce(kafka_bootstrap, kafka_topic, good_lines)
+
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and _count_alert_ids(ch_client, good_ids) < len(good_ids):
+            time.sleep(0.5)
+        stop_flag.set()
+        thread.join(timeout=10)
+
+        assert _count_alert_ids(ch_client, good_ids) == len(good_ids), "the other tenant's alerts must keep landing"
+        rows = ch_client.query("SELECT error FROM dead_letter_events WHERE tenant_id = {t:String}",
+                               parameters={"t": offboarded}).result_rows
+        assert rows and "unknown_tenant" in rows[0][0] and "tenant offboarded" in rows[0][0], rows
+        assert metrics.snapshot().get("dead_letter_topic_missing", 0) >= 1
+    finally:
+        delete_topics_and_wait(admin, [off_topic])
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{offboarded}'")
+
+
+def test_writer_survives_a_topic_deleted_while_it_runs(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, pg_db, database_url):
+    """A topic deleted after the writer consumed from it (tenant offboarding,
+    or a suite tearing down its topics) used to crash the writer at its next
+    commit: KafkaException UNKNOWN_TOPIC_OR_PART (seen as 9 and 6 lab writer
+    restarts). It must keep running and keep landing other tenants' rows."""
+    import json
+    from confluent_kafka.admin import AdminClient, NewTopic
+    from shadowtracer_ingest.topics import alerts_topic_for_tenant, dead_letter_topic_for_tenant
+
+    marker = uuid.uuid4().hex[:8]
+    gone = f"test-gone-{marker}"
+    insert_tenant(pg_db, gone)
+    gone_topics = [alerts_topic_for_tenant(gone), dead_letter_topic_for_tenant(gone)]
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
+    for f in admin.create_topics([NewTopic(t, num_partitions=1, replication_factor=1) for t in gone_topics]).values():
+        f.result(30)
+
+    def lines(tag):
+        out = []
+        for i, line in enumerate(real_alert_lines):
+            alert = json.loads(line)
+            alert["id"] = f"{alert['id']}.{marker}.{tag}{i}"
+            out.append(json.dumps(alert))
+        return out, [json.loads(x)["id"] for x in out]
+
+    gone_lines, gone_ids = lines("g")
+    later_lines, later_ids = lines("k")
+    stop_flag, thread, _ = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
+    try:
+        _produce(kafka_bootstrap, gone_topics[0], gone_lines)
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and _count_alert_ids(ch_client, gone_ids) < len(gone_ids):
+            time.sleep(0.5)
+        assert _count_alert_ids(ch_client, gone_ids) == len(gone_ids)
+
+        delete_topics_and_wait(admin, gone_topics)
+        _produce(kafka_bootstrap, kafka_topic, later_lines)  # the next commit still covers the deleted partition
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and _count_alert_ids(ch_client, later_ids) < len(later_ids):
+            time.sleep(0.5)
+        assert thread.is_alive(), "the writer must not crash when a consumed topic is deleted"
+        assert _count_alert_ids(ch_client, later_ids) == len(later_ids), "other tenants' rows must keep landing"
+    finally:
+        stop_flag.set()
+        thread.join(timeout=10)
+        ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in gone_ids + later_ids)})")

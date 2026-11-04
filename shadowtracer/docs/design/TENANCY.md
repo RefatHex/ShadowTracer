@@ -231,3 +231,70 @@ that otherwise has nothing to do with enrollment security.
 
 I'll decide — flagged for the project owner, per Item 1's instruction, before this
 moves from "recommendation" to "decided" in `docs/DECISIONS.md`.
+
+## 6. Offboarding a tenant
+
+A tenant has: a `tenants` row (Postgres), two Kafka topics
+(`shadowtracer.t.<key>.alerts`, `shadowtracer.t.<key>.dead-letter`, from
+`deploy/lab/create-kafka-topics.sh`), its shipper's SCRAM user and literal
+ACLs on those topics (`create-kafka-acls.sh`), and its rows in ClickHouse and
+Postgres.
+
+### Procedure
+
+1. **Stop the tenant's shippers**, so nothing new reaches its alerts topic.
+2. **Drain.** Wait until both consumer groups have no lag on the tenant's
+   alerts topic: `deploy/load/sample_pipeline.py --tenant-key <key>` shows
+   `w_lag 0 c_lag 0`, or check `/health/detail`.
+3. **Export** whatever the retention policy requires (out of scope here).
+4. **Delete the `tenants` row.** Writers and correlators refresh their
+   tenant cache on a miss (`tenants.py`, rate-limited), so any later message
+   for this key is dead-lettered as `unknown_tenant`.
+5. **Delete the two topics**, then the shipper's ACLs and SCRAM user.
+6. **Delete the tenant's data** by `tenant_id`/`tenant_key` in ClickHouse
+   (`ALTER TABLE … DELETE`) and Postgres, as the policy says.
+
+### If the steps run out of order (fixed 2026-11-05)
+
+A message still in the alerts topic after step 4 is dead-lettered, but by
+then step 5 may have deleted the tenant's dead-letter topic. The
+writer/correlator principals can't create topics, and dead-letter producers
+no longer try (`allow.auto.create.topics=false`). The publish therefore
+fails with `TOPIC_AUTHORIZATION_FAILED` and can never succeed.
+
+**Before the fix:** the dead-letter path treated every publish failure as
+transient and retried forever. That stalled every partition the consumer
+replica owned, for **all** tenants, and failed `/health/ready`
+(`consumers_stuck`) until the process restarted. Reproduced on the lab on
+2026-11-04: the test tenant's writer lag went 85 → 1,358 and correlator lag
+42 → 1,373 over two minutes after one message for an offboarded tenant.
+
+**Now:** `send_to_dead_letter` checks the cluster's own topic metadata.
+Only if the dead-letter topic is positively absent does the ClickHouse
+`dead_letter_events` row become the durable record. That write is required
+and retried if it fails. The message is then skipped and the offset
+committed. Look for these rows with:
+
+```sql
+SELECT tenant_id, component, source_location, error FROM dead_letter_events
+WHERE error LIKE '%dead-letter topic missing: tenant offboarded%'
+```
+
+They also increment the `dead_letter_topic_missing` metric. A broker that
+can't answer metadata at all is still treated as transient.
+
+**Second symptom, same cause:** a topic deleted after the writer consumed
+from it made the writer's next synchronous commit fail with
+`UNKNOWN_TOPIC_OR_PART`. Only `_NO_OFFSET` was tolerated there, so the
+process exited and Docker restarted it. Seen as 9 and 6 lab writer restarts
+while the suites deleted their topics. That error is now tolerated: there is
+nothing left to commit for a deleted topic, and anything else redelivered is
+deduplicated. The correlator commits asynchronously and was never affected.
+Test: `test_writer_survives_a_topic_deleted_while_it_runs` (fails on the
+old code: the writer thread dies).
+
+Tests: `ingest/tests/test_dead_letter.py` (fallback, no ClickHouse → raises,
+unreachable broker → raises) and
+`test_offboarded_tenant_message_does_not_stall_other_tenants` in both
+`ingest/tests/test_writer.py` and `correlate/tests/test_consumer.py`. The
+writer test fails on the old code: 0 of 10 of the other tenant's alerts land.

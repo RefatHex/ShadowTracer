@@ -140,18 +140,13 @@ without creating anything.
   an optional `topic_pattern` (default unchanged), and the suites pass
   `^shadowtracer\.t\.test-.+\.alerts$`. Every test tenant key starts with
   `test-`.
-- **The lab's consumers read the suites' topics.** The reverse direction:
-  the production pattern also matches test topics. A lab consumer that
-  picks up a test message for an unknown tenant tries to dead-letter it,
-  but the suite has already deleted that topic and the lab principal can't
-  create topics (`TOPIC_AUTHORIZATION_FAILED`). It then retries forever,
-  pausing its partitions and failing `/health/ready` until restarted.
-  **Proposal, not done:** validate tenant keys as 32-hex at tenant creation
-  and narrow the production pattern to `^shadowtracer\.t\.[0-9a-f]{32}\.alerts$`.
-  Both lab tenants already are 32-hex, but nothing enforces it today, and
-  narrowing the pattern without the validation would silently ignore a
-  non-hex tenant. Until then: restart the lab writer/correlator after
-  running the suites against the lab broker.
+- **The lab's consumers read the suites' topics.** The production pattern
+  also matches test topics. A lab consumer that picked up a test message
+  for an unknown tenant, after the suite had deleted that topic, used to
+  retry the dead-letter publish forever. This is the same bug as tenant
+  offboarding and is fixed there (`docs/design/TENANCY.md` §6). The message
+  is now recorded in ClickHouse and skipped. Narrowing the production
+  pattern (32-hex tenant keys) remains a separate hygiene proposal.
 - **Stale stuck rows outlived a restart.** `clear_stuck()` now runs once at
   writer and correlator start-up. A fresh process isn't in a retry, and
   with 4a's "clear only after a retried insert" the writer would never have

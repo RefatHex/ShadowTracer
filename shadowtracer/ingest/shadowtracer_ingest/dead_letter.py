@@ -80,7 +80,12 @@ def send_to_dead_letter(
 ) -> None:
     """Raises if the Kafka publish fails (caller must retry, not commit);
     never raises if only the ClickHouse insert fails (logged and counted
-    on `metrics` as dead_letter_ch_failures if given, but swallowed)."""
+    on `metrics` as dead_letter_ch_failures if given, but swallowed).
+
+    Exception: if the tenant's dead-letter topic no longer exists (the
+    tenant was offboarded), the ClickHouse row becomes the durable record -
+    then a ClickHouse failure raises (caller retries) and success returns
+    normally, counted as dead_letter_topic_missing."""
     failed_at = datetime.datetime.now(datetime.timezone.utc)
     tenant_key = tenant_key or ""
     # Phase 5.6 Item 1: per-tenant topic, not one shared
@@ -121,27 +126,44 @@ def send_to_dead_letter(
             if err is not None:
                 delivery_error.append(err)
 
-        kafka_producer.produce(
-            dead_letter_topic, value=json.dumps(envelope).encode(),
-            headers=[("tenant_id", tenant_key.encode())], on_delivery=_on_delivery,
-        )
-        still_pending = kafka_producer.flush(5)
-        if still_pending or delivery_error:
-            raise RuntimeError(
-                f"dead-letter Kafka publish did not durably succeed: "
-                f"still_pending={still_pending} delivery_error={delivery_error[:1]}"
+        try:
+            kafka_producer.produce(
+                dead_letter_topic, value=json.dumps(envelope).encode(),
+                headers=[("tenant_id", tenant_key.encode())], on_delivery=_on_delivery,
             )
+            still_pending = kafka_producer.flush(5)
+            if still_pending or delivery_error:
+                raise RuntimeError(
+                    f"dead-letter Kafka publish did not durably succeed: "
+                    f"still_pending={still_pending} delivery_error={delivery_error[:1]}"
+                )
+        except Exception:
+            # An offboarded tenant (docs/design/TENANCY.md): its dead-letter
+            # topic is deleted, so this publish can never succeed, and
+            # retrying it forever stalls every tenant on the caller's
+            # partitions. Only when the topic is absent from the cluster's own
+            # metadata (not on a broker hiccup) does the ClickHouse row become
+            # the durable record - required, so its failure propagates.
+            if ch_client is None or not _topic_missing(kafka_producer, dead_letter_topic):
+                raise
+            # A publish that merely timed out is still queued in the producer;
+            # drop it, or every later flush() would report it as pending. This
+            # producer is flushed per call, so nothing else is queued here.
+            kafka_producer.purge()
+            kafka_producer.poll(0)
+            _insert_dead_letter_row(ch_client, tenant_key, component, source_location,
+                                    f"{error} [dead-letter topic missing: tenant offboarded]",
+                                    raw_event_preview, raw_event_size, raw_event_sha256, failed_at)
+            logger.warning("dead-letter topic %s does not exist (tenant offboarded?) - recorded in "
+                           "ClickHouse only: component=%s %s", dead_letter_topic, component, source_location)
+            if metrics is not None:
+                metrics.incr("dead_letter_topic_missing")
+            return
 
     if ch_client is not None:
         try:
-            ch_client.insert(
-                "dead_letter_events",
-                [[tenant_key, component, source_location, error, raw_event_preview, raw_event_size, raw_event_sha256, failed_at]],
-                column_names=[
-                    "tenant_id", "component", "source_location", "error",
-                    "raw_event_preview", "raw_event_size", "raw_event_sha256", "failed_at",
-                ],
-            )
+            _insert_dead_letter_row(ch_client, tenant_key, component, source_location, error,
+                                    raw_event_preview, raw_event_size, raw_event_sha256, failed_at)
         except Exception as exc:  # noqa: BLE001 - best-effort secondary sink: the Kafka copy above is already durable, so this must never crash the caller or block the pipeline
             logger.warning(
                 "dead-letter ClickHouse insert failed (Kafka dead-letter topic copy already durable) "
@@ -149,3 +171,22 @@ def send_to_dead_letter(
             )
             if metrics is not None:
                 metrics.incr("dead_letter_ch_failures")
+
+
+def _insert_dead_letter_row(ch_client, tenant_key, component, source_location, error,
+                            raw_event_preview, raw_event_size, raw_event_sha256, failed_at) -> None:
+    ch_client.insert(
+        "dead_letter_events",
+        [[tenant_key, component, source_location, error, raw_event_preview, raw_event_size, raw_event_sha256, failed_at]],
+        column_names=[
+            "tenant_id", "component", "source_location", "error",
+            "raw_event_preview", "raw_event_size", "raw_event_sha256", "failed_at",
+        ],
+    )
+
+
+def _topic_missing(kafka_producer, topic: str) -> bool:
+    """True only if the cluster's metadata positively lists no such topic.
+    A metadata request that itself fails (broker down) raises, so the
+    caller keeps treating the publish failure as transient."""
+    return topic not in kafka_producer.list_topics(timeout=10).topics

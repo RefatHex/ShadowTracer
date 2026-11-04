@@ -173,6 +173,9 @@ def run(
     dead_letter_producer = Producer({
         "bootstrap.servers": bootstrap_servers,
         "topic.metadata.refresh.interval.ms": 10000,
+        # Tenant topics are provisioned explicitly (create-kafka-topics.sh);
+        # never recreate an offboarded tenant's dead-letter topic by publishing to it.
+        "allow.auto.create.topics": False,
         **kafka_client_config,
     })
     # Phase 5C Step 0: a forged/stale/deleted tenant_key must never create

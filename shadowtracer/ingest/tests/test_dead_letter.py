@@ -178,3 +178,63 @@ def test_replaying_the_same_dead_letter_does_not_duplicate_the_row(kafka_bootstr
         assert after_merge == 1, "a forced merge must collapse the replayed duplicate down to one row"
     finally:
         ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_key}'")
+
+
+def _non_creating_producer(kafka_bootstrap):
+    # The lab's writer/correlator principals can't create topics; this test
+    # runs as admin, so turn auto-creation off to get the same situation.
+    return Producer({"bootstrap.servers": kafka_bootstrap, "allow.auto.create.topics": False,
+                     **kafka_client_config_from_env()})
+
+
+def test_offboarded_tenant_dead_letter_lands_in_clickhouse_instead_of_retrying_forever(kafka_bootstrap, ch_client):
+    """Tenant offboarding: the tenant's dead-letter topic is gone, so the Kafka
+    publish can never succeed. Before the fix every caller retried it forever
+    and stalled its partitions; now the ClickHouse row is the durable record."""
+    import time
+    tenant_key = f"test-off-{uuid.uuid4().hex[:8]}"
+    producer = _non_creating_producer(kafka_bootstrap)
+    metrics = Metrics()
+    try:
+        started = time.monotonic()
+        send_to_dead_letter(
+            kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_key,
+            component="writer", source_location=f"shadowtracer.t.{tenant_key}.alerts:0:7",
+            error="unknown_tenant", raw_event="{}", metrics=metrics,
+        )
+        assert time.monotonic() - started < 30
+        rows = ch_client.query(
+            "SELECT error FROM dead_letter_events WHERE tenant_id = {t:String}", parameters={"t": tenant_key},
+        ).result_rows
+        assert len(rows) == 1 and "tenant offboarded" in rows[0][0], rows
+        assert metrics.snapshot().get("dead_letter_topic_missing") == 1
+
+        # The timed-out publish must not linger in the producer and fail the
+        # next dead letter for a tenant whose topic does exist.
+        send_to_dead_letter(
+            kafka_producer=producer, ch_client=None, tenant_key=_SHARED_TEST_TENANT,
+            component="writer", source_location="x", error="x", raw_event="{}",
+        )
+    finally:
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant_key}'")
+
+
+def test_offboarded_tenant_without_clickhouse_still_raises(kafka_bootstrap):
+    """No ClickHouse sink means no durable record at all - keep failing."""
+    with pytest.raises(Exception):
+        send_to_dead_letter(
+            kafka_producer=_non_creating_producer(kafka_bootstrap), ch_client=None,
+            tenant_key=f"test-off-{uuid.uuid4().hex[:8]}", component="writer",
+            source_location="x", error="x", raw_event="{}",
+        )
+
+
+def test_unreachable_broker_is_never_mistaken_for_an_offboarded_tenant(ch_client):
+    """The fallback needs positive proof the topic is gone; a broker that
+    can't answer metadata at all stays a transient failure."""
+    with pytest.raises(Exception):
+        send_to_dead_letter(
+            kafka_producer=Producer({"bootstrap.servers": "127.0.0.1:1", "message.timeout.ms": 2000}),
+            ch_client=ch_client, tenant_key="test", component="writer",
+            source_location="x", error="x", raw_event="{}",
+        )

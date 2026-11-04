@@ -173,6 +173,9 @@ def run(
     dead_letter_producer = Producer({
         "bootstrap.servers": bootstrap_servers,
         "topic.metadata.refresh.interval.ms": 10000,
+        # Tenant topics are provisioned explicitly (create-kafka-topics.sh);
+        # never recreate an offboarded tenant's dead-letter topic by publishing to it.
+        "allow.auto.create.topics": False,
         **kafka_client_config,
     })
     pg_engine = create_engine(database_url, pool_pre_ping=True)
@@ -405,12 +408,18 @@ def run(
             # genuinely nothing to commit for a partition that no
             # longer exists, so this is caught and skipped, never
             # re-raised; any OTHER commit failure still propagates.
+            # Same family (tenant offboarding, docs/design/TENANCY.md §6): a
+            # topic deleted after this batch was consumed fails the commit with
+            # UNKNOWN_TOPIC_OR_PART. Found crashing the lab writers (9 and 6
+            # restarts) while the suites deleted their topics. Nothing is left
+            # to commit for a deleted topic; anything else in this batch that
+            # didn't commit is redelivered and deduplicated (module docstring).
             try:
                 consumer.commit(asynchronous=False)
             except KafkaException as exc:
-                if exc.args[0].code() != KafkaError._NO_OFFSET:
+                if exc.args[0].code() not in (KafkaError._NO_OFFSET, KafkaError.UNKNOWN_TOPIC_OR_PART):
                     raise
-                logger.warning("commit skipped (partition revoked mid-batch, nothing to commit): %s", exc)
+                logger.warning("commit skipped for a revoked or deleted partition (nothing to commit): %s", exc)
             metrics.incr("batches_committed")
     finally:
         consumer.close()
