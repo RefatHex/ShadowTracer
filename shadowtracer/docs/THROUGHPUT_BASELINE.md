@@ -8,6 +8,12 @@
 
 **On this lab, ShadowTracer sustains ~100 events/s end to end (~8.6 million/day); the first bottleneck is per-event database round trips in the Kafka consumers on a single partition — the correlator (one Postgres transaction per alert) and the writer (mostly 1-row ClickHouse inserts at ~60–100 ms each) both saturate between 100 and 150 events/s.**
 
+**After the throughput fixes (§12, 2026-11-04/05): ~500 events/s end to end
+(~43 million/day), alert → ClickHouse p95 2.1 s, alert → incident p95 3.0 s.
+Writer alone ~100 → ~3,200/s; correlator alone ~200 → ~400/s sustained
+(~800–890 saturated). The first bottleneck is now the correlator on the
+single Kafka partition one manager's syslog lands on.**
+
 | Component (tested alone) | Sustained ceiling (events/s) | First symptom | Resource that ran out |
 |---|---|---|---|
 | Wazuh analysisd (test manager) | **~4,000** (4,000 held 120 s; 5,000 not) | `event_queue_usage` → 1.00, then `events_dropped` climbs (`/var/ossec/var/run/wazuh-analysisd.state`) | analysisd processing: ~3,800–4,300 processed/s flat, ~450–530% CPU for the manager container. Host CPU **not** exhausted (top: 37–87% idle) |
@@ -795,3 +801,146 @@ What was done (supported only):
 since the restart; the only queue entries are the 25 pre-existing ones
 above. The same reset that cost 300–470 parts per table four hours earlier
 cost nothing with fsync on.
+## 12. After the throughput fixes (2026-11-04) — before/after
+
+Changes (design: `shadowtracer/docs/design/THROUGHPUT_FIXES.md`):
+
+- **Writer:** one insert per batch (≤5,000 rows / 1 s); offset-bucket
+  per-row inserts removed; replay correctness from ReplacingMergeTree +
+  `uniqExact`.
+- **Correlator:** one transaction per poll batch (≤500 messages), one
+  `FOR UPDATE` per correlation key, bulk memberships, one `UPDATE` per
+  touched incident.
+- **ClickHouse durability:** part fsync on after insert, merge and fetch
+  (§11), so every "after" number includes the fsync cost.
+- **Partitioning:** unchanged (4c is a proposal). Every syslog alert is still
+  agent `000`, on one partition.
+
+Same machine, same tooling (`deploy/load/`). The anonymised fixture
+replaces the raw export (§2.1). Writers and correlators are rebuilt
+from the new code.
+
+### 12.1 Writer alone (Stage 3, Kafka-direct, 3 partitions, correlators stopped)
+
+`stage_kafka.sh` → `generate_load.py --target kafka`, 180 s per step;
+writer lag from `sample_pipeline.py` every ~15 s. Inserts: `system.query_log`
+on both nodes (node 2: 0 at every step).
+
+| input/s | before: writer lag | after: writer lag | after: inserts in 180 s, avg / p95 ms |
+|---|---|---|---|
+| 200 | 3k → 16k, growing | 300–960, flat | 165, 947 / 1,564 |
+| 400 | 15k → 67k, growing | 550–1,650, flat | 173, 898 / 1,591 |
+| 800 | — | 950–2,900, flat | 197, 657 / 1,362 |
+| 1,600 | — | 1.4k–16k, back to 0 ≤15 s after stop | 168, 898 / 2,565 |
+| 3,200 | — | 5.8k–31k oscillating, back to 0 ≤15 s after stop | 140, 1,449 / 3,015 |
+| 6,400 | — | 46k → 602k, growing | 110, 2,442 / 4,921 |
+| 12,800 | — | 681k → 2.31M, growing | 89, 3,273 / 8,052 |
+
+Drain after the 6,400 and 12,800 steps: 602,092 → 547,092 in ~16 s and
+2,310,516 → 2,260,516 in 15 s, i.e. **~3,300–3,400 rows/s saturated**.
+Writers sat at 7–30% CPU; at 6,400/s ch-clickhouse-1 was 158%. The limit is
+now ClickHouse insert time on node 1, ~1–3 s per batch with fsync.
+
+**Writer: before ~100/s sustained (~110–120 saturated) → after ~3,200/s
+sustained (~3,300 saturated), ×30.**
+
+### 12.2 Correlator alone (Stage 4, Kafka-direct, 3 partitions, writers stopped)
+
+Postgres commits from `pg_stat_database.xact_commit` before/after each
+180 s step.
+
+| input/s | before: correlator lag | after: correlator lag | after: Postgres commits in step (≈/s) | after: Postgres CPU |
+|---|---|---|---|---|
+| 200 | levels at ~1.7k | — | — | — |
+| 400 | 1.5k → 33.5k, growing | 0.8k–2.8k, back to 0 after stop | 4,155 (~23/s) | 60% |
+| 800 | — | 3.9k → 19k, growing ~100/s | 5,211 (~29/s) | 88% |
+| 1,600 | — | 12k → 137k, growing ~790/s | 5,687 (~32/s) | 46% |
+| 3,200 | — | 168k → 531k, growing ~2,300/s | 5,812 (~32/s) | 95% |
+
+Before, Postgres ran 458–506 transactions/s for ~200 alerts/s. After, it
+runs ~20–40 per second, one per batch. Processed rate when saturated
+(input − lag growth): ~700/s at 800, ~810/s at 1,600, ~890/s at 3,200. Lock
+waiters: 0–2 throughout.
+
+**Correlator: before ~200/s sustained (~210 saturated) → after ~400/s
+sustained (~800–890 saturated).** The new limit is per-key work inside each
+batch on this synthetic stream: 322 distinct correlation keys over 50 agents
+means hundreds of `FOR UPDATE` lookups per 500-message batch. Postgres CPU
+reached 95% and correlator CPU 70–86%.
+
+### 12.3 analysisd and shipper (unchanged code, confirmation runs)
+
+Run on 2026-11-05 (after the third outage), writers and correlators stopped,
+`sample_pipeline.py`:
+
+```
+syslog 4000/s:  ad_recv 4002-4006  ad_proc 1570-2000  ad_drop 1573-2299  ad_q 1.00
+syslog 5000/s:  ad_recv 4957-5009  ad_proc 1685-1913  ad_drop 1449-3316  ad_q 1.00
+shipper 10000/s: byte lag 6.1M-54.8M, back to 0 after stop   (same as before)
+shipper 15000/s: byte lag 10.4M -> 268.2M, growing            (same as before)
+```
+
+The **shipper** reproduces §4 exactly. **analysisd does not reproduce
+§3.3.** It now saturates at ~1,400–2,000 processed/s, against ~3,800–4,300
+before. Its code did not change, and the fixture was ruled out by an
+isolated A/B at 3,000/s (same seed):
+
+```
+raw export:  ad_proc 1513 1411 1457   ad_drop 0 1538 1547
+anonymised:  ad_proc 1447 1398 1365   ad_drop 237 1607 1638
+```
+
+At the time, `top` in the manager showed `wazuh-analysisd` at 440% CPU with
+24.9% of host CPU in the kernel. On Nov 4 it held 3,000/s at ~100%. What
+changed on that manager is its output files: `alerts.json` is now 31,966,116,742 B
+and `alerts.log` 4,627,308,895 B, both unrotated since the load runs; they
+were a few GB during §3. The cause is not proven. **The analysisd "after"
+number is not comparable**; re-measure after the nightly rotation (or with
+those files truncated).
+
+### 12.4 End to end (raw syslog → manager → … → ClickHouse + Postgres)
+
+`../load/e2e_step.sh <rate> 600 after-e2e-r<rate>`, 10 min per step, backlog
+skipped before each. All 5 steps: 0 dead letters, 0 error/exception log
+lines in shipper, writers and correlators, 0 restarts.
+
+| step | before: lags | after: writer lag | after: correlator lag | after: writer latency p50 / p95 / p99 | after: correlator latency p50 / p95 / p99 |
+|---|---|---|---|---|---|
+| 100/s | flat (w ≤2.5k, c ≤2.6k) | ≤ 409, flat | ≤ 154, flat | **1.3 / 2.0 / 2.1 s** (before 10.6 / 19.3 / 22.5) | **0.9 / 1.5 / 1.6 s** (before 13.1 / 25.3 / 27.7) |
+| 150/s | both grow | — | — | — | — |
+| 500/s | both grow ~400/s | ≤ 1,082, flat | 531–1,895, flat | **1.4 / 2.1 / 2.3 s** | **1.2 / 3.0 / 4.6 s** |
+| 1,000/s | — | ≤ 3,147, flat | 18.5k → 292k, grows ~490/s | 1.5 / 2.3 / 2.8 s | 213 s p50 (backlogged) |
+| 2,000/s | — | ≤ 4.5k, flat | 50k → 818k, grows ~1,500/s | 1.9 / 7.1 / 17.7 s | backlogged |
+| 5,000/s | — | analysisd saturated (§12.3): processed ~940–1,200/s, dropped ~3,800–4,070/s | | | |
+
+**End to end: before ~100 events/s (8.6 M/day) → after ~500 events/s
+(~43 M/day) on this lab**, with alert → ClickHouse row p95 2.1 s and alert →
+incident p95 3.0 s at 500/s. The first bottleneck is now the correlator on
+the single partition a manager's syslog lands on (~500/s). The writer keeps
+up with 2,000/s even on one partition.
+
+### 12.5 Partition skew, measured (4c)
+
+A syslog-originated alert in ClickHouse (test tenant, `decoder_name='sshd'`):
+
+```
+{"agent": {"id": "000", "name": "shadowtracer-worker-test"}, "location": "172.28.0.1",
+ "predecoder.hostname": "load-test-host", ...}
+```
+
+The shipper keys Kafka on `agent.id` (`shipper.py:143-148`, `key =
+agent_id.encode()` at 242), so every such alert from one manager hashes to
+one partition. Test-topic high watermarks across the five end-to-end steps
+(`skip_test_backlog.sh` output):
+
+```
+partition 0: 5700194 5700194 5700194 5700194 5700194   (+0)
+partition 1: 5978411 5978411 5978411 5978411 5978411   (+0)
+partition 2: 12550646 -> 12610646 -> 12910646 -> 13510647 -> 14710645 -> 15390948
+             (+60,000 / +300,000 / +600,001 / +1,199,998 / +680,303 = rate x 600 s, all of it)
+```
+
+100% of the syslog traffic lands on one partition, served by one writer
+and one correlator replica. Re-keying is proposed, not done (it changes the
+per-agent ordering guarantee); see `THROUGHPUT_FIXES.md` 4c.
+

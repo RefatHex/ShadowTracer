@@ -1,11 +1,12 @@
 """The correlation engine's Kafka consumer loop (Phase 5A Step 1): a
 second, independent consumer group on the same raw events topic the
 writer reads - never ClickHouse, which holds alert content but no
-incident state. Offsets are committed only after the PostgreSQL write for
-that message has actually succeeded (process_event's transaction
-committed) - if the process dies in between, the next consumer in the
-group re-reads the same message on restart and reprocesses it, which
-process_event makes a safe no-op (see its own docstring).
+incident state. Messages are consumed in batches (BATCH_MAX_MESSAGES) and each batch is
+one PostgreSQL transaction (correlator.process_batch - docs/design/
+THROUGHPUT_FIXES.md 4b). Offsets are committed only after that transaction
+has committed - if the process dies in between, the next consumer in the
+group re-reads the batch on restart and reprocesses it, which process_batch
+makes a safe no-op (see its own docstring).
 
 No single event may stop the pipeline - two distinct failure kinds, never
 confused with each other (same split as shadowtracer_ingest.writer):
@@ -39,11 +40,14 @@ from shadowtracer_ingest.shipper import ENVELOPE_VERSION  # noqa: E402
 from shadowtracer_ingest.tenants import TenantCache  # noqa: E402
 from shadowtracer_ingest.topics import ALERTS_TOPIC_PATTERN, tenant_from_alerts_topic  # noqa: E402
 
-from confluent_kafka import Consumer, Producer
+from confluent_kafka import Consumer, Producer, TopicPartition
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from .correlator import DEFAULT_MAX_SPAN_SECONDS, DEFAULT_SESSION_GAP_SECONDS, UnparseableEvent, process_event
+from .correlator import (
+    DEFAULT_MAX_SPAN_SECONDS, DEFAULT_SESSION_GAP_SECONDS, UnparseableEvent,
+    correlation_key_and_basis, parse_alert_time, process_batch,
+)
 from .sequences import DEFAULT_LATENESS_SECONDS
 from .metrics import Metrics
 from .sequences import load_sequences
@@ -51,6 +55,8 @@ from .sequences import load_sequences
 logger = logging.getLogger(__name__)
 
 POLL_TIMEOUT_SECONDS = 1.0
+# docs/design/THROUGHPUT_FIXES.md 4b: one transaction per poll batch.
+BATCH_MAX_MESSAGES = 500
 PROCESS_BASE_DELAY_SECONDS = 1.0
 PROCESS_MAX_DELAY_SECONDS = 30.0
 
@@ -122,6 +128,7 @@ def run(
     sequences_dir: str | None = None,
     sequence_lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
     kafka_client_config: dict | None = None,
+    topic_pattern: str = ALERTS_TOPIC_PATTERN,
 ):
     """ch_client is optional (None is fine, e.g. in tests that don't care
     about dead-letter counts) - a dead-lettered event still always goes to
@@ -151,7 +158,8 @@ def run(
         "topic.metadata.refresh.interval.ms": 10000,
         **kafka_client_config,
     })
-    consumer.subscribe([ALERTS_TOPIC_PATTERN])
+    # topic_pattern only ever narrows this in tests (their own topics, never the lab's).
+    consumer.subscribe([topic_pattern])
 
     engine = create_engine(database_url, pool_pre_ping=True)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
@@ -175,163 +183,131 @@ def run(
     # this directly - see retry_state.py's own docstring.
     retry_component = f"correlator:{group_id}"
 
+    # A freshly started process is not in a retry: drop any stuck row a
+    # previous incarnation left behind, or /health/ready would keep failing
+    # until this process happened to retry and recover on its own.
+    clear_stuck(engine, retry_component)
+
     if started_flag is not None:
         started_flag.set()
 
+    def dead_letter(msg, tenant_key, raw_line, error) -> bool:
+        return _dead_letter_with_retry(
+            stop_flag, metrics, consumer, engine, retry_component, group_id,
+            kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
+            component="correlator", source_location=f"{msg.topic()}:{msg.partition()}:{msg.offset()}",
+            error=error, raw_event=raw_line,
+        )
+
     try:
         while not stop_flag.is_set():
-            msg = consumer.poll(POLL_TIMEOUT_SECONDS)
-            if msg is None:
-                continue
-            if msg.error():
-                metrics.incr("messages_failed")
+            msgs = consumer.consume(num_messages=BATCH_MAX_MESSAGES, timeout=POLL_TIMEOUT_SECONDS)
+            if not msgs:
                 continue
 
-            # Phase 5.6 Item 1: the TRUSTED identity is the topic this
-            # message was actually read from, not the header below - a
-            # per-tenant producer ACL is what makes it trustworthy
-            # (docs/design/KAFKA_AUTH.md). None here would mean a
-            # non-tenant topic matched ALERTS_TOPIC_PATTERN, which can't
-            # happen if every topic exists via topics.alerts_topic_for_tenant.
-            tenant_key = tenant_from_alerts_topic(msg.topic())
-            header_tenant_id = None
-            envelope_version_raw = None
-            for k, v in (msg.headers() or []):
-                if k == "tenant_id":  # header name predates tenant_key (Phase 4 follow-up 1); the VALUE is the tenant_key
-                    header_tenant_id = v.decode()
-                elif k == "envelope_version":
-                    envelope_version_raw = v.decode()
-
-            # errors="replace", never strict: invalid UTF-8 in a Kafka
-            # message value must not crash the consumer loop - replaced
-            # bytes fail JSON parsing naturally below and get
-            # dead-lettered there.
-            raw_line = msg.value().decode("utf-8", errors="replace")
-            source_location = f"{msg.topic()}:{msg.partition()}:{msg.offset()}"
-
-            # Phase 5.6 Item 1: a header that's PRESENT but disagrees with
-            # the topic it actually arrived on is the one thing a
-            # per-tenant ACL alone can't catch (a shipper can still write
-            # a false claim into its OWN tenant's topic) - dead-lettered,
-            # trusting the topic, never the header. A MISSING header
-            # makes no claim to disagree with, so it's not an error - same
-            # backward-compat stance as a missing envelope_version header.
-            if header_tenant_id is not None and header_tenant_id != tenant_key:
-                metrics.incr("messages_failed")
-                if not _dead_letter_with_retry(
-                    stop_flag, metrics, consumer, engine, retry_component, group_id,
-                    kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
-                    component="correlator", source_location=source_location,
-                    error=f"tenant_topic_mismatch: topic claims {tenant_key!r}, header claims {header_tenant_id!r}",
-                    raw_event=raw_line,
-                ):
+            # Per-message checks first. Permanent bad data is dead-lettered
+            # here, never retried, and its offset is committed together with
+            # the batch below - never before it, since committing offset N+1
+            # also commits everything before N in that partition.
+            good = []  # (msg, event)
+            handled = []  # every message whose offset may be committed once the batch is done
+            shutting_down = False
+            for msg in msgs:
+                if msg.error():
+                    metrics.incr("messages_failed")
                     continue
-                consumer.commit(msg)
+
+                # Phase 5.6 Item 1: the TRUSTED identity is the topic this
+                # message was actually read from, not the header below - a
+                # per-tenant producer ACL is what makes it trustworthy
+                # (docs/design/KAFKA_AUTH.md).
+                tenant_key = tenant_from_alerts_topic(msg.topic())
+                header_tenant_id = None
+                envelope_version_raw = None
+                for k, v in (msg.headers() or []):
+                    if k == "tenant_id":  # header name predates tenant_key (Phase 4 follow-up 1); the VALUE is the tenant_key
+                        header_tenant_id = v.decode()
+                    elif k == "envelope_version":
+                        envelope_version_raw = v.decode()
+                # errors="replace", never strict: invalid UTF-8 must not crash
+                # the loop - it fails JSON parsing below and is dead-lettered.
+                raw_line = msg.value().decode("utf-8", errors="replace")
+
+                # A header that's PRESENT but disagrees with the topic is the
+                # one thing a per-tenant ACL alone can't catch (Phase 5.6
+                # Item 1); a MISSING header makes no claim, so it's not an error.
+                if header_tenant_id is not None and header_tenant_id != tenant_key:
+                    error = f"tenant_topic_mismatch: topic claims {tenant_key!r}, header claims {header_tenant_id!r}"
+                # A PRESENT envelope version this correlator doesn't know means
+                # something newer produced it (Phase 5.6 Item 4, VERSIONING.md).
+                elif envelope_version_raw is not None and envelope_version_raw != str(ENVELOPE_VERSION):
+                    error = f"unsupported_envelope_version: got {envelope_version_raw!r}, this correlator only understands {ENVELOPE_VERSION}"
+                # Phase 5C Step 0: a forged/stale/deleted tenant never creates incidents.
+                elif not tenant_cache.is_known(tenant_key or ""):
+                    error = "unknown_tenant"
+                else:
+                    error = None
+                    try:
+                        event = normalize_alert(raw_line, tenant_key or "")
+                        if correlation_key_and_basis(event) is not None:
+                            parse_alert_time(event)  # one bad timestamp is dead-lettered alone, never fails the batch
+                    except UnparseableEvent:
+                        logger.warning("alert in %s has a permanently malformed field - dead-lettering, not retrying",
+                                       f"{msg.topic()}:{msg.partition()}:{msg.offset()}")
+                        error = "UnparseableEvent: permanently malformed field"
+                    except Exception as exc:  # noqa: BLE001 - permanent, bad data: dead-letter and move on, never retried
+                        error = f"{type(exc).__name__}: {exc}"
+
+                if error is not None:
+                    metrics.incr("messages_failed")
+                    if not dead_letter(msg, tenant_key, raw_line, error):
+                        shutting_down = True  # graceful shutdown mid-retry: commit nothing, the batch is redelivered
+                        break
+                else:
+                    good.append((msg, event))
+                handled.append(msg)
+
+            if shutting_down:
                 continue
 
-            # Phase 5.6 Item 4: a missing header predates this change
-            # (version 1, the only shape that ever existed before it) - a
-            # PRESENT header this correlator doesn't recognize means
-            # something newer produced it and must not be silently
-            # misparsed (see writer.py's identical check and
-            # docs/design/VERSIONING.md's 46-pre-envelope-dead-letters
-            # story for why this matters).
-            if envelope_version_raw is not None and envelope_version_raw != str(ENVELOPE_VERSION):
-                metrics.incr("messages_failed")
-                if not _dead_letter_with_retry(
-                    stop_flag, metrics, consumer, engine, retry_component, group_id,
-                    kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
-                    component="correlator", source_location=source_location,
-                    error=f"unsupported_envelope_version: got {envelope_version_raw!r}, this correlator only understands {ENVELOPE_VERSION}",
-                    raw_event=raw_line,
-                ):
-                    continue
-                consumer.commit(msg)
-                continue
-
-            # Phase 5C Step 0: checked before normalize_alert, same
-            # permanent-bad-data path - never retried, since this
-            # tenant_key isn't about to start existing mid-retry any more
-            # than a bad timestamp is.
-            if not tenant_cache.is_known(tenant_key or ""):
-                metrics.incr("messages_failed")
-                if not _dead_letter_with_retry(
-                    stop_flag, metrics, consumer, engine, retry_component, group_id,
-                    kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
-                    component="correlator", source_location=source_location,
-                    error="unknown_tenant", raw_event=raw_line,
-                ):
-                    continue  # shutting down mid-retry - don't commit, this message is genuinely redelivered on restart
-                consumer.commit(msg)
-                continue
-
-            try:
-                event = normalize_alert(raw_line, tenant_key or "")
-            except Exception as exc:  # noqa: BLE001 - permanent, bad data: dead-letter and move on, never retried
-                metrics.incr("messages_failed")
-                if not _dead_letter_with_retry(
-                    stop_flag, metrics, consumer, engine, retry_component, group_id,
-                    kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
-                    component="correlator", source_location=source_location,
-                    error=f"{type(exc).__name__}: {exc}", raw_event=raw_line,
-                ):
-                    continue  # shutting down mid-retry - don't commit, this message is genuinely redelivered on restart
-                consumer.commit(msg)
-                continue
-
-            # Retries the SAME message in place, forever, with capped
-            # backoff, for a transient process_event failure (e.g. the
-            # database is briefly unreachable) - never dead-lettered, since
-            # by this point the event is known-good data. A permanently
-            # malformed field (UnparseableEvent) is the one exception this
-            # loop does NOT retry: it's bad data, so it's dead-lettered
-            # immediately instead, same as a normalize_alert failure above.
+            # The whole batch in one transaction, retried in place forever with
+            # capped backoff for a transient failure (e.g. the database is
+            # briefly unreachable) - never dead-lettered, it's known-good data,
+            # and process_batch is idempotent on redelivery.
+            results = []
             attempt_n = 0
-            result = None
-            while True:
+            while good:
                 db = Session()
                 try:
-                    result = process_event(
-                        db, event, session_gap_seconds, max_span_seconds,
+                    results = process_batch(
+                        db, [ev for _, ev in good], session_gap_seconds, max_span_seconds,
                         sequences=sequences, ch_client=ch_client, clickhouse_database=clickhouse_database,
                         sequence_lateness_seconds=sequence_lateness_seconds, metrics=metrics,
                     )
-                except UnparseableEvent:
-                    db.close()
-                    logger.warning("alert %s has a permanently malformed field - dead-lettering, not retrying", event.alert_id)
-                    metrics.incr("messages_failed")
-                    if not _dead_letter_with_retry(
-                        stop_flag, metrics, consumer, engine, retry_component, group_id,
-                        kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
-                        component="correlator", source_location=source_location,
-                        error="UnparseableEvent: permanently malformed field", raw_event=raw_line,
-                    ):
-                        result = None  # shutting down mid-retry - don't commit
-                        break
-                    consumer.commit(msg)
-                    result = None
                     break
-                except Exception as exc:  # noqa: BLE001 - presumed transient (e.g. database outage): retry forever, never dead-letter, never commit
-                    db.close()
+                except Exception as exc:  # noqa: BLE001 - presumed transient: retry forever, never dead-letter, never commit
                     attempt_n += 1
                     metrics.incr("process_errors")
-                    logger.warning(
-                        "process_event attempt %d failed for alert %s (transient - retrying): %s",
-                        attempt_n, event.alert_id, exc,
-                    )
+                    logger.warning("process_batch attempt %d failed for %d alerts (transient - retrying): %s",
+                                   attempt_n, len(good), exc)
                     delay = min(PROCESS_BASE_DELAY_SECONDS * (2 ** (attempt_n - 1)), PROCESS_MAX_DELAY_SECONDS)
                     if _wait_polling(stop_flag, delay, consumer):
-                        result = None  # graceful shutdown mid-retry: leave uncommitted, genuinely redelivered on restart
+                        shutting_down = True  # graceful shutdown mid-retry: leave uncommitted, redelivered on restart
                         break
-                    continue
-                else:
+                finally:
                     db.close()
-                    break
-
-            if result is None:
+            if shutting_down:
                 continue
 
-            metrics.incr(f"alerts_{result.status}")
-            consumer.commit(msg)
+            for result in results:
+                metrics.incr(f"alerts_{result.status}")
+            offsets = {}
+            for msg in handled:
+                tp = (msg.topic(), msg.partition())
+                offsets[tp] = max(offsets.get(tp, -1), msg.offset())
+            # Asynchronous, like the per-message commits before: a commit lost to a
+            # rebalance only means a redelivery, which process_batch makes a no-op.
+            consumer.commit(offsets=[TopicPartition(t, p, o + 1) for (t, p), o in offsets.items()])
+            metrics.incr("batches_committed")
     finally:
         consumer.close()

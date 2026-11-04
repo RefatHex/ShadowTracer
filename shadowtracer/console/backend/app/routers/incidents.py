@@ -229,12 +229,15 @@ def get_incident(
             # "incidents never delete or hide alerts" - ClickHouse stays
             # the one source of truth) - fetched here by the exact
             # (node, alert_id) pairs this incident's membership rows name.
+            # LIMIT 1 BY: an alert inserted twice (a writer replay) shows once
+            # even before ReplacingMergeTree merges the copies.
             pairs = ", ".join(f"('{node}', '{alert_id}')" for node, alert_id in memberships)
             query = f"""
                 SELECT {', '.join(ALERT_COLUMNS)}
                 FROM events
                 WHERE tenant_id = {{tenant_id:String}} AND (cluster_node, alert_id) IN ({pairs})
                 ORDER BY time ASC
+                LIMIT 1 BY cluster_node, alert_id
             """
             result = ch_client.query(query, parameters={"tenant_id": current_user.tenant_key})
             alerts = [IncidentAlert(**dict(zip(ALERT_COLUMNS, r))) for r in result.result_rows]

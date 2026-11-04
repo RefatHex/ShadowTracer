@@ -94,6 +94,11 @@ if [ -f /etc/rsyslog.conf ] && grep -q 'SysSock.Use="off"' /etc/rsyslog.conf; th
     sed -i 's/SysSock.Use="off"/SysSock.Use="on"/' /etc/rsyslog.conf
 fi
 
+# A container restarted after an unclean stop (host power loss) keeps the
+# previous run's /run/rsyslogd.pid; rsyslogd then refuses to start ("pidfile
+# ... and pid N already exist", N now some other process) and no auth log is
+# ever written. Nothing can be running yet at this point, so drop it.
+rm -f /run/rsyslogd.pid /var/run/rsyslogd.pid
 service rsyslog start || rsyslogd || true
 /usr/sbin/sshd
 

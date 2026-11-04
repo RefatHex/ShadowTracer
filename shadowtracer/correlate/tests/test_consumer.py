@@ -7,7 +7,7 @@ import uuid
 from confluent_kafka import Consumer, Producer
 from sqlalchemy import select
 
-from conftest import TEST_CLICKHOUSE_DB, delete_topics_and_wait, insert_tenant
+from conftest import TEST_CLICKHOUSE_DB, TEST_TOPIC_PATTERN, delete_topics_and_wait, insert_tenant
 from shadowtracer_correlate.consumer import run
 from shadowtracer_correlate.metrics import Metrics
 from shadowtracer_correlate.models import incident_alerts, incidents
@@ -69,6 +69,7 @@ def _start_consumer(kafka_bootstrap, topic, database_url, group_id=None, ch_clie
             database_url=database_url, metrics=metrics,
             stop_flag=stop_flag, started_flag=started_flag, ch_client=ch_client,
             kafka_client_config=kafka_client_config_from_env(),
+            topic_pattern=TEST_TOPIC_PATTERN,
         ),
         daemon=True,
     )
@@ -317,7 +318,7 @@ def test_two_correlation_workers_split_partitions_nothing_processed_twice(kafka_
     # Phase 5.6 Item 1: a real per-tenant topic name now (not an
     # arbitrary "multipart" name) - writer.py/consumer.py only ever
     # pattern-subscribe to shadowtracer.t.*.alerts.
-    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    tenant = f"test-{uuid.uuid4().hex[:8]}"  # "test-": the only topics test consumers subscribe to
     insert_tenant(db, tenant)
     topic = alerts_topic_for_tenant(tenant)
     admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})

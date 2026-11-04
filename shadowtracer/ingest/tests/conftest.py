@@ -264,3 +264,18 @@ FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "..", "fixtures", "real_
 def real_alert_lines():
     with open(FIXTURES_PATH) as f:
         return [line.rstrip("\n") for line in f if line.strip()]
+
+
+# Test consumers (writer.run / consumer.run) must only ever read this suite's
+# own topics. Every test tenant key starts with "test-" (kafka_tenant_key);
+# without this they pattern-subscribe to every lab tenant's topic from the
+# earliest offset and dead-letter the lab's retained traffic before reaching
+# their own messages.
+TEST_TOPIC_PATTERN = r"^shadowtracer\.t\.test-.+\.alerts$"
+
+
+@pytest.fixture(autouse=True)
+def _consumers_read_test_topics_only(monkeypatch):
+    import functools
+    from shadowtracer_ingest import writer as _m
+    monkeypatch.setattr(_m, "run", functools.partial(_m.run, topic_pattern=TEST_TOPIC_PATTERN))

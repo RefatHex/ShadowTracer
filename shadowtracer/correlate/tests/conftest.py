@@ -250,3 +250,11 @@ def kafka_topic(kafka_bootstrap, kafka_tenant_key):
     time.sleep(1)  # topic metadata propagation
     yield alerts_topic
     delete_topics_and_wait(admin, [alerts_topic, dead_letter_topic])
+
+
+# Test consumers (writer.run / consumer.run) must only ever read this suite's
+# own topics. Every test tenant key starts with "test-" (kafka_tenant_key);
+# without this they pattern-subscribe to every lab tenant's topic from the
+# earliest offset and dead-letter the lab's retained traffic before reaching
+# their own messages.
+TEST_TOPIC_PATTERN = r"^shadowtracer\.t\.test-.+\.alerts$"

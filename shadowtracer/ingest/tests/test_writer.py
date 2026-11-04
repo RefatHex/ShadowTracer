@@ -198,30 +198,35 @@ def test_writer_restart_mid_ingest_no_loss_no_duplicates(
     ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in alert_ids)})")
 
 
-def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, database_url):
-    """Phase 3 follow-up 1: reproduces the exact bug (replay inflating the
-    hourly rollup even though the base table's FINAL was already correct)
-    and proves both fixes - the per-partition insert_deduplication_token
-    (base table correct even WITHOUT FINAL) and the rollup's uniqExact
-    identity count (correct regardless of the token fix) - through the
-    real writer.run(), not manual SQL."""
+@pytest.mark.parametrize("first_pass", ["same_cut", "different_cut", "beyond_dedup_window"])
+def test_replay_keeps_identity_counts_exact(first_pass, kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, database_url):
+    """docs/design/THROUGHPUT_FIXES.md 4a: the writer batches by size/time,
+    so a replay may re-insert rows its first pass already wrote (different
+    batch cut -> different insert_deduplication_token, or a token that fell
+    out of replicated_deduplication_window). Counts must stay exact anyway:
+    events is ReplacingMergeTree on the alert identity, the rollup counts
+    uniqExact(cluster_node, alert_id), and raw rows converge to n on merge.
+
+    same_cut:            produce everything, consume, replay everything.
+    different_cut:       first pass trickles one message at a time (one
+                         insert each), the replay drains them as one batch.
+    beyond_dedup_window: replicated_deduplication_window=1, so the first
+                         pass's token is forgotten before the replay."""
     import json
+    import subprocess
     marker = uuid.uuid4().hex[:8]
-    lines = []
-    alert_ids = []
+    lines, alert_ids = [], []
     for i, line in enumerate(real_alert_lines):
         alert = json.loads(line)
         alert["id"] = f"{alert['id']}.{marker}.{i}"
         alert_ids.append(alert["id"])
         lines.append(json.dumps(alert))
     n = len(lines)
-
     group_id = f"test-replay-{marker}"
+    ids = ",".join(f"'{a}'" for a in alert_ids)
 
     def run_once():
-        metrics = Metrics()
-        stop_flag = threading.Event()
-        started_flag = threading.Event()
+        stop_flag, started_flag = threading.Event(), threading.Event()
         thread = threading.Thread(
             target=writer.run,
             kwargs=dict(
@@ -229,7 +234,7 @@ def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_top
                 clickhouse_hosts=[("127.0.0.1", 8123), ("127.0.0.1", 8124)],
                 clickhouse_user=lab_env["CLICKHOUSE_USER"], clickhouse_password=lab_env["CLICKHOUSE_PASSWORD"],
                 clickhouse_database=TEST_CLICKHOUSE_DB, database_url=database_url,
-                metrics=metrics, stop_flag=stop_flag, started_flag=started_flag,
+                metrics=Metrics(), stop_flag=stop_flag, started_flag=started_flag,
                 kafka_client_config=kafka_client_config_from_env(),
             ),
             daemon=True,
@@ -238,56 +243,80 @@ def test_replay_does_not_inflate_base_table_or_rollup(kafka_bootstrap, kafka_top
         started_flag.wait(timeout=10)
         return stop_flag, thread
 
-    def raw_count():
-        placeholders = ",".join(f"'{a}'" for a in alert_ids)
-        return ch_client.query(f"SELECT count() FROM events WHERE alert_id IN ({placeholders})").result_rows[0][0]
+    def q(sql):
+        return ch_client.query(sql).result_rows[0][0]
+
+    def identities():
+        return q(f"SELECT uniqExact(cluster_node, alert_id) FROM events WHERE alert_id IN ({ids})")
+
+    tenant = tenant_from_alerts_topic(kafka_topic)
 
     def rollup_total():
-        # events_hourly_rollup groups by (tenant_id, hour, agent_id, rule_id,
-        # rule_level), not alert_id, so other tests sharing the fixture's
-        # agent/rule ids contribute to the same buckets - measure the DELTA
-        # this test causes, not an absolute value.
-        return ch_client.query("SELECT sum(c) FROM (SELECT uniqExactMerge(identity_state) AS c FROM events_hourly_rollup GROUP BY tenant_id, hour, agent_id, rule_id, rule_level)").result_rows[0][0] or 0
+        return q(f"SELECT sum(c) FROM (SELECT uniqExactMerge(identity_state) AS c FROM events_hourly_rollup "
+                 f"WHERE tenant_id = '{tenant}' GROUP BY tenant_id, hour, agent_id, rule_id, rule_level)") or 0
 
-    rollup_before = rollup_total()
+    def wait_for(pred, seconds=40):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not pred():
+            time.sleep(0.5)
 
-    _produce(kafka_bootstrap, kafka_topic, lines)
-    stop1, t1 = run_once()
-    deadline = time.monotonic() + 40  # Phase 5.6 Item 1: see test_writer_is_actually_running_and_draining_not_just_callable's own comment on this margin
-    while time.monotonic() < deadline and raw_count() < n:
-        time.sleep(0.5)
-    stop1.set()
-    t1.join(timeout=5)
-    assert raw_count() == n, "initial consume should land exactly n rows"
-    rollup_after_first = rollup_total()
-    assert rollup_after_first - rollup_before == n, (
-        f"rollup should grow by exactly {n} after the initial consume, "
-        f"grew by {rollup_after_first - rollup_before}"
-    )
+    if first_pass == "beyond_dedup_window":
+        # Hashes are only pruned when the cleanup thread runs - make it run
+        # every second on this test table so "beyond the window" is reached.
+        ch_client.command("ALTER TABLE events MODIFY SETTING replicated_deduplication_window = 1, "
+                          "cleanup_delay_period = 1, cleanup_delay_period_random_add = 0")
+    try:
+        rollup_before = rollup_total()
 
-    # Replay: same consumer group, reset to earliest.
-    import subprocess
-    subprocess.run(
-        ["docker", "exec", "shadowtracer-lab-kafka-1", "/opt/kafka/bin/kafka-consumer-groups.sh",
-         "--bootstrap-server", "localhost:9092", "--command-config", "/etc/kafka/certs/admin-client.properties",
-         "--group", group_id, "--topic", kafka_topic,
-         "--reset-offsets", "--to-earliest", "--execute"],
-        check=True, capture_output=True,
-    )
+        stop1, t1 = run_once()
+        if first_pass == "different_cut":
+            for line in lines:  # each message alone -> idle-gap flush -> one insert per row
+                _produce(kafka_bootstrap, kafka_topic, [line])
+                time.sleep(1.5)
+        else:
+            _produce(kafka_bootstrap, kafka_topic, lines)
+        wait_for(lambda: identities() == n)
+        stop1.set()
+        t1.join(timeout=5)
+        assert identities() == n, "initial consume should land all n alerts"
+        assert rollup_total() - rollup_before == n
 
-    stop2, t2 = run_once()
-    time.sleep(8)  # let the full replay drain
-    stop2.set()
-    t2.join(timeout=5)
+        if first_pass == "beyond_dedup_window":
+            # Push the first pass's block hash out of the 1-block window.
+            ch_client.command("INSERT INTO events (tenant_id, time, cluster_node, alert_id) "
+                              f"VALUES ('window-filler-{marker}', now64(3), 'filler', 'filler-{marker}')")
+            zk = q(f"SELECT zookeeper_path FROM system.replicas WHERE database = '{TEST_CLICKHOUSE_DB}' AND table = 'events'")
+            wait_for(lambda: q(f"SELECT count() FROM system.zookeeper WHERE path = '{zk}/blocks'") <= 1, 180)  # the new period applies after the thread's current sleep
+            assert q(f"SELECT count() FROM system.zookeeper WHERE path = '{zk}/blocks'") <= 1, "first pass's block hash never left the window"
 
-    assert raw_count() == n, f"base table WITHOUT FINAL must show exactly {n} after replay, not {n*2} (insert_deduplication_token)"
-    rollup_after_replay = rollup_total()
-    assert rollup_after_replay - rollup_before == n, (
-        f"rollup must still show exactly {n} after replay (uniqExact), "
-        f"grew by {rollup_after_replay - rollup_before} total"
-    )
+        subprocess.run(
+            ["docker", "exec", "shadowtracer-lab-kafka-1", "/opt/kafka/bin/kafka-consumer-groups.sh",
+             "--bootstrap-server", "localhost:9092", "--command-config", "/etc/kafka/certs/admin-client.properties",
+             "--group", group_id, "--topic", kafka_topic, "--reset-offsets", "--to-earliest", "--execute"],
+            check=True, capture_output=True,
+        )
+        raw_before_replay = q(f"SELECT count() FROM events WHERE alert_id IN ({ids})")
+        stop2, t2 = run_once()
+        if first_pass == "same_cut":
+            time.sleep(8)  # nothing observable may change - give the replay time to (not) land
+        else:
+            wait_for(lambda: q(f"SELECT count() FROM events WHERE alert_id IN ({ids})") > raw_before_replay, 30)
+        stop2.set()
+        t2.join(timeout=5)
 
-    ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({','.join(repr(a) for a in alert_ids)})")
+        raw_after_replay = q(f"SELECT count() FROM events WHERE alert_id IN ({ids})")
+        if first_pass != "same_cut":
+            assert raw_after_replay == 2 * n, f"precondition: this replay must really re-insert (raw {raw_after_replay}, n {n})"
+        assert identities() == n, "uniqExact over the alert identity must stay n"
+        assert q(f"SELECT count() FROM events FINAL WHERE alert_id IN ({ids})") == n, "FINAL must show n"
+        assert rollup_total() - rollup_before == n, "rollup (uniqExact) must still grow by exactly n"
+        ch_client.command("OPTIMIZE TABLE events FINAL")
+        assert q(f"SELECT count() FROM events WHERE alert_id IN ({ids})") == n, "raw rows must converge to n after merge"
+    finally:
+        if first_pass == "beyond_dedup_window":
+            ch_client.command("ALTER TABLE events RESET SETTING replicated_deduplication_window, "
+                              "cleanup_delay_period, cleanup_delay_period_random_add")
+        ch_client.command(f"ALTER TABLE events DELETE WHERE alert_id IN ({ids}) OR tenant_id = 'window-filler-{marker}'")
 
 
 def test_writer_dead_letters_bad_data_keeps_good_ones(kafka_bootstrap, kafka_topic, kafka_tenant_key, ch_client, lab_env, real_alert_lines, pg_db, database_url):

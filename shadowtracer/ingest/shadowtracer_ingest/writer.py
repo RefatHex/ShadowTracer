@@ -16,26 +16,24 @@ real duplicate at the ClickHouse layer. Two independent defenses against
 that, not one (see PHASE3_DATA_PLATFORM.md's "Phase 3 follow-up 1" section
 for the full writeup and the real, measured behavior of each):
 
-- Step 3 inserts with `insert_deduplication_token` set from (topic,
-  partition, offset) - confirmed this also protects the dependent
-  materialized view (events_hourly_rollup_mv) even with
-  deduplicate_blocks_in_dependent_materialized_views at its default (0).
-  Phase 5.6 Item 3 follow-up found that deriving the token from
-  "whatever got batched together" doesn't survive a replay at a
-  different speed (proved: a slow write then a full-speed replay of the
-  same 12 messages produced 24 rows) - a batch grouped by arrival timing
-  can never be guaranteed to match a DIFFERENT run's grouping of the
-  same offsets. See DEDUP_CHUNK_SIZE's own comment for the fix: bucket
-  purely by offset, batch only a COMPLETE fixed-size bucket, fall back
-  to one insert per row for whatever's incomplete (the tail, or a
-  not-yet-full partition's entire backlog under low/moderate traffic).
-- schema/events_schema.sql's events table (ReplicatedReplacingMergeTree,
-  dedup on tenant_id/cluster_node/alert_id) and events_hourly_rollup
-  (uniqExact on cluster_node/alert_id) are the backstop for whatever the
-  token doesn't catch - they dedup by identity, not by batch shape, so
-  they hold even when the token-based defense above doesn't apply.
+- Step 3 is ONE insert per batch (up to BATCH_MAX_ROWS rows or
+  BATCH_MAX_SECONDS), whatever topics/partitions the rows came from. Its
+  insert_deduplication_token names the batch's offset ranges, so an exact
+  retry of the same insert is dropped by ClickHouse - a fast path only:
+  a replay that cuts the same range into different batches gets different
+  tokens and is inserted again.
+- That is safe because correctness never depended on the token alone:
+  schema/events_schema.sql's events table (ReplicatedReplacingMergeTree
+  ORDER BY tenant_id, time, cluster_node, alert_id) collapses duplicates of
+  an alert on merge, events_hourly_rollup counts uniqExact(cluster_node,
+  alert_id), and readers tolerate an unmerged duplicate (see
+  docs/design/THROUGHPUT_FIXES.md 4a). Phase 5.6's offset-bucket scheme,
+  which made replays re-form identical blocks at the cost of one insert per
+  row for every incomplete 100-offset bucket, is gone: it capped the writer
+  at ~100-120 rows/s (docs/THROUGHPUT_BASELINE.md).
 """
 
+import hashlib
 import logging
 import time
 
@@ -57,48 +55,12 @@ INSERT_MAX_DELAY_SECONDS = 30.0
 
 logger = logging.getLogger(__name__)
 
-BATCH_MAX_MESSAGES = 1000
-BATCH_MAX_SECONDS = 2.0
+# Starting values (docs/design/THROUGHPUT_FIXES.md 4a): big enough that a
+# backlog drains in a few large parts, small enough that a quiet stream is
+# still written within ~1 s plus the insert.
+BATCH_MAX_ROWS = 5000
+BATCH_MAX_SECONDS = 1.0
 POLL_TIMEOUT_SECONDS = 1.0
-# Phase 5.6 Item 3 follow-up: idle-gap flush alone is NOT sufficient -
-# proved for real (test_item3_followup_proof.py, now deleted after use):
-# a range written slowly (gaps > BATCH_MAX_SECONDS, so idle-gap-flush
-# fires after nearly every message) then replayed at full speed (a new
-# consumer group reading the same, now fully-published backlog with no
-# gaps at all) produced 24 raw rows for 12 real messages - the SLOW pass
-# flushed ~12 tiny batches (tokens "offset N-N" each), the FAST pass
-# flushed ~1 big batch (token "offset 0-11") - neither token set matches
-# the other's, so ClickHouse's block-level dedup can't recognize the
-# replay as already-seen data at all.
-# Root cause: insert_deduplication_token is a per-INSERT-statement
-# setting, matched only by an EXACT repeat of the same token string - it
-# can never be made to match across two DIFFERENT groupings of the same
-# rows, and grouping-by-arrival-timing can never be made identical
-# across two runs at different speeds (a consumer has no way to tell "a
-# slow but still-live stream" from "a stream that's permanently done"
-# from timing alone).
-# Fix: decouple "how we batch for insert efficiency" from "what the
-# dedup token covers" - bucket every row by a FIXED, offset-only
-# function (offset // DEDUP_CHUNK_SIZE), not by arrival time:
-#   - a COMPLETE bucket (exactly DEDUP_CHUNK_SIZE consecutive offsets,
-#     all captured in this flush) is batch-inserted as one call, token
-#     = the bucket's own fixed range - this is deterministic regardless
-#     of timing, since "the count reached a fixed number" never depends
-#     on how fast or slow those messages arrived.
-#   - an INCOMPLETE bucket (the tail of whatever's currently available,
-#     or a slice split across flush boundaries) cannot be trusted to
-#     group identically across two different-speed runs, so each of its
-#     rows gets inserted individually, tokened by its own exact
-#     (topic, partition, offset) - this is the one granularity ClickHouse
-#     can always match on a replay, no matter how the rows get batched.
-# Trade-off, accepted deliberately: low/moderate-throughput partitions
-# (most real traffic, most of the time) mostly pay per-row inserts
-# instead of one big batch - bounded by DEDUP_CHUNK_SIZE-1 extra calls
-# per flush at worst, same worst case idle-gap-flush already had before
-# this fix (every message its own tiny batch), just now provably
-# correct instead of accidentally-usually-correct. A sustained burst
-# (DEDUP_CHUNK_SIZE+ messages at once) still gets full batch efficiency.
-DEDUP_CHUNK_SIZE = 100
 
 COLUMNS = [
     "tenant_id", "time", "cluster_node", "manager_name", "alert_id",
@@ -163,6 +125,7 @@ def run(
     stop_flag,
     started_flag=None,
     kafka_client_config: dict | None = None,
+    topic_pattern: str = ALERTS_TOPIC_PATTERN,
 ):
     """Phase 5.6 Item 1: no single `topic` any more - every tenant has its
     own (topics.py), so this subscribes to ALERTS_TOPIC_PATTERN (a regex,
@@ -194,7 +157,8 @@ def run(
         "topic.metadata.refresh.interval.ms": 10000,
         **kafka_client_config,
     })
-    consumer.subscribe([ALERTS_TOPIC_PATTERN])
+    # topic_pattern only ever narrows this in tests (their own topics, never the lab's).
+    consumer.subscribe([topic_pattern])
 
     ch = _FailoverClickHouse(clickhouse_hosts, clickhouse_user, clickhouse_password, clickhouse_database)
     # Same tuning as the consumer above, same reason - confirmed for
@@ -235,6 +199,11 @@ def run(
         logger.warning("ClickHouse insert attempt %d failed (transient - retrying): %s", attempt, exc)
         mark_stuck(pg_engine, retry_component, group_id, consumer.assignment(), f"clickhouse_insert topic={msg_topic}: {exc}")
 
+    # A freshly started process is not in a retry: drop any stuck row a
+    # previous incarnation left behind, or /health/ready would keep failing
+    # until this process happened to retry and recover on its own.
+    clear_stuck(pg_engine, retry_component)
+
     if started_flag is not None:
         started_flag.set()
 
@@ -242,26 +211,10 @@ def run(
         while not stop_flag.is_set():
             batch_msgs = []
             deadline = time.monotonic() + BATCH_MAX_SECONDS
-            while len(batch_msgs) < BATCH_MAX_MESSAGES and time.monotonic() < deadline:
+            while len(batch_msgs) < BATCH_MAX_ROWS and time.monotonic() < deadline:
                 msg = consumer.poll(POLL_TIMEOUT_SECONDS)
                 if msg is None:
-                    # Phase 5.6 Item 3: flush on a genuine idle gap once we
-                    # already have something, instead of always waiting out
-                    # the full BATCH_MAX_SECONDS regardless of arrival
-                    # pattern. Root cause of a real flaky test
-                    # (test_replay_does_not_inflate_base_table_or_rollup):
-                    # insert_deduplication_token is derived from this
-                    # batch's own offset range, so under load, a backlog
-                    # that arrived as ONE batch on first consume could get
-                    # split into TWO batches on replay purely because the
-                    # fixed wall-clock deadline fired mid-stream - same
-                    # offsets, different token, defeating block-level dedup
-                    # (the ReplicatedReplacingMergeTree identity backstop
-                    # still catches it, just not immediately - see the
-                    # module docstring). A backlog that's fully available in
-                    # Kafka returns messages back-to-back with no real idle
-                    # gap, so this flushes early only when there's truly
-                    # nothing more waiting, not because a clock ran out.
+                    # Idle gap: flush what we have now rather than waiting out the deadline.
                     if batch_msgs:
                         break
                     continue
@@ -273,9 +226,9 @@ def run(
             if not batch_msgs:
                 continue
 
-            # Deterministic batches: one insert per (topic, partition), each
-            # with insert_deduplication_token derived from that partition's
-            # exact offset range in this batch - see the module docstring.
+            # Validation and dead-lettering stay per message; every surviving
+            # row goes into ONE insert for the whole batch (module docstring).
+            batch_rows = []
             by_partition: dict[tuple[str, int], list] = {}
             for msg in batch_msgs:
                 by_partition.setdefault((msg.topic(), msg.partition()), []).append(msg)
@@ -293,7 +246,6 @@ def run(
                 # loud enough to want a KeyError-shaped failure, not a
                 # silent skip.
                 topic_tenant = tenant_from_alerts_topic(msg_topic)
-                rows = []
                 for msg in msgs:
                     header_tenant_id = None
                     envelope_version_raw = None
@@ -412,60 +364,33 @@ def run(
                             ev.alert_id, ev.cluster_node,
                         )
                         metrics.incr("cluster_node_fallback_count")
-                    rows.append((msg.offset(), _row(ev)))
+                    batch_rows.append(_row(ev))
 
-                if not rows:
-                    continue
-
-                # Phase 5.6 Item 3 follow-up: bucket by a FIXED function of
-                # offset alone (see DEDUP_CHUNK_SIZE's own comment) - never
-                # by how these rows happened to be grouped by arrival timing.
-                by_bucket: dict[int, list[tuple[int, list]]] = {}
-                for offset, row in rows:
-                    by_bucket.setdefault(offset // DEDUP_CHUNK_SIZE, []).append((offset, row))
-
-                for bucket, bucket_items in sorted(by_bucket.items()):
-                    # By the time a row gets here it already passed
-                    # normalize_alert() - any insert failure now is presumed
-                    # infrastructure (ClickHouse unreachable/overloaded), not
-                    # bad data. Retry forever with capped backoff; never
-                    # dead-letter this path. stop_flag lets a graceful
-                    # shutdown interrupt a long wait instead of blocking it.
-                    if len(bucket_items) == DEDUP_CHUNK_SIZE:
-                        # A complete, offset-aligned bucket - safe to batch,
-                        # token is the bucket's own fixed range.
-                        bucket_rows = [row for _, row in bucket_items]
-                        token = f"{msg_topic}:{partition}:chunk{bucket}"
-                        retry_with_backoff(
-                            lambda rows=bucket_rows, token=token: ch.insert(
-                                "events", rows, column_names=COLUMNS, settings={"insert_deduplication_token": token},
-                            ),
-                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
-                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
-                            poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: _on_insert_retry(attempt, exc2, msg_topic),
-                        )
-                        clear_stuck(pg_engine, retry_component)
-                        metrics.incr("messages_inserted", len(bucket_rows))
-                    else:
-                        # An incomplete bucket (the tail of what's currently
-                        # available, or a slice split across flush
-                        # boundaries) - its grouping can't be trusted to
-                        # match a replay at a different speed, so each row
-                        # gets its own token instead of a batch-wide one.
-                        for offset, row in bucket_items:
-                            token = f"{msg_topic}:{partition}:{offset}"
-                            retry_with_backoff(
-                                lambda row=row, token=token: ch.insert(
-                                    "events", [row], column_names=COLUMNS, settings={"insert_deduplication_token": token},
-                                ),
-                                max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
-                                max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
-                                poll_fn=lambda: consumer_heartbeat(consumer),
-                                on_retry=lambda attempt, exc2: _on_insert_retry(attempt, exc2, msg_topic),
-                            )
-                            clear_stuck(pg_engine, retry_component)
-                            metrics.incr("messages_inserted", 1)
+            if batch_rows:
+                ranges = ";".join(
+                    f"{t}:{p}:{min(m.offset() for m in ms)}-{max(m.offset() for m in ms)}"
+                    for (t, p), ms in sorted(by_partition.items())
+                )
+                token = "batch:" + hashlib.sha256(ranges.encode()).hexdigest()
+                topics = ",".join(sorted({t for t, _ in by_partition}))
+                retried = []
+                # By the time a row gets here it already passed
+                # normalize_alert() - any insert failure now is presumed
+                # infrastructure (ClickHouse unreachable/overloaded), not bad
+                # data. Retry forever with capped backoff; never dead-letter
+                # this path. stop_flag lets a graceful shutdown interrupt it.
+                retry_with_backoff(
+                    lambda: ch.insert("events", batch_rows, column_names=COLUMNS,
+                                      settings={"insert_deduplication_token": token}),
+                    max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                    max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                    poll_fn=lambda: consumer_heartbeat(consumer),
+                    on_retry=lambda attempt, exc2: (retried.append(1), _on_insert_retry(attempt, exc2, topics)),
+                )
+                if retried:
+                    clear_stuck(pg_engine, retry_component)  # only a retried insert ever marked itself stuck
+                metrics.incr("messages_inserted", len(batch_rows))
+                metrics.incr("insert_batches")
 
             # Real incident (Phase 5.6 closeout): a partition revoked
             # between this batch's poll() calls and this commit() (the

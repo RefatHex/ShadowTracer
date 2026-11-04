@@ -18,7 +18,7 @@ a new incident is started instead, even though the key matches.
 import datetime
 from dataclasses import dataclass
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -88,6 +88,198 @@ def _cap_append(current: list[str], total: int, new_value: str, cap: int) -> tup
     return current, total + 1
 
 
+def parse_alert_time(event) -> datetime.datetime:
+    """Raises UnparseableEvent - consumers call this per message before a
+    batch, so one bad timestamp is dead-lettered alone instead of failing
+    the whole batch's transaction."""
+    return _parse_time(event.time)
+
+
+def _fresh_incident_state(incident_id, alert_time):
+    return {
+        "id": incident_id, "first_seen": alert_time, "last_seen": alert_time,
+        "alert_count": 0, "max_level": 0, "rule_ids": [], "rule_groups": [], "mitre_ids": [],
+        "source_ips": [], "source_ip_total": 0, "users": [], "user_total": 0,
+    }
+
+
+def process_batch(
+    db: Session,
+    events: list,
+    session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
+    max_span_seconds: int = DEFAULT_MAX_SPAN_SECONDS,
+    cap: int = CAPPED_VALUES_LIMIT,
+    sequences: list | None = None,
+    ch_client=None,
+    clickhouse_database: str | None = None,
+    sequence_lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
+    metrics=None,
+) -> list[CorrelationResult]:
+    """A poll batch of alerts, one transaction (docs/design/THROUGHPUT_FIXES.md
+    4b); results in the same order as `events`. Same outcome as calling
+    process_event once per alert in order, with one lock per correlation key,
+    one bulk membership insert and one UPDATE per touched incident instead of
+    a transaction per alert:
+
+    - Replays (already in incident_alerts, or repeated within the batch) are
+      "duplicate" with the original incident id and change nothing.
+    - Groups are locked in sorted key order, so two replicas overlapping
+      during a rebalance can't deadlock on each other.
+    - Each group's alerts are assigned in arrival order with process_event's
+      exact window rules; incidents created earlier in the batch are
+      candidates for later alerts.
+    - Only memberships the bulk insert actually wrote (ON CONFLICT DO
+      NOTHING RETURNING) are counted, so a concurrent replica inserting the
+      same alert still can't double-count it.
+    - Sequence detection runs per newly inserted alert, in arrival order,
+      inside the same transaction - as before.
+    Raises UnparseableEvent for a bad timestamp before touching the database.
+    """
+    results: list = [None] * len(events)
+    gap = datetime.timedelta(seconds=session_gap_seconds)
+    max_span = datetime.timedelta(seconds=max_span_seconds)
+
+    keyed = []
+    for i, ev in enumerate(events):
+        key_and_basis = correlation_key_and_basis(ev)
+        if key_and_basis is None:
+            results[i] = CorrelationResult(status="unkeyable", incident_id=None)
+            continue
+        keyed.append((i, ev, key_and_basis[0], key_and_basis[1], _parse_time(ev.time)))
+    if not keyed:
+        return results
+
+    with db.begin():
+        idents = sorted({(ev.tenant_id, ev.cluster_node, ev.alert_id) for _, ev, _, _, _ in keyed})
+        existing = {}
+        for n in range(0, len(idents), 1000):
+            rows = db.execute(
+                select(incident_alerts.c.tenant_key, incident_alerts.c.node, incident_alerts.c.alert_id,
+                       incident_alerts.c.incident_id)
+                .where(tuple_(incident_alerts.c.tenant_key, incident_alerts.c.node, incident_alerts.c.alert_id)
+                       .in_(idents[n:n + 1000]))
+            ).all()
+            existing.update({(r[0], r[1], r[2]): r[3] for r in rows})
+
+        first_index = {}
+        repeats = []
+        groups: dict[tuple, list] = {}
+        for item in keyed:
+            i, ev, key, basis, _ = item
+            ident = (ev.tenant_id, ev.cluster_node, ev.alert_id)
+            if ident in existing:
+                results[i] = CorrelationResult(status="duplicate", incident_id=existing[ident])
+            elif ident in first_index:
+                repeats.append((i, first_index[ident]))
+            else:
+                first_index[ident] = i
+                groups.setdefault((ev.tenant_id, ev.agent_id, key, basis), []).append(item)
+
+        assignments = []  # (item, incident state) in arrival order within each group
+        for group_key in sorted(groups):
+            tenant, agent, key, basis = group_key
+            candidates = [dict(r) for r in db.execute(
+                select(incidents)
+                .where(
+                    incidents.c.tenant_key == tenant,
+                    incidents.c.agent_id == agent,
+                    incidents.c.correlation_key == key,
+                    incidents.c.correlation_basis == basis,
+                    incidents.c.state == "open",
+                )
+                .order_by(incidents.c.id)
+                .with_for_update()
+            ).mappings().all()]
+            for item in groups[group_key]:
+                i, ev, _, _, alert_time = item
+                inc = next((c for c in candidates
+                            if c["first_seen"] - gap <= alert_time <= c["last_seen"] + gap), None)
+                if inc is not None and max(inc["last_seen"], alert_time) - min(inc["first_seen"], alert_time) > max_span:
+                    inc = None
+                if inc is None:
+                    new_id = db.execute(
+                        incidents.insert().values(
+                            tenant_key=tenant, correlation_key=key, correlation_basis=basis, agent_id=agent,
+                            first_seen=alert_time, last_seen=alert_time, alert_count=0, max_level=0,
+                            rule_ids=[], rule_groups=[], mitre_ids=[], source_ips=[], users=[],
+                        ).returning(incidents.c.id)
+                    ).scalar_one()
+                    inc = _fresh_incident_state(new_id, alert_time)
+                    inc["_base"] = dict(inc)
+                    candidates.append(inc)
+                    status = "created"
+                else:
+                    inc.setdefault("_base", dict(inc))
+                    status = "joined"
+                inc["first_seen"] = min(inc["first_seen"], alert_time)
+                inc["last_seen"] = max(inc["last_seen"], alert_time)
+                assignments.append((item, inc, status))
+
+        inserted = set()
+        if assignments:
+            rows = db.execute(
+                pg_insert(incident_alerts)
+                .values([
+                    dict(incident_id=inc["id"], tenant_key=ev.tenant_id, node=ev.cluster_node,
+                         alert_id=ev.alert_id, alert_time=alert_time)
+                    for (i, ev, _, _, alert_time), inc, _ in assignments
+                ])
+                .on_conflict_do_nothing(constraint="incident_alerts_identity_unique")
+                .returning(incident_alerts.c.tenant_key, incident_alerts.c.node, incident_alerts.c.alert_id)
+            ).all()
+            inserted = {tuple(r) for r in rows}
+
+        new_alerts = []
+        folded: dict[int, dict] = {}
+        for (i, ev, _, _, alert_time), inc, status in assignments:
+            if (ev.tenant_id, ev.cluster_node, ev.alert_id) not in inserted:
+                # Lost a race with a concurrent replica - already counted there.
+                results[i] = CorrelationResult(status="duplicate", incident_id=inc["id"])
+                continue
+            results[i] = CorrelationResult(status=status, incident_id=inc["id"])
+            new_alerts.append((i, ev, alert_time))
+            agg = folded.setdefault(inc["id"], {k: (list(v) if isinstance(v, list) else v)
+                                                for k, v in inc["_base"].items() if not k.startswith("_")})
+            agg["first_seen"] = min(agg["first_seen"], alert_time)
+            agg["last_seen"] = max(agg["last_seen"], alert_time)
+            agg["alert_count"] += 1
+            agg["max_level"] = max(agg["max_level"], ev.rule_level)
+            if ev.rule_id and ev.rule_id not in agg["rule_ids"]:
+                agg["rule_ids"].append(ev.rule_id)
+            for g in ev.rule_groups:
+                if g not in agg["rule_groups"]:
+                    agg["rule_groups"].append(g)
+            for m in ev.mitre_ids:
+                if m not in agg["mitre_ids"]:
+                    agg["mitre_ids"].append(m)
+            agg["source_ips"], agg["source_ip_total"] = _cap_append(agg["source_ips"], agg["source_ip_total"], ev.src_endpoint_ip, cap)
+            agg["users"], agg["user_total"] = _cap_append(agg["users"], agg["user_total"], ev.actor_user, cap)
+
+        if sequences and ch_client is not None:
+            for i, ev, alert_time in sorted(new_alerts, key=lambda a: a[0]):
+                evaluate_sequences(
+                    db, ch_client, clickhouse_database, sequences, ev.tenant_id, ev, alert_time,
+                    lateness_seconds=sequence_lateness_seconds, metrics=metrics,
+                )
+
+        for incident_id, agg in sorted(folded.items()):
+            db.execute(
+                incidents.update().where(incidents.c.id == incident_id).values(
+                    first_seen=agg["first_seen"], last_seen=agg["last_seen"],
+                    alert_count=agg["alert_count"], max_level=agg["max_level"],
+                    rule_ids=agg["rule_ids"], rule_groups=agg["rule_groups"], mitre_ids=agg["mitre_ids"],
+                    source_ips=agg["source_ips"], source_ip_total=agg["source_ip_total"],
+                    users=agg["users"], user_total=agg["user_total"],
+                    updated_at=text("now()"),
+                )
+            )
+
+        for i, first in repeats:
+            results[i] = CorrelationResult(status="duplicate", incident_id=results[first].incident_id)
+
+    return results
+
+
 def process_event(
     db: Session,
     event,
@@ -100,132 +292,10 @@ def process_event(
     sequence_lateness_seconds: float = DEFAULT_LATENESS_SECONDS,
     metrics=None,
 ) -> CorrelationResult:
-    """One alert, one transaction. Safe to call twice for the same alert
-    (a Kafka replay): the second call is a no-op past the idempotency
-    check (incident_alerts' unique constraint), never a duplicate
-    membership row or a double-counted incident. Caller commits Kafka
-    offsets only after this returns without raising - see
-    run_correlator.py.
-
-    Phase 5B Step 4: sequences/ch_client/clickhouse_database are optional
-    - omitted (None), sequence detection is simply not evaluated for this
-    call (existing tests that don't care about it need no changes).
-    Passed, shadowtracer_correlate.sequences.evaluate_sequences runs
-    INSIDE this same transaction, right after the idempotency check below
-    - so sequence progress commits or rolls back atomically with the
-    incident/membership write it's based on, same "never in memory"
-    reasoning as everything else here."""
-    key_and_basis = correlation_key_and_basis(event)
-    if key_and_basis is None:
-        return CorrelationResult(status="unkeyable", incident_id=None)
-    correlation_key, basis = key_and_basis
-    alert_time = _parse_time(event.time)
-    gap = datetime.timedelta(seconds=session_gap_seconds)
-    max_span = datetime.timedelta(seconds=max_span_seconds)
-
-    with db.begin():
-        # FOR UPDATE: this worker owns this agent's partition exclusively
-        # under normal operation (see module docstring), so this never
-        # contends except for the brief overlap a rebalance can cause -
-        # exactly what it's here to make safe.
-        row = db.execute(
-            select(incidents)
-            .where(
-                incidents.c.tenant_key == event.tenant_id,
-                incidents.c.agent_id == event.agent_id,
-                incidents.c.correlation_key == correlation_key,
-                incidents.c.correlation_basis == basis,
-                incidents.c.state == "open",
-                incidents.c.first_seen - gap <= alert_time,
-                incidents.c.last_seen + gap >= alert_time,
-            )
-            .with_for_update()
-        ).mappings().first()
-
-        incident_id = None
-        if row is not None:
-            new_first = min(row["first_seen"], alert_time)
-            new_last = max(row["last_seen"], alert_time)
-            if new_last - new_first <= max_span:
-                incident_id = row["id"]
-
-        if incident_id is None:
-            result = db.execute(
-                incidents.insert().values(
-                    tenant_key=event.tenant_id,
-                    correlation_key=correlation_key,
-                    correlation_basis=basis,
-                    agent_id=event.agent_id,
-                    first_seen=alert_time,
-                    last_seen=alert_time,
-                    alert_count=0,
-                    max_level=0,
-                    rule_ids=[], rule_groups=[], mitre_ids=[], source_ips=[], users=[],
-                ).returning(incidents.c.id)
-            )
-            incident_id = result.scalar_one()
-            status = "created"
-        else:
-            status = "joined"
-
-        inserted = db.execute(
-            pg_insert(incident_alerts)
-            .values(
-                incident_id=incident_id, tenant_key=event.tenant_id,
-                node=event.cluster_node, alert_id=event.alert_id, alert_time=alert_time,
-            )
-            .on_conflict_do_nothing(constraint="incident_alerts_identity_unique")
-            .returning(incident_alerts.c.id)
-        ).first()
-
-        if inserted is None:
-            # Replay of an alert already counted in this incident - the
-            # whole point of the idempotency key. Nothing else to do.
-            return CorrelationResult(status="duplicate", incident_id=incident_id)
-
-        if sequences and ch_client is not None:
-            evaluate_sequences(
-                db, ch_client, clickhouse_database, sequences, event.tenant_id, event, alert_time,
-                lateness_seconds=sequence_lateness_seconds, metrics=metrics,
-            )
-
-        current = db.execute(
-            select(incidents).where(incidents.c.id == incident_id).with_for_update()
-        ).mappings().one()
-
-        new_source_ips, new_source_ip_total = _cap_append(
-            list(current["source_ips"]), current["source_ip_total"], event.src_endpoint_ip, cap
-        )
-        new_users, new_user_total = _cap_append(
-            list(current["users"]), current["user_total"], event.actor_user, cap
-        )
-        rule_ids = list(current["rule_ids"])
-        if event.rule_id and event.rule_id not in rule_ids:
-            rule_ids.append(event.rule_id)
-        rule_groups = list(current["rule_groups"])
-        for g in event.rule_groups:
-            if g not in rule_groups:
-                rule_groups.append(g)
-        mitre_ids = list(current["mitre_ids"])
-        for m in event.mitre_ids:
-            if m not in mitre_ids:
-                mitre_ids.append(m)
-
-        db.execute(
-            incidents.update().where(incidents.c.id == incident_id).values(
-                first_seen=min(current["first_seen"], alert_time),
-                last_seen=max(current["last_seen"], alert_time),
-                alert_count=current["alert_count"] + 1,
-                max_level=max(current["max_level"], event.rule_level),
-                rule_ids=rule_ids,
-                rule_groups=rule_groups,
-                mitre_ids=mitre_ids,
-                source_ips=new_source_ips,
-                source_ip_total=new_source_ip_total,
-                users=new_users,
-                user_total=new_user_total,
-                updated_at=text("now()"),
-            )
-        )
-
-        return CorrelationResult(status=status, incident_id=incident_id)
+    """One alert: process_batch with a batch of one, so tests of
+    single-alert behaviour exercise the same code path the consumer runs."""
+    return process_batch(
+        db, [event], session_gap_seconds, max_span_seconds, cap,
+        sequences=sequences, ch_client=ch_client, clickhouse_database=clickhouse_database,
+        sequence_lateness_seconds=sequence_lateness_seconds, metrics=metrics,
+    )[0]

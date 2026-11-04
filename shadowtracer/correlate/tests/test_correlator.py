@@ -265,3 +265,53 @@ def test_a_permanently_malformed_timestamp_raises_unparseable_not_a_generic_erro
 
     with pytest.raises(correlator.UnparseableEvent):
         process_event(db, ev)
+
+
+def test_process_batch_matches_one_by_one_processing(db):
+    """docs/design/THROUGHPUT_FIXES.md 4b: a batch must leave exactly the
+    incidents/memberships that processing the same alerts one at a time,
+    in the same order, leaves - two keys, an out-of-window alert (new
+    incident), a span-capped join, an in-batch repeat and a replay of an
+    alert committed by an earlier batch."""
+    from shadowtracer_correlate.correlator import process_batch
+
+    t0 = datetime.datetime(2026, 11, 4, 12, 0, tzinfo=datetime.timezone.utc)
+    m = datetime.timedelta(minutes=1)
+
+    def stream(tenant):
+        a = lambda **kw: _event(tenant=tenant, agent_id="agent-b", **kw)  # noqa: E731
+        return [
+            a(alert_id="a1", time=t0, src_ip="6.6.6.6", user="root", rule_id="5710", mitre_ids=["T1110"]),
+            a(alert_id="a2", time=t0 + 2 * m, src_ip="6.6.6.6", user="admin", rule_id="5712", rule_level=10),
+            a(alert_id="b1", time=t0 + m, user="alice", rule_groups=["sshd"]),                     # second key
+            a(alert_id="a3", time=t0 - 3 * m, src_ip="6.6.6.6", rule_id="5710"),                  # late, still joins
+            a(alert_id="a2", time=t0 + 2 * m, src_ip="6.6.6.6", user="admin", rule_id="5712", rule_level=10),  # repeat
+            a(alert_id="a4", time=t0 + 90 * m, src_ip="6.6.6.6"),                                 # beyond the gap: new incident
+            a(alert_id="a5", time=t0 + 91 * m, src_ip="6.6.6.6", mitre_ids=["T1110", "T1021"]),
+        ]
+
+    def snapshot(tenant):
+        rows = db.execute(select(incidents).where(incidents.c.tenant_key == tenant).order_by(incidents.c.first_seen)).mappings().all()
+        keep = ("correlation_key", "first_seen", "last_seen", "alert_count", "max_level", "rule_ids",
+                "rule_groups", "mitre_ids", "source_ips", "source_ip_total", "users", "user_total")
+        incs = [tuple((k, r[k].replace("agent-b", "") if k == "correlation_key" else r[k]) for k in keep) for r in rows]
+        members = sorted(
+            (r["alert_id"], [i for i, x in enumerate(rows) if x["id"] == r["incident_id"]][0])
+            for r in db.execute(select(incident_alerts).where(incident_alerts.c.tenant_key == tenant)).mappings()
+        )
+        return incs, members
+
+    one_by_one, batched = f"t-{uuid.uuid4().hex[:8]}", f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, one_by_one)
+    insert_tenant(db, batched)
+
+    seq_results = [process_event(db, ev) for ev in stream(one_by_one)]
+    seq_results.append(process_event(db, stream(one_by_one)[0]))  # replay of a committed alert
+
+    events = stream(batched)
+    batch_results = process_batch(db, events[:4]) + process_batch(db, events[4:] + [events[0]])
+
+    assert [r.status for r in batch_results] == [r.status for r in seq_results]
+    assert snapshot(batched) == snapshot(one_by_one)
+    incs, _ = snapshot(batched)
+    assert [i[3][1] for i in incs] == [3, 1, 2], "a3+a1+a2 / b1 / a4+a5, the repeat and the replay counted once"
