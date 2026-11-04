@@ -193,3 +193,6 @@ deploy/lab/docker-compose.vm.yml
 # SASL_SSL listeners (generate-kafka-certs.sh) - generated per
 # environment, never committed, same as .env.
 deploy/lab/kafka-certs/
+
+# one-off repair run logs
+deploy/lab/repair-ch-lost-parts.*.log
