@@ -1,0 +1,850 @@
+# Phase 6.0 — Threat intelligence: Wazuh alignment audit and design
+
+Status: **design, awaiting approval** (no feature code in 6.0). Date: 2026-11-05.
+Scope: `FEATURE_PLAN.md` §4 / 6.0. Source cited is this repository at the 4.14.8 fork
+point plus ShadowTracer changes (`UPSTREAM.md`); line numbers are from `main` at
+`bc2c901516`. Spike measurements are in §9 with commands and output.
+
+## 0. Decisions in one page
+
+1. **No network call per event, anywhere.** OTX and MISP are pulled by a periodic
+   `ti-sync` job into a Postgres IOC store. VirusTotal is called only for new FIM
+   hashes, through a cached and budgeted integratord script, and on demand from the
+   console. Wazuh's documented MISP approach (one MISP API call per alert from
+   integratord) is not used (§1.9).
+2. **Two matchers, each covering what the other cannot** (§3):
+   - **Wazuh-native CDB lists + rules** for events that produce **no** alert on their
+     own (they never reach Kafka, so only analysisd can see them) and for FIM hashes.
+     TI rules are children of a grouping parent with `accuracy="0"`, which Wazuh
+     evaluates after every native sibling, so they fire only when no native rule did.
+   - **`ti-matcher` side consumer** (own consumer group, O(1) in-process lookups) for
+     events that already became alerts. It annotates, never replaces. A CDB TI child
+     rule on an alerting parent would *replace* that alert, and hide it from the
+     parent's frequency rules (source evidence in §1.4), so ShadowTracer does not use
+     that pattern for alerting rules.
+3. **One fixed set of list files per tenant manager cluster** (global ∪ that tenant's
+   private IOCs), declared once in `ossec.conf`; only their contents change. Files are
+   written on the tenant's master with write-temp-then-rename, synced to workers by the
+   Wazuh cluster, and loaded by the 4.13+ ruleset hot reload — orchestrated so a worker
+   never reloads before its copy matches the master (§4.4).
+4. **Hot reload is not loss-free in 4.14.8.** `w_hotreload_drain_queues()` frees
+   queued events and not-yet-written alerts instead of processing them
+   (`src/analysisd/analysisd.c:2549-2575`). §9.4 measures it. Fixing this is a
+   correctness item for 6.1 (inherited-file change, §6), not a backlog item, because
+   6.1 makes reloads routine. Measured: 29 of 240,000 events lost over 5 reloads at
+   4,000/s, none without reloads (§9.4).
+5. **The lab breaks the tenancy model for anything cluster-synced:** the test tenant's
+   manager `worker-test` is a worker in the main tenant's cluster (§1.7). Before 6.1
+   writes any tenant-private list, `worker-test` must become its own cluster. This is a
+   cross-tenant correctness prerequisite, not a deferral.
+6. **Licences:** OTX's EULA says free for **non-commercial** use and forbids service-
+   bureau use and redistribution; production use needs a LevelBlue agreement (marked
+   UNCLEAR). The VirusTotal public API must not be used in commercial products; each
+   tenant needs its own premium key. MISP feeds: per-feed terms, mostly unstated (§7).
+7. **List size is not a throughput problem.** A 100,000-entry `address_match_key`
+   list leaves analysisd's ceiling at the baseline's ~4,000/s and costs no measurable
+   CPU at 4–20k/s lookups per second (§9.3). Reload of the whole ruleset takes
+   0.36–0.98 s (§9.4).
+
+---
+
+## 1. Audit: what Wazuh 4.14.8 provides
+
+### 1.1 CDB list format and compilation
+
+| Property | Behaviour | Source |
+|---|---|---|
+| Line format | `key:value`, value optional (`key:`); a line with no `:` is skipped silently | `src/analysisd/lists_make.c:107-113` |
+| Quoting | a key containing `:` (IPv6, MAC, URL) must be wrapped in `"…"`; values may be quoted too | `lists_make.c:73-99`, `:115-130`; doc "Creating a CDB list" ([cdb-list.html](https://documentation.wazuh.com/current/user-manual/ruleset/cdb-list.html)) |
+| Line length | read with `fgets(str, OS_MAXSTR - 1)`, `OS_MAXSTR` = 65,536 | `lists_make.c:61`, `src/headers/defs.h:51` |
+| Matching | exact bytes (`cdb_find`), so case-sensitive: hashes and domains must be normalised to one case | `src/analysisd/lists_list.c:146,180` |
+| Compile | `<list>.txt` → `<list>.tmp` → `rename()` to `<list>.cdb` (atomic), `chmod 0660` | `lists_make.c:45,52-56,148-156` |
+| When compiled | only if the text file's mtime (seconds) is newer than the `.cdb`'s, or forced; at start-up and in every hot reload | `lists_make.c:47-48`; `analysisd.c:692`, `:2681` |
+| Size limit | no documented limit. The cdb format uses 32-bit offsets: one `.cdb` file cannot exceed 4 GiB (`posplus` fails with `ENOMEM`). `cdb_make_add`'s return value is ignored, so an overflow would truncate silently | `src/analysisd/cdb/cdb_make.c:36-41`, `:81-86`; `lists_make.c:140` |
+| Loading | the `.cdb` is opened and `mmap`ed lazily on the first lookup and kept open | `lists_list.c:121-133`; `cdb/cdb.c:34-46` |
+| Declared where | each list needs a `<list>` line in `<ruleset>` of `ossec.conf`; a rule naming an undeclared or missing list is **skipped with a warning**, not fatal | `src/analysisd/lists.c:22-70`; `rules.c:893-905` |
+
+Consequence for list generation: ShadowTracer must validate every IOC value strictly by
+type before writing it. A feed value containing a newline, `"` or `:` would otherwise
+inject extra list entries (feed content is untrusted input).
+
+### 1.2 Lookup types
+
+Parsed in `src/analysisd/rules.c:149-158` and `:803-822`; constants in
+`src/analysisd/lists.h:19-25`; evaluated in `lists_list.c:275-317`.
+
+| `lookup=` | Meaning (from code) |
+|---|---|
+| `match_key` (default) | field value is a key (`lists_list.c:286-290`) |
+| `not_match_key` | field value is not a key (`:291-295`) |
+| `match_key_value` + `check_value="regex"` | key found and its value matches the OSMatch pattern (`:135-169`, `:296-300`) |
+| `address_match_key` | exact key, then the value is cut one character at a time from the right and every prefix ending in `.` is tried: `1.2.3.4`, `1.2.3.`, `1.2.`, `1.` (`:189-218`). So IPv4 /8, /16, /24 on octet boundaries only; no `/20`; IPv6 exact only |
+| `not_address_match_key` | negation of the above (`:303-307`) |
+| `address_match_key_value` | **inverted (confirmed):** returns true when `OS_DBSearchKeyAddressValue() == 0`, i.e. when the address is *not* found or the value does not match (`:308-312`). In §9.2 it fired for an IP absent from the list and not for a listed one. ShadowTracer does not use it |
+
+### 1.3 Which decoded fields a rule can check against a list
+
+`<list field="…">` accepts the static fields `srcip`, `srcport`, `dstip`, `dstport`,
+`user` (srcuser, else dstuser), `url`, `id`, `hostname`, `program_name`, `status`,
+`action`, `protocol`, `system_name`, `data`, `extra_data` (`rules.c:824-856`,
+evaluated `:2937-3080`), or **any dynamic field name** (`rules.c:856-861`, looked up
+by `FindField()`, case-insensitive, `src/analysisd/decoders/decoder.c:233-241`). If the
+field is absent the rule does not match, for every lookup type including the `not_*`
+ones (`rules.c:2942-3072`).
+
+FIM events expose `md5`, `sha1`, `sha256` (and `*_before`) as dynamic fields
+(`src/analysisd/decoders/syscheck.c:231-244`, keys copied at `:565-567`). The shipped
+rule 99901 uses `field="sha256"` (`ruleset/rules/0999-malicious-ioc-rules.xml:12-20`).
+
+Observable coverage with CDB lists:
+
+| Observable | Coverable? | How / limits |
+|---|---|---|
+| Source IP | yes | `srcip` (most decoders), `win.eventdata.ipAddress`, `src_ip` (Suricata); `address_match_key` for octet-aligned prefixes |
+| Destination IP | yes | `dstip`, `dest_ip` (Suricata), `win.eventdata.destinationIp` (Sysmon 3) |
+| Domain | partly | only where a decoder extracts a host name: `dns.rrname`, `http.hostname` (Suricata), `win.eventdata.queryName` (Sysmon 22). Exact match only: `address_match_key` cuts from the right, so `a.evil.com` never matches a list key `evil.com` |
+| URL | poorly | `url` is whatever the decoder extracted (usually the path only, for web logs); exact match, no normalisation |
+| File hash, FIM | yes | `sha256`/`md5`/`sha1` under FIM rules 550/554 |
+| File hash, Sysmon | no | `win.eventdata.hashes` is one composite string (`SHA256=…,MD5=…`), so an exact key never matches without a decoder change |
+
+### 1.4 Rule evaluation: how a TI rule can fire, and what it replaces
+
+From `src/analysisd/analysisd.c:2113-2255` and `rules.c:3106-3147`:
+
+1. Root rules are tried in list order (built the same way as child lists, point 2:
+   `OS_AddRule` → `_OS_AddRule`, `rules_list.c:272-274`). A root is skipped if its category differs from
+   the decoder's type (`analysisd.c:2126-2130`; a rule without `<category>` is
+   `SYSLOG`, `rules.c:2101`).
+2. In a matching root, children are tried in list order; the **first** matching child
+   wins and the search goes depth-first (`rules.c:3120-3133`). The list order is **not**
+   load order: at load time a level-0 rule is given level 99 and every level is
+   multiplied by 100 unless the rule has `accuracy="0"` (`rules.c:390-404`, attribute
+   `rules.c:2246`); a child is inserted before the first sibling with a lower value
+   (`rules_list.c:217-269`); `_setlevels` divides back afterwards (`rules.c:2527-2529`).
+   So siblings run level-0 rules first, then highest level first, then load order;
+   `accuracy="0"` rules run **last**. §9.2 shows a level-10 TI child of 5700 pre-empting
+   5710 and 5715 without `accuracy="0"`, and running after them with it.
+2a. Rule files from all `<rule_dir>`s are loaded in one global file-name order, not
+   directory order: a file named `0001-…` in `etc/…` loaded before
+   `ruleset/rules/0095-sshd_rules.xml`, so every `if_sid` in it was dropped. The reload
+   still answered `success: True`, listing the dropped rules only under `warnings`
+   (§9.2). The distributor must treat any warning as a failure.
+3. The first root that returns a rule ends the search: **one alert per event**
+   (`analysisd.c:2253`). If the result is level 0, the event produces no alert and the
+   search still ends (`:2139-2141`).
+4. A `noalert` root (rules 1–7 in `ruleset/rules/0010-rules_config.xml`) whose children
+   all fail returns NULL, so the search continues with the next root (`rules.c:3136-3138`).
+5. The parent of the firing rule is not in the alert JSON (`lf->prev_rule`,
+   `rules.c:3127`, is used only for `ignore` handling; `src/analysisd/format/to_json.c`
+   does not write it).
+6. Frequency bookkeeping (`if_matched_sid`, `if_matched_group`) records only the rule
+   that produced the alert (`analysisd.c:2219-2245`).
+
+Consequences:
+
+- **A TI child of an alerting rule replaces that alert.** This is Wazuh's own pattern
+  (`0999-malicious-ioc-rules.xml`, rules 99901-99920, e.g. 99904 under 5716). The
+  native rule id is lost, and by point 6 the native rule's frequency rules stop
+  counting those events: with a TI child under 5710, a brute force from a listed IP
+  would never reach 5712 (`ruleset/rules/0095-sshd_rules.xml:109-117`,
+  `frequency="8"`, `if_matched_sid 5710`). The IP most worth correlating is the one
+  that disappears from correlation.
+- **"Fire on events no other rule matched"** has exactly two shapes:
+  - a TI child of a **grouping parent** (for example 5700 "sshd messages grouped")
+    **with `accuracy="0"`**, which puts it after every native sibling: it fires only
+    when none of them matched. Without `accuracy="0"`, a level-10 TI child sits ahead of
+    every native sibling below level 10 and pre-empts them (§9.2: it replaced 5710,
+    5715 and 5706);
+  - a **root-level** TI rule with `accuracy="0"` fires only when no other root matched
+    (without it, a level-10 root sits ahead of every root below level 10). A level-0
+    grouping root such as 5700 ends the search (point 3), so a root TI rule never
+    sees sshd events.
+- Gap: an event whose final match is a **level-0 leaf** (not a grouping parent)
+  produces no alert and is reached by neither shape (§9.2: "Connection closed by
+  <listed IP>" ended at 5722, level 0). Covering it needs a TI child under
+  that leaf; the 6.1 rule generator lists those leaves per decoder family (VERIFY 6.1-8).
+
+### 1.5 Ruleset hot reload (4.13+)
+
+Triggers: analysisd socket command `reload-ruleset` (`src/analysisd/asyscom.c:165-189`);
+API `PUT /manager/analysisd/reload` and `PUT /cluster/analysisd/reload`
+(`api/api/spec/spec.yaml:13550`, `:11953`). The 4.13 release post says hot reload
+covers "decoders, rules, and CDB lists"
+([wazuh.com/blog/introducing-wazuh-4-13-0](https://wazuh.com/blog/introducing-wazuh-4-13-0/));
+the CDB list docs page still says to restart the manager
+([cdb-list.html](https://documentation.wazuh.com/current/user-manual/ruleset/cdb-list.html)).
+
+What `w_hotreload_reload()` does (`analysisd.c:2485-2523`):
+
+1. Builds the whole new ruleset **before** taking any lock: re-reads the `<ruleset>`
+   section of `ossec.conf`, parses decoders, compiles lists whose text is newer than
+   their `.cdb`, parses rules (`:2630-2722`). Event processing continues meanwhile.
+2. Takes the write lock (`:2497`). Input and decoder threads hold the read lock per
+   event (`:1230`, `:1798`, …), so they stop; incoming events wait in the queues.
+3. `w_hotreload_drain_queues()` (`:2501`, body `:2549-2575`) pops every event in
+   `decode_queue_event_output`, `writer_queue_log`, `writer_queue`,
+   `writer_queue_log_statistical`, `writer_queue_log_firewall` and **frees** it.
+   `writer_queue_log` holds alerts already matched but not yet written to
+   `alerts.json`. The comment says these "can refer to the old ruleset".
+4. Swaps pointers (`:2577-2628`), unlocks, frees the old ruleset (`:2519`).
+
+Two further findings:
+- The rule-matching threads (`w_process_event_thread`, `:1999`) take no lock and keep
+  popping `decode_queue_event_output` during the drain, racing with it; the only grace
+  period before the old ruleset is freed is `usleep(5000)` (`:2502`). Not measured;
+  recorded as an upstream question.
+- `os_remove_cdblist()` frees the list names but never calls `cdb_free()` or closes the
+  file descriptor (`lists_list.c:319-333`; `cdb_free` is `cdb/cdb.c:19-23`), so each
+  reload leaks one fd and one mapping per list. Confirmed in §9.5 (+1 fd and +1
+  mapping per looked-up list per reload).
+
+Community reports of 4.14 reloads not taking effect on workers
+([groups.google.com/g/wazuh/c/QMTjw-ZXnJw](https://groups.google.com/g/wazuh/c/QMTjw-ZXnJw))
+and of analysisd crashing after reloads
+([groups.google.com/g/wazuh/c/J1R4pjnQMTs](https://groups.google.com/g/wazuh/c/J1R4pjnQMTs))
+are unconfirmed here; the cluster path below explains the first one.
+
+### 1.6 Wazuh API list upload
+
+`PUT /lists/files/{filename}` (`framework/wazuh/cdb_list.py:120-173`) is not usable for
+generated IOC lists:
+- with `overwrite=true` it **moves the old file away before writing the new one**
+  (`:156-160`), so the list is briefly missing; a reload or a cluster integrity check in
+  that window drops it (rule skipped; workers told to delete it);
+- the validator only accepts quoted keys made of `[\w\-: ]`
+  (`framework/wazuh/core/cdb_list.py:230`), so a URL key (`"https://…/…"`) is rejected;
+- request bodies are capped at 10 MB (`api/api/configuration.py:42`); 1 M SHA-256
+  entries are ~66 MB.
+
+### 1.7 Cluster sync of lists and rules
+
+- `framework/wazuh/core/cluster/cluster.json`: `etc/lists/`, `etc/rules/`,
+  `etc/decoders/` are synced recursively from the master, permissions `0o660`;
+  `ossec.conf` and `*.tmp`, `*.lock`, `*.swp`, `*~` are excluded. `ruleset/` is not
+  synced (it ships with the package).
+- Timing (same file, `intervals`): the master recalculates file integrity every 8 s; each
+  worker runs an integrity check every 9 s. Files a worker has that the master does not
+  are deleted ("Files to delete", `worker.py:727-730`), so a worker cannot hold a
+  private list inside a synced directory.
+- Workers write each file to a temp name and `rename()` it (`framework/wazuh/core/utils.py:691-711`),
+  without preserving the master's mtime (`worker.py:828-831`).
+- **Reload on a worker is deferred:** the API on a worker only sets a flag
+  (`framework/wazuh/analysis.py:51-60`, `core/cluster/local_server.py:423-439`); the
+  worker reloads at the end of its next integrity check, after applying any file
+  changes (`worker.py:735-741`) or after "sync not required" (`:400-408`). §9.6 measures
+  the delay. The master reloads immediately.
+- **Race:** if the flag is set before the master's next integrity recalculation has seen
+  the new list, the worker reloads with its old files, clears the flag, and then
+  receives the new files with no reload. It keeps matching the old list until the next
+  reload. A `.txt` and its `.cdb` can also arrive in different cycles. The distributor
+  must confirm each worker's copy before asking it to reload (§4.4).
+- **Lab finding:** `worker-test` (the test tenant's dedicated manager) is a worker of
+  the main tenant's master:
+  ```
+  $ docker exec shadowtracer-lab-shadowtracer-master-1 /var/ossec/bin/cluster_control -l
+  NAME         TYPE    VERSION  ADDRESS
+  master       master  4.14.8   shadowtracer-master
+  worker2      worker  4.14.8   172.28.0.12
+  worker1      worker  4.14.8   172.28.0.11
+  worker-test  worker  4.14.8   172.28.0.14
+  ```
+  Both nodes' `ossec.conf` have `<name>wazuh</name>`, the same `<key>`, and
+  `<node>shadowtracer-master</node>`. Today this already syncs the main tenant's
+  `client.keys`, `etc/rules` and `etc/lists` to the test tenant's manager. TENANCY.md
+  option (A) assumes one cluster per tenant. Fix before 6.1 (VERIFY 6.1-1).
+
+### 1.8 wazuh-integratord and the VirusTotal integration
+
+integratord (`src/os_integrator/integrator.c`):
+- reads `alerts.json` through the JSON file queue (`:44-48`, `:154-158`), off
+  analysisd's path, so a slow integration delays only integratord;
+- filters each alert by `level`, `group`, `rule_id`, `event_location` (`:183-268`);
+- for each match writes the alert to `/tmp/<name>-<time>-<rand>.alert` and
+  **fork/execs the script and waits for it** (`:278-460`): one alert at a time, one
+  process per alert;
+- passes the API key on the command line (`:437-445`), visible in `ps`;
+- accepts `slack`, `pagerduty`, `virustotal`, `shuffle`, `maltiverse` and any name
+  starting with `custom-` (`:61-135`); the script must exist in the integrations dir.
+  Arguments: alert file, api_key, hook_url, `debug`, options file, timeout, retries
+  (config keys in `src/config/integrator-config.c:19-30`).
+- Results come back as new events: the script writes
+  `1:[agent] (name) ip->virustotal:{json}` to analysisd's queue socket
+  (`integrations/virustotal.py:309-325`), the JSON decoder decodes them, and rules match
+  them, so they become ordinary alerts in `alerts.json` and reach our pipeline.
+
+Built-in VirusTotal (`integrations/virustotal.py`, rules `ruleset/rules/0490-virustotal_rules.xml`):
+- Trigger: whatever the `<integration>` block selects; the documented block uses
+  `<group>syscheck</group>` ([virus-total-integration.html](https://documentation.wazuh.com/current/user-manual/capabilities/malware-detection/virus-total-integration.html)).
+  The script needs `syscheck.md5_after` (`virustotal.py:196-211`) and looks up the
+  **MD5** with the legacy v2 endpoint `GET /vtapi/v2/file/report?apikey=…`
+  (`:255-281`). VirusTotal calls v3 the standard and says v2 will be sunset some day
+  ([blog.virustotal.com 2023-02](https://blog.virustotal.com/2023/02/upgrading-from-api-v2-to-v3-what-you.html)).
+- **No rate limiting, cache or budget** in the script or in integratord. HTTP 204 (rate
+  limit) becomes alert 87101 and that hash is never retried (`:288-296`). The public API
+  allows 4 requests/min and 500/day
+  ([docs.virustotal.com/reference/public-vs-premium-api](https://docs.virustotal.com/reference/public-vs-premium-api));
+  one package upgrade changes hundreds of files.
+- Output shape (`virustotal.py:193-246`): `data.integration = "virustotal"`,
+  `data.virustotal.{found, malicious, source{alert_id, file, md5, sha1}, sha1,
+  scan_date, positives, total, permalink}` or `{error, description}`.
+- Rules: 87100 base (level 0), 87101 rate limit (204), 87102 credentials (403), 87103
+  not in VT, 87104 no positives, **87105 malicious (level 12)**, 87106 timeout (408)
+  (`0490-virustotal_rules.xml:12-63`).
+
+### 1.9 Wazuh's documented OTX and MISP approaches
+
+- **OTX:** Wazuh's proof-of-concept guide downloads the AlienVault IP reputation list
+  (FireHOL `alienvault_reputation.ipset`), converts it to the CDB list
+  `blacklist-alienvault` with `iplist-to-cdblist.py`, adds rule 100100
+  (`if_group` web|attack|attacks, `address_match_key` on `srcip`) and restarts the
+  manager ([block-malicious-actor-ip-reputation.html](https://documentation.wazuh.com/current/proof-of-concept-guide/block-malicious-actor-ip-reputation.html)).
+  No per-event call, but IP reputation only, and no OTX pulses. A Wazuh team member said
+  there is no OTX pulse integration
+  ([groups.google.com/g/wazuh/c/CW2zcMTsJB0](https://groups.google.com/g/wazuh/c/CW2zcMTsJB0)).
+- **MISP:** the MISP project's own guide (2025-10-06) and `MISP/wazuh-integration` run
+  `custom-misp_file_hashes.py` from integratord on `syscheck`/rule 554 and query the
+  MISP API **once per alert** (the debug log shows one request per alert); results come
+  back as rules 100800-100804
+  ([misp-project.org/2025/10/06/wazuh-integration.html](https://www.misp-project.org/2025/10/06/wazuh-integration.html),
+  [github.com/MISP/wazuh-integration](https://github.com/MISP/wazuh-integration)).
+  Community `custom-misp.py` variants do the same for Sysmon events.
+- **Why per-event calls break FEATURE_PLAN §2:** they don't block analysisd directly
+  (integratord reads `alerts.json` on the side), but integratord is serial fork/exec +
+  HTTPS per alert. At tens to hundreds of ms each it handles roughly 3–20 alerts/s
+  (**estimate**, not measured), against ~500 alerts/s end to end and ~4,000/s per
+  manager. On anything but rare triggers it lags without bound, misses alerts once
+  `alerts.json` rotates past it, and turns alert volume into API load on MISP/OTX. §2
+  forbids it on the hot path; this design keeps it off every per-alert path.
+
+---
+
+## 2. Per-source design
+
+| Source | Ingest | Matching | Network calls |
+|---|---|---|---|
+| **OTX** | `ti-sync` pulls subscribed pulses incrementally (`/api/v1/pulses/subscribed?modified_since=…`, key from a secret), maps indicator types (IPv4, IPv6, domain, hostname, URL, FileHash-MD5/SHA1/SHA256, CIDR) into the IOC store | CDB lists + `ti-matcher` + retro-hunt | periodic only (e.g. every 15 min) |
+| **MISP** | feed-only by default: MISP-format feeds (`manifest.json` + event files), attributes with `to_ids=true`; server mode (6.2, separate compose profile) via PyMISP `restSearch(to_ids=True, published=True, timestamp=…)` | same | periodic only |
+| **VirusTotal** | not a feed. (a) FIM: integratord runs a new `custom-shadowtracer-virustotal` script (v3, SHA-256, per-tenant key, on-disk cache, token-bucket budget, same output shape so rules 87100-87106 still apply); (b) on demand from the console through the backend with the same cache and budget. Hashes only, never uploads | VT verdicts land in the IOC store (`source=virustotal`) so later sightings hit locally | per **new** FIM hash, capped by budget; per analyst click |
+
+Known-bad hashes from OTX/MISP are matched locally by CDB on FIM rules before any VT
+call is needed.
+
+## 3. What stays Wazuh-native, what ShadowTracer builds
+
+| Piece | Owner | Why |
+|---|---|---|
+| IOC lookup inside analysisd (CDB + rules) | Wazuh-native | only analysisd sees events that produce no alert |
+| Rule attachment for non-alerting events | ShadowTracer rule file (new) | children loaded after native siblings (§1.4) |
+| FIM hash match (550/554) | Wazuh-native, ShadowTracer lists | replacing "file added" with "known-bad hash" is the intended result |
+| List sync master → workers | Wazuh cluster | already syncs `etc/lists` (§1.7) |
+| Reload | Wazuh hot reload, orchestrated by ShadowTracer | §4.4 |
+| VirusTotal on FIM | integratord + new `custom-` script + inherited 0490 rules | built-in script has no cache/budget and uses v2/MD5 |
+| Feed pull, IOC store, list generation, distribution, expiry | ShadowTracer | no Wazuh equivalent |
+| Annotating alerts that a native rule produced | ShadowTracer `ti-matcher` | CDB would replace the alert (§1.4) |
+| Retro-hunt | ShadowTracer job on ClickHouse | needs stored history |
+| Console views, per-tenant source settings | ShadowTracer | |
+
+The inherited demo ruleset `0999-malicious-ioc-rules.xml` (replaces native alerts for
+IPs in a 199-entry demo list) is excluded with `<rule_exclude>` in 6.1, without editing
+the file; ShadowTracer's lists supersede it.
+
+### 3.1 Is a side consumer still needed? Yes: `ti-matcher`
+
+Needed for cases CDB lists can't cover correctly:
+1. **Alerts a native rule already produced.** A CDB TI child would replace the alert and
+   hide it from frequency rules (§1.4). `ti-matcher` writes a separate `ti_hits` row and
+   the alert stays as it was.
+2. **Shapes CDB can't express:** CIDRs that need more than 256 octet-aligned prefixes
+   (§4.3), IPv6 prefixes, parent-domain matching (`a.evil.com` vs `evil.com`), URL
+   normalisation, composite fields (Sysmon `Hashes`), fields only present in `full_log`.
+3. **Exact expiry** between list regenerations.
+
+It is a per-alert side consumer under FEATURE_PLAN §2: own consumer group on the
+per-tenant alert topics, one O(1) dict/set lookup per extracted observable (plus a
+sorted-range search for CIDRs), no network calls, lag shown in `/health/detail` but not
+in `/health/ready`, output idempotent (ReplacingMergeTree keyed on alert identity +
+IOC). Its own ceiling must reach ~3,300/s (T9). Tenant scope comes from the topic (set
+by the shipper's static `TENANT_ID`), never from alert content.
+
+CDB TI alerts (group `shadowtracer_ti`) also pass through `ti-matcher`; the hit is
+recorded once because the `ti_hits` key is the same.
+
+---
+
+## 4. Store, generation, distribution, reload
+
+### 4.1 IOC store (Postgres, ShadowTracer database)
+
+```sql
+CREATE TYPE ioc_type AS ENUM ('ipv4','ipv6','cidr4','cidr6','domain','url','md5','sha1','sha256');
+
+CREATE TABLE ti_sources (
+  id            bigserial PRIMARY KEY,
+  tenant_id     text NULL,              -- NULL = global source
+  kind          text NOT NULL,          -- otx | misp_feed | misp_server | virustotal | manual
+  name          text NOT NULL,
+  config        jsonb NOT NULL,         -- URLs, filters; secrets only by reference
+  enabled       boolean NOT NULL DEFAULT true,
+  default_ttl   interval NOT NULL,
+  sync_cursor   text,                   -- OTX modified_since / MISP timestamp
+  last_sync_at  timestamptz,
+  last_error    text
+);
+
+CREATE TABLE iocs (
+  id            bigserial PRIMARY KEY,
+  tenant_id     text NULL,              -- NULL = global; else private to that tenant
+  type          ioc_type NOT NULL,
+  value         text NOT NULL,          -- normalised (lower-case hex/domains, canonical IP/CIDR, IDNA)
+  source_id     bigint NOT NULL REFERENCES ti_sources(id),
+  source_ref    text,                   -- OTX pulse id / MISP event+attribute uuid
+  confidence    smallint NOT NULL CHECK (confidence BETWEEN 0 AND 100),
+  tlp           text,
+  tags          text[] NOT NULL DEFAULT '{}',
+  first_seen    timestamptz NOT NULL,
+  last_seen     timestamptz NOT NULL,
+  expires_at    timestamptz NOT NULL,
+  revoked_at    timestamptz NULL,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  UNIQUE NULLS NOT DISTINCT (tenant_id, type, value, source_id)   -- PostgreSQL 15+, lab runs 16
+);
+CREATE INDEX ON iocs (tenant_id, type) WHERE revoked_at IS NULL;
+CREATE INDEX ON iocs (created_at);     -- retro-hunt watermark
+
+CREATE TABLE ti_list_versions (         -- what was generated and where it is live
+  tenant_id text NOT NULL, list_name text NOT NULL, sha256 text NOT NULL,
+  entries integer NOT NULL, generated_at timestamptz NOT NULL,
+  node_status jsonb NOT NULL,           -- {node: {synced_at, reloaded_at}}
+  PRIMARY KEY (tenant_id, list_name, sha256)
+);
+```
+
+ClickHouse `ti_hits` (ReplicatedReplacingMergeTree, ORDER BY
+`(tenant_id, alert_time, cluster_node, alert_id, ioc_type, ioc_value)`): columns for
+the IOC id, sources, confidence, `origin` (`cdb` | `matcher` | `retro`) and the
+incident id when known. Replays and retro-hunt re-runs collapse to one row.
+
+Upserts: an IOC seen again refreshes `last_seen` and `expires_at`; a source that
+withdraws it (OTX pulse removed, MISP `to_ids` false or attribute deleted) sets
+`revoked_at`.
+
+### 4.2 Per-tenant private lists under dedicated managers
+
+Each tenant has its own manager cluster (TENANCY.md option A). For tenant T the
+generator writes **one set of files**, `global ∪ private(T)`, to **T's master only**.
+Wazuh sync can't carry them to another tenant because no other tenant's node is in T's
+cluster (after the lab fix in §1.7). Merging global and private entries into one file
+per type keeps one lookup per observable. Provenance stays in the IOC store and
+`ti_hits`.
+
+`ti-matcher` keeps one in-memory set per tenant, built from the same query, selected by
+the tenant of the topic it is reading.
+
+### 4.3 List generation
+
+Fixed files (declared once per node in `ossec.conf`; `ossec.conf` is not synced):
+
+```
+etc/lists/shadowtracer-ti/ipv4      address_match_key   exact IPs + octet-aligned prefixes "10.1.2."
+etc/lists/shadowtracer-ti/ipv6      match_key           quoted keys
+etc/lists/shadowtracer-ti/domain    match_key
+etc/lists/shadowtracer-ti/url       match_key           quoted keys
+etc/lists/shadowtracer-ti/md5       match_key
+etc/lists/shadowtracer-ti/sha1      match_key
+etc/lists/shadowtracer-ti/sha256    match_key
+```
+
+- Select `revoked_at IS NULL AND expires_at > now() + <one sync interval>` for
+  `tenant_id IS NULL OR tenant_id = T`, sort, write `key:` lines. Validate every value
+  against a strict per-type pattern; drop and count rejects.
+- IPv4 CIDRs are expanded into octet-aligned prefixes when that takes ≤ 256 entries
+  (any /8, /16, /24 is one entry; a /20 is sixteen `/24` prefixes); larger expansions go
+  to `ti-matcher` only.
+- An empty list keeps one reserved never-matching key, so the file always exists and its
+  rules always load (VERIFY 6.1-4).
+- Write `name.tmp` (excluded from cluster sync), `fsync`, `rename()`. Skip the
+  distribution if the content hash is unchanged. If the new text file's mtime is not
+  newer than the existing `.cdb`'s (same second), bump it with `os.utime` so analysisd
+  recompiles (§1.1).
+
+TI rules: one static ShadowTracer rule file (it changes only with ShadowTracer
+releases, not with feeds), rule ids in a reserved ShadowTracer range (proposed
+110000–110999, recorded in DECISIONS.md in 6.1), group `shadowtracer_ti`:
+- children of grouping parents per decoder family (sshd 5700, web access log, Suricata,
+  Sysmon network/DNS, firewall …), one rule per (parent, field, list);
+- FIM: children of 550/554 on `sha256`/`sha1`/`md5`;
+- every TI child of a grouping parent carries `accuracy="0"` (§1.4), so it runs after
+  the native siblings; the file name sorts after `0*` so its `if_sid` parents exist
+  when it loads (§1.4 point 2a).
+
+### 4.4 Distribution, atomic swap and reload
+
+Per tenant, after generation:
+1. A ShadowTracer component that can write the master's `etc/lists/shadowtracer-ti/`
+   (lab: the manager container; production: a small pull agent on the master host)
+   writes the files with temp + rename. Not through the API upload (§1.6).
+2. `PUT /cluster/analysisd/reload?nodes_list=<master>`; check the response.
+3. Poll each worker's file checksums for the changed `.txt` **and** `.cdb` until they
+   equal the master's (timeout, e.g. 60 s).
+4. `PUT /cluster/analysisd/reload?nodes_list=<workers>`; the reload happens at each
+   worker's next integrity check (§9.6).
+5. Confirm each node logged `Ruleset reloaded successfully` after the request, then
+   record `node_status` in `ti_list_versions`.
+
+Reloads are rate-limited (at most one per tenant per sync interval) because each reload
+drops queued events until the analysisd fix lands (§9.4, §6).
+
+### 4.5 Expiry and retro-hunt
+
+- **Expiry:** `expires_at = min(source valid_until, last_seen + ttl(type, source))`.
+  Defaults (tunable per source): IPs 30 days, URLs 30 days, domains 90 days, hashes
+  365 days. Lists drop expired IOCs at the next generation (worst-case staleness = sync
+  interval + distribution time, measured in 6.1); `ti-matcher` checks `expires_at` at
+  lookup time, so it is exact.
+- **Retro-hunt:** a scheduled job (every sync) takes IOCs with
+  `created_at > watermark` (or re-activated) per tenant and searches the last N days
+  (default 7, cap 30) of that tenant's `events` in ClickHouse: `src_endpoint_ip`,
+  `dst_endpoint_ip`, `extra_fields['syscheck.sha256_after']` and the other mapped
+  hash/domain keys, `IN` sets of ≤ 10,000 values per query, `max_execution_time` and a
+  row cap per query, always filtered by `tenant_id` and the time partition. Hits go to
+  `ti_hits` with `origin='retro'` (idempotent), and the watermark advances only after
+  the hunt commits. Limit: only alerts are stored; events that produced no alert can't
+  be retro-hunted (archives are not shipped).
+
+## 5. Throughput
+
+- CDB lookups add per-event work inside analysisd. With a 100,000-entry list the ceiling
+  is unchanged (~4,000/s on the baseline fixture) and CPU per event is unchanged at
+  4–20k lookups/s (§9.3). 6.1 re-measures at real list sizes (VERIFY 6.1-4, 6.1-11).
+- `ti-matcher` is off the hot path and has its own gate (T9).
+- Reload cost is paid only when lists change (§9.4).
+
+## 6. Files that would change
+
+Inherited Wazuh files (each recorded in `UPSTREAM.md` when changed):
+
+| File | Change | When |
+|---|---|---|
+| `src/analysisd/analysisd.c` (`w_hotreload_drain_queues`, `w_hotreload_reload`) | process or wait out queued events instead of freeing them; fence the rule-matching threads | 6.1, before reloads are automated (correctness) |
+| `src/analysisd/lists_list.c` (`os_remove_cdblist`) | `cdb_free()` + `close()` on removal (fd/mmap leak, confirmed §9.5) | 6.1 |
+| `etc/templates/config/generic/rules.template`, `etc/ossec-server.conf`, `etc/ossec.conf` | declare the `shadowtracer-ti` lists, `<rule_exclude>0999-malicious-ioc-rules.xml</rule_exclude>` | 6.1 (lab: `deploy/lab/entrypoint-manager.sh`, ours) |
+| `src/init/inst-functions.sh` | install `etc/lists/shadowtracer-ti/` placeholders (next to the `malicious-ioc` block at `:1135-1137`) | packaging (BFC) |
+| `integrations/virustotal.py`, `ruleset/rules/0490-virustotal_rules.xml` | **unchanged**: the new script keeps their output shape | — |
+
+New files (ShadowTracer names):
+
+| File | Purpose |
+|---|---|
+| `ruleset/rules/1000-shadowtracer_ti_rules.xml` | static TI rules (§4.3) |
+| `ruleset/lists/shadowtracer-ti/*` | empty-list placeholders installed into `etc/lists/shadowtracer-ti/` |
+| `integrations/custom-shadowtracer-virustotal` (+ `.py`) | VT v3, cache, budget, per-tenant key |
+| `shadowtracer/intel/shadowtracer_intel/` | `store.py`, `normalise.py`, `sync_otx.py`, `sync_misp.py`, `listgen.py`, `distribute.py`, `matcher.py` (`ti-matcher`), `retrohunt.py` |
+| `shadowtracer/intel/alembic/…` | IOC store migrations |
+| `shadowtracer/ingest/schema/…ti_hits.sql` | ClickHouse table |
+| `deploy/lab/…` | `ti-sync`, `ti-matcher` services; lab cluster split for `worker-test` |
+
+Upstream issue drafts to add under `shadowtracer/docs/UPSTREAM_ISSUES/`: reload drain
+frees events; CDB fd leak on reload; `address_match_key_value` inversion (confirmed
+§9.2); API list upload not atomic; reload reports success while dropping rules.
+
+## 7. Licences and terms
+
+| Source | Terms | Status |
+|---|---|---|
+| AlienVault/LevelBlue OTX | EULA ([levelblue.com/terms/otx-eula](https://www.levelblue.com/terms/otx-eula)): "free to end users for non-commercial use"; §2.3 forbids commercially exploiting OTX or making it available "as a service bureau", and republishing/distributing OTX content; no effective date given | **UNCLEAR for production.** Fine for the lab/dev. A hosted multi-tenant product looks like service-bureau use: get a written LevelBlue agreement before any customer install (BFC) |
+| VirusTotal | Public API: 4 req/min, 500/day, "must not be used in commercial products or services" or "business workflows that do not contribute new files" ([public-vs-premium-api](https://docs.virustotal.com/reference/public-vs-premium-api)); premium terms per contract | Public key for the lab only; per-tenant premium key in production |
+| MISP software | AGPL-3.0 (server). We only call its API / read its feed format; PyMISP is BSD-2-Clause | Licences to recheck when 6.2 adds dependencies |
+| MISP default feeds | Per feed. CIRCL OSINT feed: no licence or TLP statement on the feed index ([circl.lu/doc/misp/feed-osint](https://www.circl.lu/doc/misp/feed-osint/)); its training material says it carries TLP:WHITE events. Some default feeds need a licence (e.g. Bambenek) ([misp-project.org/feeds](https://www.misp-project.org/feeds)) | **UNCLEAR per feed:** 6.2 records each enabled feed's terms; enable only feeds with stated terms |
+| Wazuh shipped lists/rules | GPLv2 (`0999-malicious-ioc-rules.xml` header) | inherited, fine |
+
+## 8. VERIFY list
+
+**6.1 (IOC store, lists, distribution, OTX)**
+1. `worker-test` is its own cluster (own name/key, or cluster disabled): `cluster_control -l` on the main master no longer lists it; a canary file in the main master's `etc/lists/` never appears on `worker-test`.
+2. A known test IOC (OTX test pulse or manual) produces exactly one TI alert end to end on a non-alerting event, and exactly one `ti_hits` row (CDB origin).
+3. The same IOC on an alerting event (5710) leaves the native alert unchanged and adds one `matcher` `ti_hits` row; 5712 still fires on a brute force from that IP.
+4. Empty list, 1-entry list and 1 M-entry list all load (no "list not loaded" warning); sizes and compile times recorded.
+5. Rejected feed values (newline, quote, colon in a domain) never reach a list file; reject count logged.
+6. Reload under load loses no events after the analysisd fix (§9.4 method: sent = received = alerts).
+7. Worker reload ordering: change the list, run §4.4, check each worker matches the new IOC and not the removed one; repeat 20 times.
+8. Rule generator: logtest per decoder family shows the `accuracy="0"` TI child fires for a non-alerting event (not yet shown in 6.0: no probe line reached it) and never pre-empts a native sibling; level-0 leaves inventoried; reload responses with any warning fail the distribution.
+9. Expiry: an IOC past `expires_at` stops matching after the next sync (CDB) and immediately (`ti-matcher`).
+10. Replay of the same alerts adds no `ti_hits` duplicates.
+11. Throughput gate: hot path within 5%; analysisd ceiling with real list sizes; `ti-matcher` ceiling ≥ 3,300/s (T9).
+12. OTX licence position recorded; key read from a secret; incremental sync resumes from its cursor after a restart.
+
+**6.2 (MISP)**
+1. Feed-only mode imports only `to_ids=true` attributes; each enabled feed's terms recorded.
+2. Server mode (if RAM allows): incremental `restSearch`, revocation when `to_ids` flips.
+3. A tenant-private MISP's IOCs reach only that tenant's lists and matcher set; canary IOC never matches another tenant.
+
+**6.3 (VirusTotal)**
+1. `custom-shadowtracer-virustotal` on FIM 554: known-bad test hash → 87105-shaped alert; unknown hash → 87103; cache hit makes no request (count requests).
+2. Budget: a burst of 500 new files stays within the per-minute and per-day budget; overflow is queued or marked, never silently dropped.
+3. Per-tenant key isolation; the key is not visible in `ps` (options file instead of argv).
+4. Console on-demand lookup uses the same cache and budget; audited.
+
+**6.4 (console, incidents, retro-hunt)**
+1. Incident detail shows TI hits with source and pulse/event reference.
+2. Retro-hunt: IOC added after the matching alert produces one `retro` hit; bounded query time recorded; tenant filter proven.
+3. IOC browser and source settings admin-only and audited.
+4. Tenant isolation end to end: tenant-private IOC never appears in another tenant's console, lists or hits.
+
+## 9. Spike measurements (2026-11-05, test manager only)
+
+Lab as in THROUGHPUT_BASELINE.md §1 (one WSL2 host, 12 vCPU, ~11 GiB). Test manager
+`shadowtracer-worker-test` only. The scratch list, fixture, rules and scripts lived in a
+session scratch directory outside the repository and were removed from the container
+afterwards (§9.7); none are committed. The scripts are described well enough below to
+re-create.
+
+### 9.0 Set-up and isolation
+
+- The test manager's shipper was **stopped** for the whole spike, so no spike alert
+  reached Kafka, ClickHouse or Postgres. Its offset equalled the file size when stopped:
+  ```
+  $ docker exec shadowtracer-lab-shipper-worker-test-1 cat /offsets/offsets.json
+  {"alerts.json": {"inode": 404993, "offset": 1890789772}}
+  $ docker stop shadowtracer-lab-shipper-worker-test-1
+  $ docker exec shadowtracer-lab-shadowtracer-worker-test-1 ls -li /var/ossec/logs/alerts/alerts.json
+  404993 -rw-r--r-- 2 wazuh wazuh 1890789772 Nov  5 03:04 /var/ossec/logs/alerts/alerts.json
+  ```
+- Writers and correlators kept running (they serve the main tenant; they received
+  nothing from the test manager during the spike). The baseline's §3.3 stopped them,
+  so the absolute numbers here carry the idle-pipeline background; the with/without
+  comparison is same-session and same-conditions.
+- List: 100,000 distinct IPv4 addresses sampled from 198.18.0.0/15, `ip:spike` lines,
+  2,014,031 bytes; compiled `.cdb` 4,216,079 bytes. List and rule files were placed
+  in `etc/shadowtracer-spike/` (not a cluster-synced directory, §1.7) and declared in
+  `ossec.conf` (not synced), backup kept and restored.
+- Rules (scratch): `100900` child of 5715 and `100904` child of 5710, both
+  `address_match_key` on the 100k list (the costliest miss path: up to four
+  `cdb_find` per miss); `100901` child of 5700 (`accuracy="0"` in the ramp runs);
+  `100902` root-level; `100903` `address_match_key_value` child of 5710 (logtest only).
+- Two fixtures, both through `deploy/load/generate_load.py --target syslog` (paced
+  UDP to port 5514, the baseline's tooling):
+  - **baseline fixture** `deploy/load/fixtures/alerts_sample.anon.jsonl`, the same
+    method and input as THROUGHPUT_BASELINE §3.3/§12.6: its 76 sshd rows are 75× rule
+    5710 and 1× 5712 from 5 source IPs. With the list, every event does one lookup
+    (`100904` under 5710).
+  - **lookup fixture** (scratch): 10,000 `Accepted password for x from <ip> port <n>
+    ssh2` lines, every one with a source IP, 1% of them in the list. Every event does
+    the 100k lookup (`100900` under 5715) plus the shipped 199-entry `malicious-ip`
+    lookup (99903) that also runs without the list.
+- Sampler (scratch `ramp.sh`): 120 s per step, analysisd `.state` deltas every 15 s
+  (`events_received`, `events_processed`, `events_dropped`, `alerts_written`,
+  `event_queue_usage` from `/var/ossec/var/run/wazuh-analysisd.state`) and
+  `top -b -n1 -p $(pidof wazuh-analysisd)` %CPU, 25 s drain between steps:
+  ```
+  python3 deploy/load/generate_load.py --target syslog --host 172.28.0.14 --port 5514 \
+     --rate $R --duration 120 --run-id tis-$L-$R --fixture $FIXTURE --seed 42
+  ```
+
+### 9.1 A first fixture that measured something else
+
+The first lookup fixture used `Failed password for invalid user x from <unique ip>`
+(rule 5710) with a different source IP on almost every line. Without any list loaded:
+```
+-- nolist 3000/s for 120 s
+13:16:34 recv/s  2326 proc/s  1485 drop/s     0 alerts/s  1484 q 0.00
+13:16:48 recv/s  3209 proc/s  1714 drop/s    77 alerts/s  1714 q 1.00
+13:17:04 recv/s  2548 proc/s  1570 drop/s   979 alerts/s  1570 q 1.00
+13:17:18 recv/s  4268 proc/s  2301 drop/s  1968 alerts/s  2300 q 1.00
+13:17:33 recv/s  2565 proc/s  1618 drop/s   946 alerts/s  1619 q 1.00
+$ docker exec … top -b -n1 -w 200 -p $(pidof wazuh-analysisd)   # sender already stopped
+ 120339 wazuh  20  0 5621820 159960  2944 S 553.3  1.4 102:34.19 wazuh-analysisd
+```
+analysisd fell to ~1,500–2,300 processed/s at 3,000/s offered and kept 5½ cores busy
+after the sender stopped. The likely cause is frequency rule 5712 (`if_matched_sid
+5710`, `same_source_ip`, `frequency="8"`, `timeframe="120"`) scanning its whole
+120-second history for each event, because with unique IPs it never finds 8 matches.
+That is a property of the native ruleset under a many-source brute force, not of TI.
+Moved to `OPTIMIZATION_BACKLOG.md` T10 and switched the lookup fixture to rule 5715.
+
+### 9.2 Rule placement and lookup types (`wazuh-logtest` on the test manager)
+
+Declaring the files and reloading (`reload.py`: the framework's
+`send_reload_ruleset_msg`, i.e. the analysisd socket command the API uses):
+```
+reload_wall_s=0.442 response={'success': True, 'message': 'ok', 'warnings': [
+ "(7617): Signature ID '5715' was not found and will be ignored in the 'if_sid' option of rule '100900'.",
+ "(7619): Empty 'if_sid' value. Rule '100900' will be ignored.",
+ "(7617): Signature ID '5700' was not found … rule '100901'.", "(7619): … Rule '100901' will be ignored.",
+ "(7611): Category was not found. Invalid 'category'. Rule '100902' will be ignored.",
+ "(7617): Signature ID '5710' was not found … rule '100903'.", "(7619): … Rule '100903' will be ignored."], 'errors': []}
+```
+The file was named `0001-shadowtracer-ti-spike.xml`: loaded before
+`0095-sshd_rules.xml` despite sitting in a later `<rule_dir>`, so every parent was
+missing, and the reload still reported success (§1.4 point 2a). Renamed to `1000-…`:
+`warnings: []`, including for the root rule 100902 (its "Category was not found" was
+also a load-order effect).
+
+Logtest, TI child of 5700 **without** `accuracy="0"` (input lines on the left):
+```
+Accepted password … from 198.18.157.153 (listed)        -> 100901 (TI child of 5700)   pre-empted 5715
+Accepted password … from 100.64.0.5 (not listed)        -> 5715
+Failed password for invalid user … 198.18.157.153       -> 100901                      pre-empted 5710
+Failed password for invalid user … 100.64.0.5           -> 100903 (address_match_key_value fired on an UNLISTED ip)
+Connection closed by 198.18.157.153 port 22 [preauth]   -> 5722 level 0, no alert
+Received disconnect from 198.18.157.153 port 22:11: …   -> 5721 level 0, no alert
+Did not receive identification string from 198.18.157.153 -> 100901                   pre-empted 5706
+```
+Same lines with `accuracy="0"` on 100901:
+```
+listed, Accepted              -> 100900 (TI child of 5715, replaces 5715 — the Wazuh 0999 pattern)
+unlisted, Accepted            -> 5715
+listed, invalid user          -> 5710   (100903 address_match_key_value did not fire for the listed ip)
+unlisted, invalid user        -> 100903 (fired: inverted, §1.2)
+listed, Connection closed     -> 5722 level 0, no alert   (level-0 leaf gap, §1.4)
+listed, Received disconnect   -> 5721 level 0, no alert
+listed, no identification     -> 5706   (native sibling now wins)
+```
+Not shown: a line where the `accuracy="0"` child itself fires (none of the probe lines
+reached it; VERIFY 6.1-8).
+
+### 9.3 analysisd ceiling with and without the 100,000-entry list
+
+Per 120 s step: mean of the 15 s samples (the first sample includes generator start-up,
+so mean received is slightly under the offered rate) and the analysisd %CPU range.
+
+**Baseline fixture (THROUGHPUT_BASELINE method):**
+
+| offered/s | without list: recv / proc / drop per s | CPU | with list: recv / proc / drop per s | CPU |
+|---|---|---|---|---|
+| 4,000 | 3,886 / 3,884 / **0** | 287–487% | 3,876 / 3,871 / **0** | 160–487% |
+| 5,000 | 4,877 / 3,769 / 838 (queue 1.00) | 387–553% | 4,904 / 4,068 / 577 (queue 1.00) | 333–540% |
+| 6,000 | 5,735 / 4,130 / 1,353 | 367–533% | 5,968 / 3,971 / 1,725 | 227–533% |
+
+**Ceiling ~4,000/s with and without the list** (the baseline's number, §3.3/§12.6).
+Saturated processing is ~3,770–4,130/s without and ~3,970–4,070/s with: no difference
+beyond step-to-step noise.
+
+**Lookup fixture (every event looks up the 100k list):**
+
+| offered/s | without list: proc/s, drops | CPU | with list: proc/s, drops | CPU |
+|---|---|---|---|---|
+| 3,000 | 2,995, 0 | 47–53% | — | — |
+| 4,000 | 3,908, 0 | 53–73% | 3,941, 0 | 53–73% |
+| 5,000 | 4,846, 0 | 73–93% | — | — |
+| 6,000 | 5,878, 0 | 88–107% | — | — |
+| 8,000 | 7,856, 0 | 120–140% | 7,704, 0 | 127–153% |
+| 10,000 | 9,903, 0 | 153–200% | — | — |
+| 12,000 | 11,726, 0 | 193–213% | 11,778, 0 | 187–227% |
+| 16,000 | 15,741, 0 | 273–306% | 15,336, 0 | 267–313% |
+| 20,000 | 19,426, 0 | 200–387% | 19,783, 0 | 267–393% |
+
+No analysisd drop at any step, queue usage 0.00 throughout. At 20,000/s the loss is
+**before** analysisd, in the kernel UDP buffer (single sender, `/proc/net/snmp`):
+```
+no list 16k+20k steps: InDatagrams 20449128 -> 24756411, RcvbufErrors 24083 -> 36798 (+12,715)
+with list 4k..20k steps: RcvbufErrors 37451 -> 53744 (+16,293)
+```
+So for this event mix analysisd's own ceiling is above ~19,000/s and could not be
+reached with one UDP sender. CPU per event is the same with and without the list
+within the sampling noise.
+
+**Result:** a 100,000-entry `address_match_key` list adds no measurable cost to
+analysisd on this lab, either at the baseline's 4,000/s ceiling or at 4–20k/s
+where every event does a lookup. The `.cdb` is `mmap`ed and a lookup is a few hash
+probes in memory; rule evaluation dominates.
+
+### 9.4 Reload time, and events lost during a reload under load
+
+Reload wall time (socket request → response, `reload.py`), whole ruleset:
+```
+first reload with the new list (compiles the 4.2 MB .cdb):  reload_wall_s=0.978
+later reloads, no list change:                               0.364 0.405 0.428 0.442
+during 4,000/s load:                                         0.938 0.451 0.416 0.479 0.548
+```
+The `ossec.log` lines "Reloading ruleset" / "Ruleset reloaded successfully" carry the
+same second, so the locked window (drain + switch) is under 1 s; its exact length is not
+logged.
+
+Loss test (scratch `reload_under_load.sh`): 60 s of the lookup fixture at 4,000/s
+(240,000 events, each producing exactly one alert), control run with no reload, then
+the same run with a reload every 10 s; counters before/after plus a count of this
+run's alerts in `alerts.json`:
+```
+== control (0 reloads)
+DONE seq=240000 elapsed=60.0s
+events_received_delta=240000 events_processed_delta=240000 events_dropped_delta=0 alerts_written_delta=240000 discarded_count_delta=0 udp_rcvbuf_errors_delta=0
+alerts_in_file_for_run=240000
+== 5 reloads
+14:20:42 reload_wall_s=0.938 response={'success': True, 'message': 'ok', 'warnings': [], 'errors': []}
+14:20:53 reload_wall_s=0.451 …   14:21:04 reload_wall_s=0.416 …   14:21:15 reload_wall_s=0.479 …   14:21:25 reload_wall_s=0.548 …
+DONE seq=240000 elapsed=60.0s
+events_received_delta=239981 events_processed_delta=239978 events_dropped_delta=0 alerts_written_delta=239971 discarded_count_delta=0 udp_rcvbuf_errors_delta=28
+alerts_in_file_for_run=239971
+```
+
+| | sent | received by analysisd | processed | alerts written | lost |
+|---|---|---|---|---|---|
+| 0 reloads | 240,000 | 240,000 | 240,000 | 240,000 | **0** |
+| 5 reloads | 240,000 | 239,981 | 239,978 | 239,971 | **29** (≈6 per reload) |
+
+The 29 split exactly as §1.5 predicts: 19 never reached analysisd (input blocked while the
+write lock was held; the container's kernel counted 28 UDP receive-buffer drops in that
+run, a counter shared by every UDP socket there), 3 received but never processed
+(freed from `decode_queue_event_output`), 7 matched but never written (freed from
+`writer_queue_log`). `events_dropped` stayed 0: the drain is not counted as a drop
+anywhere. Agent traffic arrives over remoted's TCP/secure channel, not UDP, so its
+behaviour while input is blocked differs and is not measured here; the 10 events freed
+inside analysisd are lost whatever the transport.
+
+**Result:** reloads are not loss-free in 4.14.8. The loss is small per reload at this
+rate and grows with queue depth (a reload near the ceiling frees up to the queue
+contents). Fix in 6.1 (§6) before reloads are automated.
+
+### 9.5 File descriptors and mappings leaked per reload
+
+Counted with `docker exec --privileged` (needed to read another uid's `/proc`):
+```
+before the loss test: pid=120339 total_fds=82 ti_ip_cdb_fds=5  ti_ip_cdb_maps=4
+after 5 reloads:      pid=120339 total_fds=92 ti_ip_cdb_fds=10 ti_ip_cdb_maps=9
+```
++1 fd and +1 mapping of the 4.2 MB `.cdb` per reload for each list that is looked up
+(+10 total: the shipped `malicious-ip` list is also looked up by 99903). Confirms
+`os_remove_cdblist()` never closing (§1.5). The fd limit is 458,752
+(`/proc/<pid>/limits`), so fds are not the near-term risk. The mappings are: each
+reload keeps another full mapping of every list (virtual memory; resident only as pages
+are touched). With seven lists of real size and a reload every 15 minutes, that is
+~670 stale mappings a day until analysisd restarts.
+
+### 9.6 Worker reload delay (cluster flag path)
+
+On `worker-test`, set the flag the way the API does on a worker
+(`set_reload_ruleset_flag(LocalClient())`) and time until `ossec.log` shows
+"Ruleset reloaded successfully":
+```
+08:25:19 flag={'success': True} reload_done_after_s=2.0
+08:25:26 flag={'success': True} reload_done_after_s=6.2
+08:25:35 flag={'success': True} reload_done_after_s=6.2
+08:25:44 flag={'success': True} reload_done_after_s=6.4
+08:25:53 flag={'success': True} reload_done_after_s=6.2
+2026/11/05 08:25:43 INFO: [Worker worker-test] [Integrity check] Starting.
+2026/11/05 08:25:43 INFO: [Worker worker-test] [Integrity check] Finished in 0.011s. Sync not required.
+```
+2–6.4 s, bounded by the 9 s integrity interval plus the reload itself. File
+propagation master → worker was not measured: `worker-test` must not receive test
+lists through the main tenant's master (§1.7). It is measured in 6.1 on the split test
+cluster (VERIFY 6.1-7).
+
+### 9.7 Clean-up (done)
+
+1. `ossec.conf` restored from the backup taken before the spike; the backup,
+   `etc/shadowtracer-spike/` and the scratch scripts in `/tmp` were removed from the
+   container.
+2. The unread tail of `alerts.json` was checked before rotating: 20,950,633 lines after
+   the shipper's offset, all spike lines except one, the hourly analysisd `stats` alert
+   (rule 11, 08:00) that the spike's own volume triggered.
+3. Rotated with THROUGHPUT_BASELINE §12.6's procedure: manager stopped, day files
+   renamed and **kept** (`logs/alerts/2026/Nov/ossec-alerts-05.spike-ti.json`
+   24,635,594,592 B and `.log` 11,192,100,003 B), extra links removed, manager started.
+4. Shipper started; it switched to the new file by itself:
+   ```
+   {"alerts.json": {"inode": 45529, "offset": 556}}
+   ```
+   `cluster_control -l` still lists `worker-test`; both containers healthy.
+
+The renamed spike files (~36 GB on the lab disk) can be deleted on the owner's word;
+they hold no tenant data, only spike alerts and the one stats alert.

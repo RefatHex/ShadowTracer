@@ -45,6 +45,8 @@ manager; shipper ~10,000/s; correlator ~530–550/s and Postgres-bound.
 | T7 | TLS/SASL overhead unmeasured | No plaintext listener left to compare | One comparison run on a throwaway broker | LATER | S |
 | T8 | fsync cost on writes | Turned on after power-cut corruption | Measure write ceiling with/without; production relies on replicas on separate hosts | LATER | S |
 | T9 | Throughput of new feature consumers | TI matcher, ML scorer, embedder not measured yet | Measure each consumer's ceiling when it is built (feature phases record it here) | Per feature | S |
+| T10 | analysisd collapses on many-source brute force | 6.0 spike (`design/THREAT_INTEL.md` §9.1): sshd "invalid user" lines from unique source IPs at 3,000/s offered → 1,485–2,301 processed/s, queue full, drops from ~30 s; analysisd still at 553% CPU after the sender stopped. Likely rule 5712 (`if_matched_sid 5710`, `same_source_ip`, 120 s window) scanning a list that never finds 8 matches. Not caused by TI. | Confirm with perf; then cap/ index the per-rule prev-matched list by srcip, or lower the timeframe for this rule family | NEXT-OPT | M |
+| T11 | integratord is serial fork/exec per alert | `src/os_integrator/integrator.c:278-460`: one process per matching alert, waits for it. Estimated 3–20 alerts/s with an HTTPS call (not measured) | Measure in 6.3 with the VT script; if FIM bursts lag, run the script as a long-lived worker fed by a queue | LATER | S |
 
 ## 2. Reliability and operations
 
@@ -98,3 +100,4 @@ From `THREAT_MODEL.md` §11–12. Kafka TLS/SASL + per-tenant topics are DONE.
 | U3 | CMocka load-balancer regression test | Never run | LATER | S |
 | U4 | Upstream bug reports to Wazuh | Buffer requeue, LB NULL pointer, `wazuh_apid.py` shebang | LATER | S |
 | U5 | Tenancy model revisit | Dedicated managers chosen; shared model documented | When tenant count grows | — |
+| U6 | Upstream reports from the 6.0 TI audit | `design/THREAT_INTEL.md` §1, §9: hot reload frees queued events (the fix itself is 6.1, not deferred); CDB fd/mmap leak per reload; `address_match_key_value` result inverted; `PUT /lists/files` not atomic and rejects URL keys; `Lists_OP_MakeCDB` ignores `cdb_make_add` errors and leaks the temp FILE on a failed open (`lists_make.c:52-59,140`) | LATER | S |
