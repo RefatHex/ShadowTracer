@@ -44,4 +44,5 @@ def health_detail(db: Session = Depends(get_db), settings=Depends(get_settings),
         "clock_skew_per_node": health_checks.clock_skew_per_node(settings),
         "stuck_components": health_checks.stuck_components(db, settings.stuck_retry_alert_seconds),
         "ti_list_versions": health_checks.ti_list_versions(db),
+        "ti_sources": health_checks.ti_sources(db),
     }

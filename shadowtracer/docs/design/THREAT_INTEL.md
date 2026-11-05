@@ -370,7 +370,20 @@ FIM `<directories>` on all four agents; osquery and SCA.
 | URL | **none** | — | **no** | Squid access log (full URL in `url`), Suricata HTTP (`http.hostname` + `http.url`); web-server logs carry only paths |
 | File hash | FIM (syscheck) rules 550/554 | 554 "File added to the system." on agent-ubuntu-1, `syscheck.path=/var/ossec/lab-fim-test/testfile.txt`, `sha256_after=852e5319…95b7` | **yes** (CDB on 550/554, VirusTotal on new hashes) | also Sysmon 1/15 hashes after a decoder split (§1.3) |
 
-So today only **source IPs** and **FIM hashes** can match. Destination IP, domain and URL
+**Update 6.1b (2026-11-06):** agent-ubuntu-1 now logs every new outbound connection
+(iptables NFLOG → ulogd2 → `/var/log/shadowtracer-netlog.log` with a `kernel: ST-OUT`
+prefix that Wazuh's stock `iptables-2` decoder reads; `AGENT_NETLOG=1`, cap `NET_ADMIN`).
+Matchable now, with the TI rule that matches:
+
+| IOC type | Source | TI rule parents (`accuracy="0"`) | Proven end to end |
+|---|---|---|---|
+| source IP | sshd (`auth.log`/`secure`) | 5700, 5722 (`srcip`) | 110000/110001 → ClickHouse → incident |
+| destination IP | outbound connection log, agent-ubuntu-1 | 4100 (`dstip`) | 110005 for `45.33.32.156` |
+| source IP (inbound) | same log, INPUT side when enabled | 4100 (`srcip`) | rule loads; no inbound rule enabled in the lab |
+| file hash | FIM 550/554 | `sha256`, `sha1`, `md5` | 110013 |
+| domain, URL | **none yet** | lists are generated (`url-medium` holds the OTX fixture URL), nothing decodes a domain or URL | needs DNS/proxy logs (Suricata, Squid) |
+
+Before 6.1b, only **source IPs** and **FIM hashes** could match. Destination IP, domain and URL
 IOCs can be stored, retro-hunted and shown, but they cannot match anything until a
 network/DNS/proxy log source is added. The cheapest lab option is iptables `LOG` rules on
 the Linux agents (destination IPs). Suricata on one lab sensor would add DNS and HTTP.

@@ -79,6 +79,7 @@ From `THREAT_MODEL.md` §11–12. Kafka TLS/SASL + per-tenant topics are DONE.
 | S7 | Agent↔manager channel never re-audited | Review or explicit out-of-scope decision | BFC | S |
 | S8 | VM ports open on all interfaces | `docker-compose.vm.yml` override only, enrollment password on | While VMs are used | S |
 | S9 | **Attacker-triggered event loss in analysisd** (was T10). An invalid-user SSH spray from many source IPs at 3,000/s held analysisd to 1,485–2,301 processed/s with drops from ~30 s and 553% CPU after the sender stopped (`design/THREAT_INTEL.md` §9.1). An attacker who can reach sshd on monitored hosts can blind the manager to everything else. Likely rule 5712 (`if_matched_sid 5710`, `same_source_ip`, 120 s) scanning a history that never reaches 8 matches. Not caused by TI | Confirm with perf; then index the per-rule prev-matched list by source IP or bound the scan; drop alarm in `/health/detail` (events_dropped rate); per-agent EPS limits as a stopgap | BFC | M |
+| S10 | ti-sync's lab transport is the host Docker socket | `deploy/lab/docker-compose.yml` mounts `/var/run/docker.sock` into `ti-sync` so `safe_reload.DockerNode` can `docker exec` into the managers - root-equivalent on the host. Lab only | Production transport: a small agent on each manager host serving the five calls safe_reload uses (read, write_atomic, sha256, validate, reload) over mTLS, scoped to `etc/lists/shadowtracer-ti/` and the TI rule file (THREAT_INTEL.md §4.4) | BFC | M |
 
 ## 4. Rebrand
 

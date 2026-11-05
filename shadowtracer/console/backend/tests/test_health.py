@@ -485,3 +485,23 @@ def test_ti_list_versions_flags_mismatched_worker_and_failed_reload(db):
         assert report["tenants"]["ti-health-c"]["nodes"]["master"]["files"] == {}
     finally:
         _ti_cleanup(db)
+
+
+def test_ti_sources_staleness(db):
+    from sqlalchemy import text as _t
+    try:
+        db.execute(_t(
+            "INSERT INTO ti_sources (name, kind, stix_identity, trust, default_tlp, enabled, last_attempt_at, last_success_at, last_error) VALUES "
+            "('ti-health-fresh', 'feodo', 'identity--a', 0.8, 'clear', true, now(), now(), NULL), "
+            "('ti-health-failing', 'otx', 'identity--b', 0.7, 'clear', true, now(), now() - interval '10 minutes', 'fetch otx: timeout'), "
+            "('ti-health-old', 'feodo', 'identity--c', 0.8, 'clear', true, now() - interval '2 days', now() - interval '2 days', NULL), "
+            "('ti-health-off', 'sslbl', 'identity--d', 0.8, 'clear', false, NULL, NULL, NULL), "
+            "('ti-health-manual', 'manual', 'identity--e', 1.0, 'amber', true, NULL, NULL, NULL), "
+            "('ti-health-wl', 'warninglist', 'identity--f', 0, 'clear', true, now() - interval '5 hours', now() - interval '5 hours', NULL)"))
+        db.commit()
+        report = health_checks.ti_sources(db, sync_interval_seconds=900)
+        assert set(report["stale"]) >= {"ti-health-failing", "ti-health-old"} and report["alert"]
+        assert not {"ti-health-fresh", "ti-health-off", "ti-health-manual", "ti-health-wl"} & set(report["stale"])
+    finally:
+        db.execute(_t("DELETE FROM ti_sources WHERE name LIKE 'ti-health-%'"))
+        db.commit()

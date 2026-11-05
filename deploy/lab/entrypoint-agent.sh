@@ -125,6 +125,44 @@ if [ -d /var/log/audit ] && ! grep -q "/var/log/audit/audit.log" "$OSSEC_CONF"; 
     mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
 fi
 
+# Phase 6.1b: outbound connection log (AGENT_NETLOG=1, docker-compose.yml sets it on
+# agent-ubuntu-1 only, with cap NET_ADMIN), so destination-IP IOCs can match.
+# iptables NFLOG on new outbound connections -> ulogd2 (userspace, this container's
+# netns only - the kernel LOG target would write to the shared host kernel log) ->
+# a file in kernel-LOG format. The "kernel: " prefix makes Wazuh's stock iptables-2
+# decoder read it (srcip/dstip/ports; rule 4100), so no new decoder is needed.
+# Licences: iptables GPL-2.0, ulogd2 GPL-2.0 (Debian copyright files).
+if [ "${AGENT_NETLOG:-0}" = "1" ] && command -v ulogd >/dev/null 2>&1; then
+    NETLOG=/var/log/shadowtracer-netlog.log
+    iptables -C OUTPUT -m conntrack --ctstate NEW -j NFLOG --nflog-group 5 --nflog-prefix "kernel: ST-OUT" 2>/dev/null || \
+        iptables -A OUTPUT -m conntrack --ctstate NEW -j NFLOG --nflog-group 5 --nflog-prefix "kernel: ST-OUT" || true
+    U=/usr/lib/x86_64-linux-gnu/ulogd
+    cat > /etc/ulogd-netlog.conf <<EOF
+[global]
+logfile="/var/log/ulogd.log"
+plugin="$U/ulogd_inppkt_NFLOG.so"
+plugin="$U/ulogd_raw2packet_BASE.so"
+plugin="$U/ulogd_filter_IFINDEX.so"
+plugin="$U/ulogd_filter_IP2STR.so"
+plugin="$U/ulogd_filter_PRINTPKT.so"
+plugin="$U/ulogd_output_LOGEMU.so"
+stack=log1:NFLOG,base1:BASE,ifi1:IFINDEX,ip2str1:IP2STR,print1:PRINTPKT,emu1:LOGEMU
+[log1]
+group=5
+[emu1]
+file="$NETLOG"
+sync=1
+EOF
+    pkill -x ulogd 2>/dev/null || true
+    ulogd -d -c /etc/ulogd-netlog.conf || true
+    touch "$NETLOG"
+    if ! grep -q "$NETLOG" "$OSSEC_CONF"; then
+        netlog_block="  <localfile><log_format>syslog</log_format><location>${NETLOG}</location></localfile>"
+        awk -v block="$netlog_block" '/<\/ossec_config>/{print block} {print}' "$OSSEC_CONF" > "${OSSEC_CONF}.tmp"
+        mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
+    fi
+fi
+
 # --- enroll with the master if we don't already have keys ---
 # Dynamic IP ("any") - see the note above sed-ing <address> for why this
 # no longer needs -I <static-ip>.

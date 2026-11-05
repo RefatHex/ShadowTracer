@@ -358,16 +358,19 @@ services:
     hostname: agent-ubuntu-1
     init: true
     restart: unless-stopped
-    mem_limit: 192m
-    memswap_limit: 192m
+    mem_limit: 176m
+    memswap_limit: 176m
     # Phase 5C-1: auditd needs this to load rules / enable the kernel
     # audit subsystem (confirmed directly - it starts but immediately
     # exits on "Error sending enable request (Operation not permitted)"
     # without it). CAP_AUDIT_WRITE is already in Docker's default set.
     cap_add:
       - AUDIT_CONTROL
+      # Phase 6.1b: iptables NFLOG for the outbound connection log (AGENT_NETLOG).
+      - NET_ADMIN
     environment:
       <<: *agent-env
+      AGENT_NETLOG: "1"
       # Phase 5C Step 0, item 3: pointed directly at the dedicated test
       # manager, NOT shadowtracer-lb - this is the one agent smoke-test.sh's
       # real SSH-brute-force check uses, and it must never land on worker1
@@ -399,8 +402,8 @@ services:
     hostname: agent-ubuntu-2
     init: true
     restart: unless-stopped
-    mem_limit: 192m
-    memswap_limit: 192m
+    mem_limit: 176m
+    memswap_limit: 176m
     cap_add:
       - AUDIT_CONTROL
     environment:
@@ -424,8 +427,8 @@ services:
     hostname: agent-rocky-1
     init: true
     restart: unless-stopped
-    mem_limit: 192m
-    memswap_limit: 192m
+    mem_limit: 176m
+    memswap_limit: 176m
     cap_add:
       - AUDIT_CONTROL
     environment:
@@ -449,8 +452,8 @@ services:
     hostname: agent-rocky-2
     init: true
     restart: unless-stopped
-    mem_limit: 192m
-    memswap_limit: 192m
+    mem_limit: 176m
+    memswap_limit: 176m
     cap_add:
       - AUDIT_CONTROL
     environment:
@@ -782,6 +785,42 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.46
+
+  # Phase 6.1b: threat-intel sync (feeds -> IOC store -> CDB lists + TI rules on
+  # every tenant manager cluster, through the 6.1a safe reload wrapper). Network
+  # calls to feeds happen here, on a schedule - never on the alert hot path.
+  ti-sync:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ti-sync.Dockerfile
+    image: shadowtracer-lab/ti-sync:local
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
+      POSTGRES_USER: shadowtracer_app
+      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
+      TI_SYNC_INTERVAL_SECONDS: "900"
+      # Customer-supplied in the product; ShadowTracer's own key only in the lab.
+      OTX_API_KEY: ${OTX_API_KEY:-}
+      TI_CLUSTERS: >-
+        [{"tenant_key": "${TENANT_KEY:?set TENANT_KEY in deploy/lab/.env}",
+          "nodes": [["master", "shadowtracer-lab-shadowtracer-master-1"],
+                    ["worker1", "shadowtracer-lab-shadowtracer-worker1-1"],
+                    ["worker2", "shadowtracer-lab-shadowtracer-worker2-1"]]},
+         {"tenant_key": "${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env}",
+          "nodes": [["worker-test", "shadowtracer-lab-shadowtracer-worker-test-1"]]}]
+    volumes:
+      # Lab transport for safe_reload.DockerNode (docker exec into the managers).
+      # Root-equivalent on the host: lab only (backlog S10).
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lab
 
   writer-1:
     build:

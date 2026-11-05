@@ -64,7 +64,7 @@ def rules_xml() -> str:
                 f"    <if_sid>{parents}</if_sid>",
                 f'    <list field="{field}" lookup="{lookup}">{LIST_DIR}/{list_type}-{band}</list>',
                 f"    <description>{escape(f'Threat intel ({band} confidence): {what} {field} $({field}) is a known indicator')}</description>",
-                f"    <group>shadowtracer_ti,ti_{band},</group>",
+                f"    <group>ti_{band},</group>",
                 "  </rule>",
             ]
             rule_id += 1

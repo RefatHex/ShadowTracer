@@ -49,11 +49,12 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 | console-backend-1, -2 | 118 / 82 | 160m each |
 | shipper-worker-test, -worker1, -worker2 | 76 / 71 | 128m each |
 | closer-1, -2 | 62 / 51 | 96m each |
-| agent-ubuntu-1/2, agent-rocky-1/2 | 133 / 51 | 192m each |
+| agent-ubuntu-1/2, agent-rocky-1/2 | 133 / 51 | 176m each |
 | caddy | 61 / 15 | 96m |
 | shadowtracer-lb | 13 / 9 | 32m |
+| ti-sync (6.1b) | new: not yet measured under load | 128m |
 | load generators (`deploy/load/syslog_fleet.sh` containers) | ~30 | 128m each |
-| **total of compose limits** | | **13,696 MiB (13.4 GiB)** |
+| **total of compose limits** | | **13,760 MiB (13.4 GiB)** |
 
 **Check `memory.events`, not only OOM kills.** A container can sit under its cap
 and still be starved: every `max` event in

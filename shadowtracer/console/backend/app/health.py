@@ -468,3 +468,38 @@ def ti_list_versions(db: Session) -> dict:
                 t["mismatched"].append(name)
         t["alert"] = bool(t["failed"] or t["mismatched"])
     return {"tenants": tenants, "alert": any(t["alert"] for t in tenants.values())}
+
+
+def ti_sources(db: Session, sync_interval_seconds: int = 900) -> dict:
+    """Phase 6.1b (THREAT_INTEL.md §4.12): threat-intel feed staleness. A failed sync
+    keeps the source's last good data, so the lists keep working - but the intel ages.
+    A source alerts when its last attempt failed or its last success is older than
+    three sync intervals (two days for the daily MISP warninglists), or it never
+    succeeded. Disabled sources and manual (analyst-entered) sources never alert."""
+    try:
+        rows = db.execute(text(
+            "SELECT name, kind, tenant_key, enabled, last_attempt_at, last_success_at, last_error, last_counts, "
+            "EXTRACT(EPOCH FROM (now() - last_success_at)) AS age_seconds, "
+            "(SELECT count(*) FROM ioc_sightings s WHERE s.source_id = ti_sources.id AND s.revoked_at IS NULL) AS live_iocs "
+            "FROM ti_sources ORDER BY name"
+        )).mappings().all()
+    except Exception as exc:  # noqa: BLE001 - missing table (pre-migration) or DB hiccup must not crash /health
+        db.rollback()
+        return {"error": str(exc), "sources": [], "stale": [], "alert": False}
+    sources, stale = [], []
+    for r in rows:
+        failing = r["last_error"] is not None
+        # warninglists refresh daily by design; manual (analyst-entered) sources are not feeds
+        limit = 2 * 86400 if r["kind"] == "warninglist" else 3 * sync_interval_seconds
+        too_old = r["age_seconds"] is None or r["age_seconds"] > limit
+        is_stale = r["enabled"] and r["kind"] != "manual" and (failing or too_old)
+        if is_stale:
+            stale.append(r["name"])
+        sources.append({
+            "name": r["name"], "kind": r["kind"], "tenant_key": r["tenant_key"], "enabled": r["enabled"],
+            "last_attempt_at": r["last_attempt_at"].isoformat() if r["last_attempt_at"] else None,
+            "last_success_at": r["last_success_at"].isoformat() if r["last_success_at"] else None,
+            "age_seconds": r["age_seconds"], "last_error": r["last_error"], "live_iocs": r["live_iocs"],
+            "last_counts": r["last_counts"], "stale": is_stale,
+        })
+    return {"sync_interval_seconds": sync_interval_seconds, "sources": sources, "stale": stale, "alert": bool(stale)}

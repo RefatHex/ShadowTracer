@@ -28,7 +28,7 @@ ARG INSTALL_DIR=/var/ossec
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
         procps iproute2 ca-certificates gawk curl \
-        openssh-server rsyslog sudo passwd auditd audispd-plugins && \
+        openssh-server rsyslog sudo passwd auditd audispd-plugins iptables ulogd2 && \
     rm -rf /var/lib/apt/lists/*
 
 # Phase 5C-1: auditd itself (GPL-2) and its libaudit library (LGPL-2.1) -
