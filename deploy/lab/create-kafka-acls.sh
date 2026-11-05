@@ -18,6 +18,8 @@
 #                        + producer (pattern: every tenant's dead-letter
 #                        topic) - never producer on alerts, never
 #                        consumer on dead-letter.
+#   ti-matcher         - consumer only (Read + Describe on every tenant's
+#                        topics, its own group) - Phase 6.1c, never a producer.
 #   console-backend    - Describe + Read (never Write) on every
 #                        tenant's topics, for /health/detail's lag
 #                        reporting - Read is needed to fetch the oldest
@@ -59,6 +61,7 @@ add_scram_user shipper-test "${KAFKA_SHIPPER_TEST_PASSWORD:?set KAFKA_SHIPPER_TE
 add_scram_user writer "${KAFKA_WRITER_PASSWORD:?set KAFKA_WRITER_PASSWORD in deploy/lab/.env}"
 add_scram_user correlator "${KAFKA_CORRELATOR_PASSWORD:?set KAFKA_CORRELATOR_PASSWORD in deploy/lab/.env}"
 add_scram_user console-backend "${KAFKA_CONSOLE_BACKEND_PASSWORD:?set KAFKA_CONSOLE_BACKEND_PASSWORD in deploy/lab/.env}"
+add_scram_user ti-matcher "${KAFKA_TI_MATCHER_PASSWORD:?set KAFKA_TI_MATCHER_PASSWORD in deploy/lab/.env}"
 
 echo "--- ACLs ---"
 # Shipper: producer only, on its OWN tenant's two topics - never
@@ -94,6 +97,13 @@ for user in writer correlator; do
         --group "$group"
 done
 
+# ti-matcher (Phase 6.1c): reads every tenant's alerts topic in its own group, never
+# writes to Kafka (its output goes to ClickHouse and Postgres).
+acl --add --allow-principal "User:ti-matcher" --operation Read --operation Describe \
+    --topic "shadowtracer.t." --resource-pattern-type PREFIXED
+acl --add --allow-principal "User:ti-matcher" --operation Read \
+    --group "shadowtracer-ti-matcher"
+
 # Console-backend: Describe + Read + DescribeConfigs, never Write -
 # /health/detail's lag reporting needs group offsets and topic
 # watermarks (Describe), the oldest lagging message's own timestamp
@@ -111,5 +121,7 @@ acl --add --allow-principal "User:console-backend" --operation Describe \
     --group "shadowtracer-console-lag-check" --resource-pattern-type LITERAL
 acl --add --allow-principal "User:console-backend" --operation Describe \
     --group "shadowtracer-writer" --resource-pattern-type LITERAL
+acl --add --allow-principal "User:console-backend" --operation Describe \
+    --group "shadowtracer-ti-matcher" --resource-pattern-type LITERAL
 
 echo "done - credentials and ACLs provisioned. Next: switch docker-compose.yml's kafka service to SASL_SSL and restart it."

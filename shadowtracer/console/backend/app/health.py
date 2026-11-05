@@ -199,6 +199,10 @@ def _topic_retention_ms(admin: AdminClient, topic: str) -> int | None:
 
 
 def writer_consumer_lag(settings: Settings) -> dict:
+    return consumer_lag(settings, settings.writer_consumer_group)
+
+
+def consumer_lag(settings: Settings, group: str) -> dict:
     """Total lag (log end offset - committed offset) for the writer's
     consumer group, summed across partitions, plus per-partition detail -
     and, for whichever lagging partition's oldest unconsumed message is
@@ -209,7 +213,7 @@ def writer_consumer_lag(settings: Settings) -> dict:
     try:
         admin = AdminClient({"bootstrap.servers": settings.kafka_bootstrap_servers, **kafka_client_config_from_env()})
         group_futures = admin.list_consumer_group_offsets(
-            [ConsumerGroupTopicPartitions(settings.writer_consumer_group)]
+            [ConsumerGroupTopicPartitions(group)]
         )
 
         results = {}
@@ -503,3 +507,30 @@ def ti_sources(db: Session, sync_interval_seconds: int = 900) -> dict:
             "last_counts": r["last_counts"], "stale": is_stale,
         })
     return {"sync_interval_seconds": sync_interval_seconds, "sources": sources, "stale": stale, "alert": bool(stale)}
+
+
+TI_MATCHER_GROUP = "shadowtracer-ti-matcher"
+
+
+def ti_matcher(db: Session, settings: Settings, behind_alert_seconds: int = 300) -> dict:
+    """Phase 6.1c (THREAT_INTEL.md §3.1): ti-matcher's consumer lag and the IOC store
+    version each instance has loaded per tenant. Detail only, never readiness: the
+    matcher is off the hot path. A tenant alerts when its loaded version is behind the
+    store for longer than behind_alert_seconds (a stuck reload)."""
+    out = {"consumer_lag": consumer_lag(settings, TI_MATCHER_GROUP)}
+    try:
+        current = db.execute(text("SELECT version, changed_at, EXTRACT(EPOCH FROM now() - changed_at) AS age "
+                                  "FROM ti_store_version")).mappings().first()
+        rows = db.execute(text("SELECT instance, tenant_key, store_version, iocs, by_type, loaded_at "
+                               "FROM ti_matcher_state ORDER BY tenant_key, instance")).mappings().all()
+    except Exception as exc:  # noqa: BLE001 - missing table (pre-migration) or DB hiccup must not crash /health
+        db.rollback()
+        return {**out, "error": str(exc), "alert": False}
+    behind = [f"{r['instance']}/{r['tenant_key']}" for r in rows
+              if r["store_version"] < current["version"] and current["age"] > behind_alert_seconds]
+    out.update({
+        "store_version": current["version"], "store_changed_at": current["changed_at"].isoformat(),
+        "loaded": [{**dict(r), "loaded_at": r["loaded_at"].isoformat()} for r in rows],
+        "behind": behind, "alert": bool(behind),
+    })
+    return out

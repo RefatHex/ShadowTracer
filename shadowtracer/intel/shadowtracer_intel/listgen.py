@@ -81,29 +81,47 @@ class Allow:
         return False
 
 
-def select(rows: list, allow: Allow, now: dt.datetime) -> tuple:
+def evaluate(rows: list, allow: Allow, now: dt.datetime, stats: dict = None):
     """rows: one dict per live sighting (ioc_id, type, value, tenant_key, tlp, trust,
-    source_confidence, last_seen, valid_until). -> ({list name: set(keys)}, scores, stats)."""
+    source_confidence, last_seen, valid_until[, source]). Yields (ioc_id, type, value,
+    confidence, band, sightings) for every IOC that is neither expired nor allowlisted -
+    the one decision both the CDB lists and ti-matcher use."""
+    stats = stats if stats is not None else {}
     by_ioc = {}
     for r in rows:
         if r["tenant_key"] is None and r["tlp"] in NO_CROSS_TENANT_TLP:
             continue
         by_ioc.setdefault(r["ioc_id"], []).append(r)
-    lists = {name: set() for name in ti_rules.list_names()}
-    scores, stats = {}, {"high": 0, "medium": 0, "low": 0, "expired": 0, "allowlisted": 0, "matcher_only": 0}
     for ioc_id, sightings in by_ioc.items():
         typ, value = sightings[0]["type"], sightings[0]["value"]
         last = max(s["last_seen"] for s in sightings)
         c = 0 if last + dt.timedelta(days=HARD_TTL_DAYS[typ]) <= now else score(sightings, typ, now)
         b = band(c)
-        scores[ioc_id] = c
         if b == "expired":
-            stats["expired"] += 1
+            stats["expired"] = stats.get("expired", 0) + 1
             continue
         if allow.blocks(typ, value):
-            stats["allowlisted"] += 1
+            stats["allowlisted"] = stats.get("allowlisted", 0) + 1
             continue
-        stats[b] += 1
+        stats[b] = stats.get(b, 0) + 1
+        yield ioc_id, typ, value, c, b, sightings
+
+
+def expires_at(typ: str, sightings: list) -> dt.datetime:
+    """When this IOC stops matching at the latest: the hard TTL, or the last source
+    expiry if every source set one (§4.10). ti-matcher checks it at lookup time."""
+    out = max(s["last_seen"] for s in sightings) + dt.timedelta(days=HARD_TTL_DAYS[typ])
+    if all(s["valid_until"] for s in sightings):
+        out = min(out, max(s["valid_until"] for s in sightings))
+    return out
+
+
+def select(rows: list, allow: Allow, now: dt.datetime) -> tuple:
+    """-> ({list name: set(keys)}, {ioc_id: confidence}, stats)."""
+    lists = {name: set() for name in ti_rules.list_names()}
+    scores, stats = {}, {"high": 0, "medium": 0, "low": 0, "expired": 0, "allowlisted": 0, "matcher_only": 0}
+    for ioc_id, typ, value, c, b, _ in evaluate(rows, allow, now, stats):
+        scores[ioc_id] = c
         keys = cdb_keys(typ, value) if typ in LIST_TYPE else []
         if b == "low" or not keys:          # low band, IPv6 ranges, too-broad CIDRs
             stats["matcher_only"] += 1
@@ -112,18 +130,25 @@ def select(rows: list, allow: Allow, now: dt.datetime) -> tuple:
     return lists, scores, stats
 
 
-def generate(conn, tenant_key: str, now: dt.datetime = None) -> tuple:
-    """-> (bundle for safe_reload.apply, stats). Writes back each IOC's current confidence."""
-    now = now or dt.datetime.now(dt.timezone.utc)
+def load(conn, tenant_key: str, now: dt.datetime) -> tuple:
+    """-> (live sighting rows, Allow) for one tenant: global + that tenant's private."""
     rows = conn.execute(text(
-        "SELECT i.id AS ioc_id, i.type, i.value, i.tenant_key, s.tlp, src.trust, s.source_confidence, s.last_seen, s.valid_until "
+        "SELECT i.id AS ioc_id, i.type, i.value, i.tenant_key, s.tlp, src.trust, s.source_confidence, s.last_seen, "
+        "s.valid_until, src.name AS source "
         "FROM iocs i JOIN ioc_sightings s ON s.ioc_id = i.id JOIN ti_sources src ON src.id = s.source_id "
         "WHERE s.revoked_at IS NULL AND src.enabled AND (i.tenant_key IS NULL OR i.tenant_key = :t)"),
         {"t": tenant_key}).mappings().all()
     allow = Allow(conn.execute(text(
         "SELECT type, value FROM ti_allowlist WHERE (tenant_key IS NULL OR tenant_key = :t) "
         "AND (expires_at IS NULL OR expires_at > :now)"), {"t": tenant_key, "now": now}).all())
-    lists, scores, stats = select([dict(r) for r in rows], allow, now)
+    return [dict(r) for r in rows], allow
+
+
+def generate(conn, tenant_key: str, now: dt.datetime = None) -> tuple:
+    """-> (bundle for safe_reload.apply, stats). Writes back each IOC's current confidence."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    rows, allow = load(conn, tenant_key, now)
+    lists, scores, stats = select(rows, allow, now)
     for ioc_id, c in scores.items():
         conn.execute(text("UPDATE iocs SET confidence = :c WHERE id = :i AND confidence <> :c"), {"c": c, "i": ioc_id})
     files = {}

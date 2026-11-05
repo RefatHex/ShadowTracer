@@ -711,8 +711,8 @@ services:
     hostname: shipper-worker1
     command: ["python3", "run_shipper.py"]
     restart: unless-stopped
-    mem_limit: 128m
-    memswap_limit: 128m
+    mem_limit: 104m
+    memswap_limit: 104m
     environment:
       <<: *shipper-env
       MANAGER_NAME: shadowtracer-worker1
@@ -739,8 +739,8 @@ services:
     hostname: shipper-worker2
     command: ["python3", "run_shipper.py"]
     restart: unless-stopped
-    mem_limit: 128m
-    memswap_limit: 128m
+    mem_limit: 104m
+    memswap_limit: 104m
     environment:
       <<: *shipper-env
       MANAGER_NAME: shadowtracer-worker2
@@ -768,8 +768,8 @@ services:
     hostname: shipper-worker-test
     command: ["python3", "run_shipper.py"]
     restart: unless-stopped
-    mem_limit: 128m
-    memswap_limit: 128m
+    mem_limit: 104m
+    memswap_limit: 104m
     environment:
       <<: *shipper-test-env
       MANAGER_NAME: shadowtracer-worker-test
@@ -817,6 +817,44 @@ services:
       # Root-equivalent on the host: lab only (backlog S10).
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lab
+
+  # Phase 6.1c: annotates alerts that already fired with TI matches (THREAT_INTEL.md
+  # §3.1). Own consumer group and Kafka user (read-only on the alerts topics); off the
+  # hot path - stopping it never affects ingestion or correlation.
+  ti-matcher:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ti-matcher.Dockerfile
+    image: shadowtracer-lab/ti-matcher:local
+    hostname: ti-matcher
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_GROUP_ID: shadowtracer-ti-matcher
+      KAFKA_SECURITY_PROTOCOL: SASL_SSL
+      KAFKA_SASL_USERNAME: ti-matcher
+      KAFKA_SASL_PASSWORD: ${KAFKA_TI_MATCHER_PASSWORD:?set KAFKA_TI_MATCHER_PASSWORD in deploy/lab/.env}
+      KAFKA_SSL_CA_LOCATION: /etc/kafka-certs/ca.crt
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
+      POSTGRES_USER: shadowtracer_app
+      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
+      CLICKHOUSE_HOST: ch-clickhouse-1
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+      CLICKHOUSE_DATABASE: shadowtracer
+      TI_MATCHER_POLL_SECONDS: "60"
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
       postgres:
         condition: service_healthy
     networks:
@@ -1007,8 +1045,8 @@ services:
     image: shadowtracer-lab/console-caddy:local
     hostname: caddy
     restart: unless-stopped
-    mem_limit: 96m
-    memswap_limit: 96m
+    mem_limit: 80m
+    memswap_limit: 80m
     depends_on:
       - console-backend-1
       - console-backend-2

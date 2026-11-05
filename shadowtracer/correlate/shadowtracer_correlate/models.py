@@ -5,6 +5,7 @@ with it by hand, same as shadowtracer/console/backend/app/models.py does
 for the auth tables)."""
 
 from sqlalchemy import (
+    Computed,
     Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint,
     Integer, MetaData, SmallInteger, String, Table, Text, UniqueConstraint, func, text,
 )
@@ -50,6 +51,11 @@ incidents = Table(
     Column("rare_pattern_flag", Boolean, nullable=False, server_default=text("false")),
     Column("prior_occurrences", Integer, nullable=True),
     Column("rare_pattern_reason", Text, nullable=True),
+    # Phase 6.1c: written only by ti-matcher; priority is generated from it in Postgres
+    # (ingest migration 7c1e9b2f4a60), so the correlator never writes either.
+    Column("ti_confidence", SmallInteger, nullable=True),
+    Column("priority", SmallInteger, Computed(
+        "GREATEST(max_level, CASE WHEN ti_confidence >= 75 THEN 12 WHEN ti_confidence >= 50 THEN 8 ELSE 0 END)")),
     CheckConstraint("state IN ('open', 'closed')", name="incidents_state_check"),
     CheckConstraint(
         "triage_status IN ('new', 'acknowledged', 'escalated', 'false_positive', 'closed')",

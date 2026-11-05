@@ -346,3 +346,43 @@ def test_rare_pattern_flag_surfaces_in_list_and_detail(client, db, tenant):
     body = detail_resp.json()
     assert body["rare_pattern_flag"] is True
     assert "First seen for this tenant" in body["rare_pattern_reason"]
+
+
+def test_ti_match_links_to_incident_raises_priority_and_surfaces(client, db, tenant):
+    """Phase 6.1c: ti-matcher's link step attaches a match to the incident the correlator
+    put its alert in (the matcher may see the alert first), raises ti_confidence, and the
+    generated priority follows; the detail lists the match with sources and confidence."""
+    import os
+    import sys
+    from sqlalchemy import text
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "intel"))
+    from shadowtracer_intel.matcher import link
+
+    tenant_id, tenant_key = tenant
+    marker = uuid.uuid4().hex[:8]
+    now = datetime.datetime.now(datetime.timezone.utc)
+    incident_id = _make_incident(db, tenant_key, agent_id=f"agent-{marker}")
+    ioc_id = db.execute(text(
+        "INSERT INTO iocs (stix_id, tenant_key, type, value, pattern, tlp, valid_from, last_seen, valid_until) "
+        "VALUES (:s, NULL, 'ipv4', :v, 'p', 'clear', now(), now(), now() + interval '1 day') RETURNING id"),
+        {"s": f"indicator--{marker}", "v": f"45.33.{int(marker[:2], 16)}.{int(marker[2:4], 16)}"}).scalar_one()
+    db.execute(text(
+        "INSERT INTO incident_ti (tenant_key, node, alert_id, alert_time, rule_id, ioc_id, field, observable_type, "
+        "observable, ioc_value, sources, confidence) VALUES (:t, 'testnode', :a, now(), '5710', :i, 'data.srcip', "
+        "'ipv4', '45.33.32.157', '45.33.32.157', ARRAY['otx','abusech-feodo'], 80)"),
+        {"t": tenant_key, "a": f"a-{marker}", "i": ioc_id})
+    db.commit()
+    assert link(db) == 0                                    # the correlator has not placed the alert yet
+    db.execute(incident_alerts.insert().values(
+        incident_id=incident_id, tenant_key=tenant_key, node="testnode", alert_id=f"a-{marker}", alert_time=now))
+    assert link(db) == 1
+    db.commit()
+    assert link(db) == 0                                    # idempotent
+
+    token = _token_for(client, db, tenant_id, f"viewer-{uuid.uuid4().hex[:8]}@example.com")
+    item = next(i for i in client.get("/api/incidents", headers={"Authorization": f"Bearer {token}"}).json()["incidents"]
+                if i["id"] == incident_id)
+    assert (item["max_level"], item["ti_confidence"], item["priority"]) == (5, 80, 12)
+    body = client.get(f"/api/incidents/{incident_id}", headers={"Authorization": f"Bearer {token}"}).json()
+    assert [(m["observable"], m["sources"], m["confidence"]) for m in body["ti_matches"]] == \
+        [("45.33.32.157", ["otx", "abusech-feodo"], 80)]

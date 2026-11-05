@@ -468,6 +468,65 @@ by the shipper's static `TENANT_ID`), never from alert content.
 CDB TI alerts (group `shadowtracer_ti`) also pass through `ti-matcher`; the hit is
 recorded once because the `ti_hits` key is the same.
 
+### 3.2 Built in 6.1c (2026-11-06)
+
+`shadowtracer/intel/shadowtracer_intel/matcher.py`, service `ti-matcher`
+(`deploy/lab/ti-matcher.Dockerfile`, 128m). Differences from §3.1 and §4.1, by owner
+instruction or found while building:
+
+- **Names.** ClickHouse `ti_matches` (not `ti_hits`; ingest CH migration 0002),
+  ReplicatedReplacingMergeTree ORDER BY `(tenant_id, cluster_node, alert_id, ioc_id)`,
+  version `matched_at`, partitioned by `alert_time` so duplicates always meet. Postgres
+  `incident_ti` (ingest migration 7c1e9b2f4a60), UNIQUE `(tenant_key, node, alert_id,
+  ioc_id)`. Read ClickHouse with FINAL or uniqExact over the key.
+- **CDB TI alerts are skipped** (rule group `shadowtracer_ti`): analysisd already matched
+  them, and their CDB alert carries the observable.
+- **Kafka identity.** Own SCRAM user `ti-matcher`: Read/Describe on `shadowtracer.t.*`, own
+  group `shadowtracer-ti-matcher`, never a producer (`create-kafka-acls.sh`).
+- **Same decision as the lists.** `listgen.evaluate()` scores and filters for both the CDB
+  lists and the matcher (global + the tenant's private, minus allowlists, TLP rules,
+  hard TTL, noisy-OR confidence). The matcher also keeps the low band, every CIDR (one
+  dict per prefix length), parent domains (`a.evil.com` matches `evil.com`, never the bare
+  TLD) and URLs, and checks each IOC's expiry at lookup time.
+- **Observables.** `data.srcip`, `data.dstip`; any field whose name ends in `url` (the URL
+  and its host as domain or IP); fields ending in `domain`, `hostname`, `queryname`;
+  `syscheck.{sha256,sha1,md5}_after`. Values go through `normalise()` (tenant scope, so
+  private addresses can match tenant-private IOCs); an invalid value is skipped, never an
+  error.
+- **Reload.** `ti_store_version` is bumped by statement triggers on `iocs`,
+  `ioc_sightings`, `ti_allowlist` and `ti_sources` (not by list generation's confidence
+  write-back). The matcher polls it every `TI_MATCHER_POLL_SECONDS` (60) and reloads every
+  tenant set it holds when it moves, and at least hourly because confidence decays. A
+  15-minute ti-sync run upserts its feed rows and so bumps the version: one reload per
+  sync. An IOC added later matches alerts **processed after the reload**; earlier alerts
+  are retro-hunt's job (or a replay of the topic).
+- **Incidents.** The matcher writes `incident_ti` and links rows to the incident through
+  `incident_alerts` (it may see an alert before the correlator, so unlinked rows are
+  retried for a day), then raises `incidents.ti_confidence`. `incidents.priority` is a
+  generated column, `GREATEST(max_level, 12 if C >= 75, 8 if C >= 50)` (the CDB bands),
+  so the correlator never writes or races it. The incident API returns `ti_confidence`,
+  `priority` and `ti_matches` (field, observable, IOC, sources, confidence).
+- **Delivery.** Offsets are committed after both writes; both are idempotent on
+  (alert, IOC). A failed write is retried in place, never skipped.
+- **Health.** `/health/detail.ti_matcher`: consumer lag (same code as the writer's) and
+  the store version each instance has loaded per tenant; alerts when a loaded set is
+  behind the store for more than 5 minutes. Not in readiness.
+- **Memory.** librdkafka's 64 MiB default prefetch OOM-killed the 128m container in a loop
+  on a 300,000-message backlog (12 kills, nothing committed, nothing lost); capped at
+  `queued.max.messages.kbytes=16384`, peak 77 MiB.
+
+Lab checks (2026-11-06; outputs in the 6.1c commit message):
+
+| check | result |
+|---|---|
+| SSH brute force from listed IPs | 5710/5712 unchanged; every alert annotated (`otx` 55, `manual:global` 90); incident 378566 `ti_confidence` 90, priority 10 -> 12, 17 matches in the API |
+| URL fixture alerts (no lab log source emits URLs yet) | `cdn.evil-c2.example` matched IOC `evil-c2.example` (parent domain), defanged `hxxp://bad[.]example/x` matched URL IOC; benign URL none |
+| IOC added mid-stream | added 21:52:36, matcher reloaded 21:53:15, first matched alert 21:53:14 (38 s) |
+| replay from 21:50 | ClickHouse FINAL = distinct keys = Postgres rows (43); the 13 new rows were alerts sent before the IOC reload |
+| tenant-private IOC (test tenant) | 1/1 matched on the test tenant; 0/3 on the main tenant; not in the main tenant's set |
+| matcher stopped 2 min during 300/s | writer and correlator lag 0 throughout, ingestion 9,010 events/30 s flat; matcher lag 37,151, 0 within 77 s of restart; 120/120 listed-IP alerts matched (86 sent while stopped) |
+| own ceiling | ~8,500 alerts/s, one instance, ~45% CPU, 77 MiB (backlog T9) |
+
 ---
 
 ## 4. Store, generation, distribution, reload

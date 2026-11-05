@@ -47,14 +47,15 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 | correlate-1, -2 | 219 / 165 | 288m each |
 | writer-1, -2 | 146 / 143 (reload test); **228 anon draining a 1 M-message backlog** | 320m each (192m: OOM-killed every ~55 s while draining a backlog, 2026-11-06) |
 | console-backend-1, -2 | 118 / 82 | 160m each |
-| shipper-worker-test, -worker1, -worker2 | 76 / 71 | 128m each |
+| shipper-worker-test, -worker1, -worker2 | 76 / 71 | 104m each (128m until 6.1c; cut to fund ti-matcher, still peak + 37%) |
 | closer-1, -2 | 62 / 51 | 96m each |
 | agent-ubuntu-1/2, agent-rocky-1/2 | 133 / 51 | 176m each |
-| caddy | 61 / 15 | 96m |
+| caddy | 61 / 15 | 80m (96m until 6.1c) |
 | shadowtracer-lb | 13 / 9 | 32m |
-| ti-sync (6.1b) | new: not yet measured under load | 128m |
+| ti-sync (6.1b) | 74 steady (warninglist refresh not yet measured) | 128m |
+| ti-matcher (6.1c) | 77 draining a 300,000-message backlog at ~8,500/s (librdkafka prefetch capped at 16 MiB; with the 64 MiB default it OOM-killed at 128m) | 128m |
 | load generators (`deploy/load/syslog_fleet.sh` containers) | ~30 | 128m each |
-| **total of compose limits** | | **13,760 MiB (13.4 GiB)** |
+| **total of compose limits** | | **13,800 MiB (13.48 GiB)**, 24 MiB under the cap |
 
 **Check `memory.events`, not only OOM kills.** A container can sit under its cap
 and still be starved: every `max` event in

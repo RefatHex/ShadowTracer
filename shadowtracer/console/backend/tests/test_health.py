@@ -505,3 +505,27 @@ def test_ti_sources_staleness(db):
     finally:
         db.execute(_t("DELETE FROM ti_sources WHERE name LIKE 'ti-health-%'"))
         db.commit()
+
+
+def test_ti_matcher_store_version_trigger_and_behind(db, monkeypatch):
+    """Phase 6.1c: any IOC store change bumps ti_store_version (statement trigger); a
+    matcher instance whose loaded version is behind for more than the threshold alerts."""
+    from sqlalchemy import text as _t
+    monkeypatch.setattr(health_checks, "consumer_lag", lambda settings, group: {group: {"status": "ok", "total_lag": 0}})
+    v0 = db.execute(_t("SELECT version FROM ti_store_version")).scalar_one()
+    try:
+        db.execute(_t("INSERT INTO ti_allowlist (type, value, kind, reason, created_by) "
+                      "VALUES ('ipv4', '192.0.2.77', 'manual', 'test', 'test')"))
+        db.commit()
+        v1 = db.execute(_t("SELECT version FROM ti_store_version")).scalar_one()
+        assert v1 > v0
+        db.execute(_t("INSERT INTO ti_matcher_state VALUES ('ti-health-a', 't1', :v, 3, '{}', now()), "
+                      "('ti-health-b', 't1', :old, 3, '{}', now())"), {"v": v1, "old": v1 - 1})
+        db.commit()
+        assert health_checks.ti_matcher(db, None, behind_alert_seconds=3600)["alert"] is False  # just changed
+        report = health_checks.ti_matcher(db, None, behind_alert_seconds=0)
+        assert report["behind"] == ["ti-health-b/t1"] and report["alert"] and report["store_version"] == v1
+    finally:
+        db.execute(_t("DELETE FROM ti_matcher_state WHERE instance LIKE 'ti-health-%'"))
+        db.execute(_t("DELETE FROM ti_allowlist WHERE value = '192.0.2.77' AND created_by = 'test'"))
+        db.commit()

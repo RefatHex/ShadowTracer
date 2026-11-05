@@ -8,7 +8,7 @@ import datetime
 import clickhouse_connect
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -47,6 +47,23 @@ class IncidentSummary(BaseModel):
     rare_pattern_flag: bool
     prior_occurrences: int | None
     rare_pattern_reason: str | None
+    # Phase 6.1c: highest TI match confidence (ti-matcher) and the priority derived from
+    # it - GREATEST(max_level, 12 if >= 75, 8 if >= 50). None/max_level without matches.
+    ti_confidence: int | None = None
+    priority: int
+
+
+class TiMatch(BaseModel):
+    alert_id: str
+    node: str
+    rule_id: str
+    field: str
+    observable_type: str
+    observable: str
+    ioc_id: int
+    ioc_value: str
+    sources: list[str]
+    confidence: int
 
 
 class IncidentsPage(BaseModel):
@@ -76,6 +93,7 @@ class IncidentDetail(IncidentSummary):
     user_total: int
     closed_at: datetime.datetime | None
     alerts: list[IncidentAlert]
+    ti_matches: list[TiMatch] = []
 
 
 class TriageRequest(BaseModel):
@@ -244,7 +262,11 @@ def get_incident(
         finally:
             ch_client.close()
 
-    return IncidentDetail(**row, alerts=alerts)
+    ti_matches = [TiMatch(**m) for m in db.execute(text(
+        "SELECT alert_id, node, rule_id, field, observable_type, observable, ioc_id, ioc_value, sources, confidence "
+        "FROM incident_ti WHERE incident_id = :i AND tenant_key = :t ORDER BY confidence DESC, id"),
+        {"i": incident_id, "t": current_user.tenant_key}).mappings()]
+    return IncidentDetail(**row, alerts=alerts, ti_matches=ti_matches)
 
 
 @router.post("/incidents/{incident_id}/triage", response_model=TriageResponse)
