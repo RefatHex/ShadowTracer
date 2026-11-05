@@ -1017,3 +1017,119 @@ ClickHouse"). §12.1 ran 15:23–15:49 UTC in those containers; today,
 The writer's "after" numbers therefore include the fsync cost. The §5
 "before" numbers (04:44–05:01 UTC) predate it, so fsync was off then. No
 re-measurement needed.
+
+## 13. End to end with the new keying, 12 partitions and many agents (2026-11-05)
+
+Changes since §12.4:
+
+- **Keying (4c, implemented):** agent `000` alerts are keyed
+  `<tenant_key>|<location>` (`location` = the syslog sender address remoted
+  records); real agents keep `agent.id` (`shipper.py` `partition_key()`).
+- **Test tenant alerts topic: 3 → 12 partitions**
+  (`TEST_TENANT_PARTITIONS=12 ./create-kafka-topics.sh`; partitions are
+  only ever added, never removed). Why 12:
+  - It divides evenly over 1, 2, 3, 4, 6 and 12 replicas, so any replica
+    count up to 12 gets an equal share without re-partitioning.
+  - At the lab's 2 replicas it is 6 partitions each. That is far more than
+    one, so hash skew between keys averages out per replica.
+  - At analysisd's ~4,000/s ceiling (§12.6), it is ~333/s per partition.
+    That is well under one writer replica's ~3,300/s (§12.1), so one
+    partition never becomes the bottleneck.
+  - More partitions mean more broker files and longer rebalances for no
+    gain at this rate.
+- **Load:** half of each step comes from 12 syslog devices
+  (`syslog_fleet.sh`: 12 containers, 12 source IPs) through the test manager.
+  The other half comes from 200 simulated agents (`generate_load.py
+  --target kafka --agents 200`, keyed by `agent.id`, the key the shipper
+  uses for real agents). Before (§12.4), 100% was syslog from one sender.
+
+Run: `../load/e2e_step.sh <rate> 600 e2e12-r<rate> 12 50`, 10 min per step,
+backlog skipped before each step. Groups split 6/6 (writer and correlator:
+replica 1 owns partitions 0–5, replica 2 owns 6–11).
+
+### 13.1 First attempt was a tooling artefact (kept for the record)
+
+The first ramp wrote the agent share straight into the manager's
+`alerts.json` (`--target shipper`) while analysisd was writing to it.
+analysisd writes through stdio buffers, so its lines reach the file in more
+than one `write()`, and the generator's lines landed between the pieces:
+
+- 26,469 broken lines (`JSONDecodeError`) became shipper dead letters in
+  one hour.
+- Each dead letter cost one producer flush plus one ClickHouse insert,
+  synchronously.
+- The shipper fell to ~25 lines/s, 7.5 GB behind (offset 2,194,005,177 of
+  9,716,384,722). Topic ingress was 15–30/s at every step and the results
+  were void.
+
+Fixes:
+- **Tooling:** `e2e_step.sh` no longer appends to `alerts.json`;
+  analysisd is its only writer.
+- **Product:** the per-event dead-letter cost, fixed in the follow-up commit (§13.5).
+
+### 13.2 Per step: before (§12.4, 3 partitions, all syslog on one partition) vs after
+
+Every step: 0 dead letters, 0 error/exception lines in the shipper,
+writers and correlators, 0 restarts, and every agent event delivered
+(`failed=0`).
+
+| step | writer lag before → after | writer latency p50 / p95 / p99, before → after | correlator lag after | correlator latency p50 / p95 / p99, before → after |
+|---|---|---|---|---|
+| 100/s | ≤409 → ≤211, flat | 1.3/2.0/2.1 s → **1.1/1.9/2.3 s** | ≤111, flat | 0.9/1.5/1.6 s → **0.8/1.4/1.6 s** |
+| 500/s | ≤1,082 → ≤1,161, flat | 1.4/2.1/2.3 s → **1.1/2.0/2.9 s** | ≤1,715, flat | 1.2/3.0/4.6 s → **1.3/2.4/3.3 s** |
+| 1,000/s | ≤3,147 → ≤3,828, flat | 1.5/2.3/2.8 s → **1.2/2.1/2.6 s** | 12.6k → 264k, grows ~450/s | backlogged both (204 s p50 after) |
+| 2,000/s | ≤4.5k → ≤7.3k, flat | 1.9/7.1/17.7 s → **1.5/2.6/3.2 s** | 43k → 850k, grows ~1,450/s | backlogged both |
+| 5,000/s | analysisd-bound both | 19.7/27.6/29.0 s after (analysisd queue full, see below) | 85k → 1.66M, grows ~2,820/s | backlogged both |
+
+Latency is alert timestamp → ClickHouse `ingested_at` / `incident_alerts.created_at`,
+measured on the syslog half (agent `000`, real analysisd timestamps).
+
+- **At 5,000/s,** analysisd processed 616–1,252/s of 2,500/s syslog input
+  and dropped ~1,200–1,900/s. Its queue was full (`ad_q 1.00`), the same as
+  §12.4. With the whole pipeline on the host it does not reach its isolated
+  ~4,000/s (§12.6). The 20 s writer latency is time spent in analysisd's
+  queue, not writer lag: writer lag stayed ≤14.5k at ~3,300/s topic
+  ingress, i.e. ≤5 s.
+- **Writer:** at 2,000/s, p99 went from 17.7 s to 3.2 s. Both writers now
+  share the syslog load; before, one writer owned the single hot partition.
+  At 5,000/s the two writers took ~3,300/s together at 11–44% CPU each.
+- **Correlator:** processed rate when saturated (topic ingress − lag
+  growth) was ~540/s at 1,000, ~550/s at 2,000 and ~530/s at 5,000, for both
+  replicas together. During those steps the correlators used 2–51% CPU each
+  and Postgres 123–171% (one snapshot at 59%). Spreading partitions did not raise the ceiling: it is
+  Postgres-side (row locks between closers and the batch, plus membership
+  planning; profile and proposed fix in `THROUGHPUT_FIXES.md` §5). This
+  stream also has more correlation keys than §12.2's 50-agent one (200
+  agents + 12 devices).
+
+### 13.3 Partition spread (test-topic high watermarks before/after each step)
+
+```
+100/s:   [2550, 2100, 6750, 10050, 5100, 2700, 5550, 1950, 7050, 7500, 4800, 2700]              min/max share 3.3%/17.1%
+500/s:   [13500, 9750, 39000, 48750, 27000, 11250, 25500, 14250, 33000, 40500, 21000, 10500]    3.3%/16.6%
+1,000/s: [28500, 19500, 86700, 100800, 45600, 30000, 47100, 31500, 76200, 73200, 41100, 15000]  2.5%/16.9%
+2,000/s: [60000, 51000, 153600, 179400, 85800, 54000, 106800, 69000, 150600, 147600, 85800, 54000]  4.3%/15.0%
+5,000/s: [150000, 112500, 178890, 285930, 129877, 157500, 197023, 120000, 244878, 191904, 197724, 105000]  5.1%/13.8%
+```
+
+- **Before:** 100% of syslog traffic was on one partition of 3, owned by
+  one writer and one correlator (§12.5).
+- **After:** every partition receives traffic. The replicas split
+  **48.7% / 51.3%** at 2,000/s and **49.0% / 51.0%** at 5,000/s.
+- **Remaining unevenness (2.5–17%; even would be 8.3%):** it is hash
+  placement of only 12 device keys, each carrying 1/24 of the step. Two or
+  three devices share some partitions and none land on others. More devices
+  or agents flatten it.
+
+### 13.4 Result
+
+**End to end sustained is still ~500 events/s on this lab.** The
+correlator is the limit, now Postgres-bound rather than single-partition
+bound.
+
+The new keying removed the single-partition ceiling for both consumers. At
+2,000/s, writer p99 fell from 17.7 s to 3.2 s, and both replicas of each
+group carry half the traffic. At 5,000/s the writers absorb ~3,300/s with
+lag ≤5 s, and analysisd under contention is the next limit.
+
+Next fix for the correlator: `THROUGHPUT_FIXES.md` §5 (proposal).
