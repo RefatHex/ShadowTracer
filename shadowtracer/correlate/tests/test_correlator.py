@@ -315,3 +315,53 @@ def test_process_batch_matches_one_by_one_processing(db):
     assert snapshot(batched) == snapshot(one_by_one)
     incs, _ = snapshot(batched)
     assert [i[3][1] for i in incs] == [3, 1, 2], "a3+a1+a2 / b1 / a4+a5, the repeat and the replay counted once"
+
+
+def test_replica_that_loses_the_race_for_a_new_incident_leaves_no_empty_incident(db, engine):
+    """Two replicas processing the same new alert at once (a partition moving
+    across a rebalance with a batch in flight): neither finds an open
+    incident, so both insert one, and the incident_alerts identity
+    constraint makes the second a duplicate. Before the fix its incident
+    was committed empty (alert_count 0) next to the winner's - seen as
+    12 incidents for 8 agents in test_consumer's two-worker test."""
+    import threading
+
+    from sqlalchemy.orm import sessionmaker
+
+    from shadowtracer_correlate.correlator import process_batch
+
+    tenant = f"race-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    ev = _event(tenant=tenant, agent_id="agent-r", alert_id="r1", src_ip="7.7.7.7")
+    key, basis = correlation_key_and_basis(ev)
+    t = datetime.datetime.fromisoformat(ev.time)
+
+    # Replica A has inserted its incident and the membership, not yet committed.
+    a = engine.connect()
+    tx = a.begin()
+    a_id = a.execute(incidents.insert().values(
+        tenant_key=tenant, correlation_key=key, correlation_basis=basis, agent_id="agent-r",
+        first_seen=t, last_seen=t, alert_count=1, max_level=5, rule_ids=["5710"], rule_groups=[],
+        mitre_ids=[], source_ips=["7.7.7.7"], users=[],
+    ).returning(incidents.c.id)).scalar_one()
+    a.execute(incident_alerts.insert().values(
+        incident_id=a_id, tenant_key=tenant, node=ev.cluster_node, alert_id="r1", alert_time=t))
+
+    # Replica B, same alert: sees no open incident, creates one, then waits on A's membership row.
+    out = {}
+    b = sessionmaker(bind=engine, expire_on_commit=False)()
+    worker = threading.Thread(target=lambda: out.setdefault("results", process_batch(b, [ev])))
+    worker.start()
+    worker.join(2)
+    try:
+        assert worker.is_alive(), "replica B must be blocked on A's uncommitted membership"
+    finally:
+        tx.commit()
+        a.close()
+        worker.join(30)
+        b.close()
+
+    assert out["results"][0].status == "duplicate"
+    assert out["results"][0].incident_id == a_id
+    rows = db.execute(select(incidents.c.id, incidents.c.alert_count).where(incidents.c.tenant_key == tenant)).all()
+    assert rows == [(a_id, 1)], rows

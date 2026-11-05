@@ -224,7 +224,13 @@ def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kaf
     first_half = [_alert(agent, "8.8.8.8", f"{marker}.a{i}") for i in range(3)]
     second_half = [_alert(agent, "8.8.8.8", f"{marker}.b{i}") for i in range(3)]
 
-    stop_flag1, thread1, _ = _start_consumer(kafka_bootstrap, kafka_topic, database_url, group_id=group_id)
+    # The "killed" worker is abandoned, not stopped, so it must never see
+    # another test's topic: subscribed to the entire test- pattern it lived
+    # on and correlated later tests' alerts first (the two-worker test then
+    # saw every alert as a duplicate).
+    only_this = "^" + re.escape(kafka_topic) + "$"
+    stop_flag1, thread1, _ = _start_consumer(kafka_bootstrap, kafka_topic, database_url, group_id=group_id,
+                                             topic_pattern=only_this)
     _produce(kafka_bootstrap, kafka_topic, first_half, tenant_key=tenant)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -239,11 +245,11 @@ def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kaf
 
     # Not stop_flag.set() + join - simulate a hard kill by just abandoning
     # the thread (daemon=True) without a graceful shutdown, same as a
-    # process crash would leave Kafka's consumer group state.
-    del thread1
-    del stop_flag1
+    # process crash would leave Kafka's consumer group state. Stopped only
+    # once the test is over, so it doesn't outlive it.
 
-    stop_flag2, thread2, _ = _start_consumer(kafka_bootstrap, kafka_topic, database_url, group_id=group_id)
+    stop_flag2, thread2, _ = _start_consumer(kafka_bootstrap, kafka_topic, database_url, group_id=group_id,
+                                             topic_pattern=only_this)
     try:
         _produce(kafka_bootstrap, kafka_topic, second_half, tenant_key=tenant)
         deadline = time.monotonic() + 15
@@ -259,7 +265,9 @@ def test_killing_a_worker_mid_attack_the_incident_survives_and_keeps_growing(kaf
         ).mappings().all()
         assert len(same_incident) == 1, "must still be exactly one incident for this agent, not two"
     finally:
+        stop_flag1.set()
         stop_flag2.set()
+        thread1.join(timeout=5)
         thread2.join(timeout=5)
 
 
@@ -371,7 +379,9 @@ def test_two_correlation_workers_split_partitions_nothing_processed_twice(kafka_
         assert all(r["alert_count"] == alerts_per_agent for r in rows), "no alert processed twice, none missing"
 
         both_did_work = metrics1.snapshot().get("alerts_created", 0) > 0 and metrics2.snapshot().get("alerts_created", 0) > 0
-        assert both_did_work, "both workers should have owned at least one partition with data"
+        assert both_did_work, (
+            f"both workers should have owned at least one partition with data: w1={metrics1.snapshot()} w2={metrics2.snapshot()}"
+        )
     finally:
         stop_flag1.set()
         stop_flag2.set()

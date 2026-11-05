@@ -1172,3 +1172,32 @@ sinks. Test: `test_dead_letter.py::test_a_burst_of_dead_letters_is_one_flush_and
 (300 failures must be exactly 1 flush and 1 insert; it fails on the
 per-event code).
 
+### 13.6 Found while gating 13.5: empty incidents after a replica race (fixed)
+
+The correlate suite's two-worker test failed intermittently (3 of ~10 full
+runs). There were two causes:
+
+- **Test leak.** The "kill a worker" test abandoned its first consumer
+  thread, which stayed subscribed to every `test-` topic for the rest of
+  the run. It correlated the two-worker test's alerts first, so both
+  workers saw all 12 of theirs as duplicates. It now subscribes only to
+  its own topic and is stopped when the test ends. After the fix: 6/6
+  full runs green.
+- **Product bug the leak exposed (12 incidents for 8 agents).** Two
+  replicas processing the same new alert at once (a partition moving
+  during a rebalance with a batch in flight) both insert an incident. The
+  membership constraint keeps counts right, but the loser's incident was
+  committed empty (`alert_count 0`) and showed in the console.
+  `process_batch` now deletes such an incident in the same transaction.
+  Test: `test_correlator.py::test_replica_that_loses_the_race_for_a_new_incident_leaves_no_empty_incident`,
+  which fails without the fix.
+
+The bug predates batching. The lab database already holds empty, closed
+incidents (`alert_count 0`, no `incident_alerts` rows):
+- 556 for the test tenant (2026-11-01 → 11-04, load runs with rebalances);
+- 21 for tenant `eec7135f…` (2026-10-16 → 11-01, before batching, so the
+  per-event code raced the same way).
+
+They are **not deleted**; that needs the owner's go-ahead. Read-only query:
+`SELECT … FROM incidents i WHERE alert_count = 0 AND NOT EXISTS (SELECT 1
+FROM incident_alerts a WHERE a.incident_id = i.id)`.

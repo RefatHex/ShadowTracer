@@ -100,7 +100,10 @@ frequent on replays only.
      events, as they would be if committed one by one.
   4. **Bulk** membership insert, `ON CONFLICT DO NOTHING RETURNING`. Only
      rows actually inserted are counted, so a concurrent replica inserting
-     the same alert still cannot double-count it.
+     the same alert still cannot double-count it. An incident the batch
+     created whose every alert lost that race is deleted in the same
+     transaction. Before 2026-11-05 it was committed empty (`alert_count
+     0`) next to the winner's (`test_correlator.py::test_replica_that_loses_the_race_for_a_new_incident_leaves_no_empty_incident`).
   5. Sequence detection (5B) still runs per newly inserted alert, in
      arrival order, inside the same transaction, exactly as before.
   6. **One `UPDATE` per touched incident** with the folded aggregates

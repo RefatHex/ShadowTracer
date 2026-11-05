@@ -130,7 +130,9 @@ def process_batch(
       candidates for later alerts.
     - Only memberships the bulk insert actually wrote (ON CONFLICT DO
       NOTHING RETURNING) are counted, so a concurrent replica inserting the
-      same alert still can't double-count it.
+      same alert still can't double-count it. A lost alert's result names
+      the winner's incident, and an incident this batch created that ends
+      up with no alerts is deleted before commit, never left empty.
     - Sequence detection runs per newly inserted alert, in arrival order,
       inside the same transaction - as before.
     Raises UnparseableEvent for a bad timestamp before touching the database.
@@ -230,11 +232,14 @@ def process_batch(
             inserted = {tuple(r) for r in rows}
 
         new_alerts = []
+        lost = []  # (result index, identity) of alerts a concurrent replica inserted first
         folded: dict[int, dict] = {}
         for (i, ev, _, _, alert_time), inc, status in assignments:
-            if (ev.tenant_id, ev.cluster_node, ev.alert_id) not in inserted:
-                # Lost a race with a concurrent replica - already counted there.
-                results[i] = CorrelationResult(status="duplicate", incident_id=inc["id"])
+            ident = (ev.tenant_id, ev.cluster_node, ev.alert_id)
+            if ident not in inserted:
+                # Lost a race with a concurrent replica (e.g. both processing a
+                # partition across a rebalance) - already counted there.
+                lost.append((i, ident))
                 continue
             results[i] = CorrelationResult(status=status, incident_id=inc["id"])
             new_alerts.append((i, ev, alert_time))
@@ -273,6 +278,22 @@ def process_batch(
                     updated_at=text("now()"),
                 )
             )
+
+        if lost:
+            owners = {(r[0], r[1], r[2]): r[3] for r in db.execute(
+                select(incident_alerts.c.tenant_key, incident_alerts.c.node, incident_alerts.c.alert_id,
+                       incident_alerts.c.incident_id)
+                .where(tuple_(incident_alerts.c.tenant_key, incident_alerts.c.node, incident_alerts.c.alert_id)
+                       .in_([ident for _, ident in lost]))
+            ).all()}
+            for i, ident in lost:
+                results[i] = CorrelationResult(status="duplicate", incident_id=owners.get(ident))
+        # An incident this batch created whose every alert lost such a race
+        # would be committed empty (alert_count 0) next to the winner's.
+        # Not yet visible to anyone else, so drop it here.
+        empty = {inc["id"] for _, inc, status in assignments if status == "created"} - folded.keys()
+        if empty:
+            db.execute(incidents.delete().where(incidents.c.id.in_(sorted(empty))))
 
         for i, first in repeats:
             results[i] = CorrelationResult(status="duplicate", incident_id=results[first].incident_id)
