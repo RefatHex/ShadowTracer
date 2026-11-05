@@ -791,8 +791,8 @@ services:
     hostname: writer-1
     command: ["python3", "run_writer.py"]
     restart: unless-stopped
-    mem_limit: 192m
-    memswap_limit: 192m
+    mem_limit: 320m
+    memswap_limit: 320m
     environment: *writer-env
     volumes:
       - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
@@ -813,8 +813,8 @@ services:
     hostname: writer-2
     command: ["python3", "run_writer.py"]
     restart: unless-stopped
-    mem_limit: 192m
-    memswap_limit: 192m
+    mem_limit: 320m
+    memswap_limit: 320m
     environment: *writer-env
     volumes:
       - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro

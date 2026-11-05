@@ -45,7 +45,7 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 | postgres | 238 / 162 | 320m |
 | ch-keeper | 182 / 108 | 256m |
 | correlate-1, -2 | 219 / 165 | 288m each |
-| writer-1, -2 | 146 / 143 (reload test, 2nd run) | 192m each |
+| writer-1, -2 | 146 / 143 (reload test); **228 anon draining a 1 M-message backlog** | 320m each (192m: OOM-killed every ~55 s while draining a backlog, 2026-11-06) |
 | console-backend-1, -2 | 118 / 82 | 160m each |
 | shipper-worker-test, -worker1, -worker2 | 76 / 71 | 128m each |
 | closer-1, -2 | 62 / 51 | 96m each |
@@ -53,7 +53,7 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 | caddy | 61 / 15 | 96m |
 | shadowtracer-lb | 13 / 9 | 32m |
 | load generators (`deploy/load/syslog_fleet.sh` containers) | ~30 | 128m each |
-| **total of compose limits** | | **13,440 MiB (13.1 GiB)** |
+| **total of compose limits** | | **13,696 MiB (13.4 GiB)** |
 
 **Check `memory.events`, not only OOM kills.** A container can sit under its cap
 and still be starved: every `max` event in

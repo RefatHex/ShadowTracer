@@ -1245,3 +1245,34 @@ because of the 6 CPUs.
 
 Decision for the owner: re-baseline every gate on the 6-CPU host (then this run is
 the new reference), or give WSL its 12 CPUs back for gate runs. Backlog T13.
+
+## 15. Phase 6.1a gate rerun on 12 CPUs (2026-11-05 23:15 - 2026-11-06 00:05)
+
+**Host:** `nproc` = 12 (the `processors=6` line removed from `.wslconfig`), 16 GB, 8 GB
+swap. **ClickHouse fsync is on** (`deploy/lab/clickhouse/config.d/durability.xml`, since
+2026-11-04, §11.6): every insert and merge is fsynced, which is part of the iowait below.
+The memory limits from `DEV_SETUP.md` were in place.
+
+| step (§13 method, 12 devices + 200 agents) | writer lag | correlator lag | writer latency p50/p95/p99 |
+|---|---|---|---|
+| 500/s | ≤4,701, flat | **6.7k → 127k: ~280/s processed of ~490/s** (§13: flat ≤1,715) | 2.9 / 7.1 / 9.7 s (§13: 1.1/2.0/2.9) |
+| 2,000/s | **grows to 725k** (§13: flat ≤7.3k) | grows ~1,550/s | 30.5 / 374.8 / 430 s |
+
+**Gate not met on 12 CPUs either.** Found while investigating:
+- **The writers were OOM-killed (exit 137, kernel `oom` events) every ~55 s at their
+  192 MiB cap** once a backlog built up. Each restart re-read the same uncommitted batch,
+  so the backlog never drained (25 restarts). That is a regression from the 6.1a memory
+  budget, which was sized on runs without a backlog. Fixed: draining peaked at 228 MiB
+  anonymous, so the writers now get 320m (0 OOM, 0 restarts after). Total 13,696 MiB.
+- **The caps are not what limits throughput:** with every cap lifted (Kafka 2 GB,
+  ClickHouse 3 GB, Postgres/correlators/writers 1 GB) for 3 minutes of pure drain, the
+  writers drained ~800/s (~830/s capped) and the correlators ~310/s (~240/s capped),
+  with iowait 38%.
+- **The host is disk-bound:** iowait 25-94% during the gate, 38% while only draining.
+  §13 held 500/s on the same 12 CPUs that morning. Since then ClickHouse took ~7 M
+  test-tenant rows (load tests) and WSL restarted with a new `.wslconfig` (swap file on
+  `E:\wsl\swap.vhdx`).
+
+Decision for the owner (backlog T14): look at the lab disk (which drive the WSL vhdx is
+on, other load on it, the swap file on E:) before re-measuring. No 6.1a code is on the
+writer/correlator path.
