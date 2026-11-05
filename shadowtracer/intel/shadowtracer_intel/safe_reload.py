@@ -2,7 +2,12 @@
 
 THREAT_INTEL.md §4.4 / §4.12 / §4.16, 6.1a item 3:
 1. Pre-flight: the TI rule file must load after every parent it names, and use no
-   banned lookup (rule_order.check). Rejected bundles are never written.
+   banned lookup (rule_order.check). Then EVERY node (master and workers) loads the
+   candidate rule file and lists from an unsynced staging directory with
+   `wazuh-analysisd -t` against its own ossec.conf; any analysisd warning or error
+   rejects the bundle. A rejected bundle is never written to etc/, so a bad file can
+   never reach the cluster-synced directories - a worker that restarts at any moment
+   only ever loads files that already validated on it.
 2. Write every file on the master with write-temp-then-rename. `.tmp` files are
    excluded from cluster sync, so workers never see a half-written file.
 3. Reload the master. ANY warning or error counts as failure (4.14.8 answers
@@ -22,6 +27,7 @@ only uses read/write_atomic/remove/sha256/reload/ruleset_ids.
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import tarfile
@@ -90,6 +96,39 @@ class DockerNode:
     def reload(self) -> dict:
         out = self._sh(f"{self.install_dir}/framework/python/bin/python3 -", stdin=_RELOAD_PY.encode())
         return json.loads(out.decode().strip().splitlines()[-1])
+
+    def validate(self, bundle: dict) -> list:
+        """Load the candidate files with `wazuh-analysisd -t` from a staging dir under
+        tmp/ (not cluster-synced): this node's own ossec.conf, with etc/rules and the
+        TI list paths pointed at the stage. Returns analysisd's warnings/errors."""
+        stage_rel = f"tmp/st-ti-stage-{os.getpid()}-{int(time.time() * 1000)}"
+        stage, lists_rel = self._abs(stage_rel), "etc/lists/shadowtracer-ti/"
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            for rel, data in bundle.items():
+                if rel.endswith(".xml"):
+                    name, data = "rules/" + rel.rsplit("/", 1)[-1], data.replace(lists_rel.encode(), f"{stage_rel}/lists/".encode())
+                else:
+                    name = "lists/" + rel.rsplit("/", 1)[-1]
+                info = tarfile.TarInfo(name); info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        names = {rel.rsplit("/", 1)[-1] for rel in bundle if rel.endswith(".xml")}
+        keep = " ".join(f"! -name '{n}'" for n in names)
+        out = self._sh(
+            f"set -e; S='{stage}'; rm -rf \"$S\"; mkdir -p \"$S/rules\" \"$S/lists\"; "
+            f"find {self.install_dir}/etc/rules -maxdepth 1 -name '*.xml' {keep} -exec cp {{}} \"$S/rules/\" \\; ; "
+            f"tar -xf - -C \"$S\"; "
+            f"sed -e 's#<rule_dir>etc/rules</rule_dir>#<rule_dir>{stage_rel}/rules</rule_dir>#' "
+            f"-e 's#{lists_rel}#{stage_rel}/lists/#g' {self.install_dir}/etc/ossec.conf > \"$S/ossec.conf\"; "
+            f"chown -R wazuh:wazuh \"$S\"; cd {self.install_dir}; "
+            f"rc=0; ./bin/wazuh-analysisd -t -c \"$S/ossec.conf\" > \"$S/out\" 2>&1 || rc=$?; "
+            f"grep -E 'wazuh-analysisd: (WARNING|ERROR|CRITICAL)' \"$S/out\" || true; echo \"exit=$rc\"; rm -rf \"$S\"",
+            stdin=buf.getvalue()).decode()
+        lines = out.strip().splitlines()
+        problems = [l.split("wazuh-analysisd: ", 1)[-1] for l in lines if "wazuh-analysisd:" in l]
+        if lines and lines[-1] != "exit=0":
+            problems.append(f"wazuh-analysisd -t {lines[-1]}")
+        return problems
 
     def ruleset_ids(self, exclude: set) -> dict:
         """{relative path: [rule ids]} for every rule file analysisd loads on this node,
@@ -160,6 +199,9 @@ def _wait_synced(node, expected: dict, timeout_s: float, poll_s: float) -> bool:
 def apply(master, workers: list, bundle: dict, sync_timeout_s: float = 120, poll_s: float = 2) -> ApplyResult:
     ti_rules = {p: b.decode() for p, b in bundle.items() if p.endswith(".xml")}
     problems = rule_order.check(master.ruleset_ids(exclude=set(bundle)), ti_rules)
+    if not problems:
+        for node in [master] + list(workers):
+            problems += [f"{node.name}: {w}" for w in node.validate(bundle)]
     if problems:
         return ApplyResult(False, [NodeResult(master.name, "master", "rejected", problems)], problems)
 

@@ -628,6 +628,16 @@ Per tenant, after generation:
 Reloads are rate-limited (at most one per tenant per sync interval) because each reload
 drops queued events until the analysisd fix lands (§9.4, §6).
 
+**Pre-validation on every node (6.1a follow-up).** Before anything is written to `etc/`,
+the wrapper loads the candidate rule file and lists on the master and on every worker
+with `wazuh-analysisd -t`. It uses that node's own `ossec.conf`, pointed at a staging
+directory under `tmp/` (not cluster-synced). Any analysisd warning or error rejects the
+bundle. Without this, a rejected file sat in `etc/rules` for ~8 s during a rollback;
+the cluster could sync it to a worker, and a worker restarting in that window would
+start with it and keep it in memory after sync restored the good file. Lab proof: the
+undeclared-list rule file was rejected on master, worker1 and worker2 with nothing
+written and no reload. The post-reload check and rollback remain as a second line.
+
 ### 4.5 Expiry and retro-hunt
 
 - **Expiry:** `valid_until` from confidence decay and hard TTLs (§4.10). Lists drop

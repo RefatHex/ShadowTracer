@@ -14,8 +14,18 @@ def h(b):
 
 
 class FakeNode:
-    def __init__(self, name, files=None, warn_if=None):
+    """warn_if(files) -> True makes analysisd warn. By default the staged validation
+    (wazuh-analysisd -t) sees the same warning; validate_misses=True simulates a
+    warning that only shows up on the live reload (the rollback path)."""
+    def __init__(self, name, files=None, warn_if=None, validate_misses=False):
         self.name, self.files, self.warn_if, self.log = name, dict(files or {}), warn_if, []
+        self.validate_misses = validate_misses
+
+    def validate(self, bundle):
+        self.log.append(("validate",))
+        staged = dict(self.files, **bundle)
+        bad = self.warn_if and self.warn_if(staged) and not self.validate_misses
+        return ["(7616): List could not be loaded. Rule '110000' will be ignored."] if bad else []
 
     def read(self, p): return self.files.get(p)
     def write_atomic(self, p, d): self.log.append(("write", p)); self.files[p] = d
@@ -35,8 +45,8 @@ class FakeNode:
 class FakeWorker(FakeNode):
     """Receives the master's files only after `lag` checksum polls (the cluster's
     integrity sync), and refuses to reload with files that differ from the master's."""
-    def __init__(self, name, master, lag=2, warn_if=None):
-        super().__init__(name, dict(master.files), warn_if)
+    def __init__(self, name, master, lag=2, warn_if=None, validate_misses=False):
+        super().__init__(name, dict(master.files), warn_if, validate_misses)
         self.master, self.lag, self.polls = master, lag, 0
 
     def sha256(self, ps):
@@ -66,13 +76,14 @@ def test_happy_path_workers_reload_only_after_their_checksums_match(bundle):
     # each worker's version equals the master's, including the compiled .cdb files
     assert r.nodes[1].versions == r.nodes[0].versions and any(p.endswith(".cdb") for p in r.nodes[0].versions)
     # rule file written after every list
-    writes = [p for op, p in m.log if op == "write"]
+    writes = [e[1] for e in m.log if e[0] == "write"]
     assert writes[-1] == ti_rules.RULES_FILE
 
 
 def test_master_reload_warning_restores_previous_files(bundle):
     old = {ti_rules.RULES_FILE: b"<group name=\"old,\"></group>\n"}
-    m = FakeNode("master", old, warn_if=lambda f: f.get(ti_rules.RULES_FILE) == bundle[ti_rules.RULES_FILE])
+    m = FakeNode("master", old, warn_if=lambda f: f.get(ti_rules.RULES_FILE) == bundle[ti_rules.RULES_FILE],
+                 validate_misses=True)
     w = FakeWorker("worker1", m)
     r = safe_reload.apply(m, [w], bundle, sync_timeout_s=1, poll_s=0)
     assert not r.ok and r.nodes[0].result == "warnings"
@@ -91,6 +102,21 @@ def test_bad_rule_file_is_rejected_before_anything_is_written(bundle):
     assert not r.ok and r.nodes[0].result == "rejected" and m.log == []
 
 
+@pytest.mark.parametrize("bad_node", ["master", "worker1"])
+def test_staged_validation_warning_on_any_node_rejects_before_anything_is_written(bundle, bad_node):
+    # The 6.1a rollback window: a bad file written to etc/ can reach a worker by
+    # cluster sync and be loaded if that worker restarts. Validating on every node
+    # first means a bad file is never written to the synced directories at all.
+    is_new = lambda f: f.get(ti_rules.RULES_FILE) == bundle[ti_rules.RULES_FILE]
+    m = FakeNode("master", warn_if=is_new if bad_node == "master" else None)
+    w = FakeWorker("worker1", m, warn_if=is_new if bad_node == "worker1" else None)
+    r = safe_reload.apply(m, [w], bundle, sync_timeout_s=1, poll_s=0)
+    assert not r.ok and r.nodes[0].result == "rejected"
+    assert any(p.startswith(bad_node + ":") and "will be ignored" in p for p in r.problems)
+    assert [e for e in m.log if e[0] != "validate"] == [] and reloads(w) == []
+    assert ti_rules.RULES_FILE not in m.files
+
+
 def test_worker_that_never_syncs_is_not_reloaded(bundle):
     m = FakeNode("master")
     w = FakeWorker("worker1", m, lag=None)
@@ -102,7 +128,8 @@ def test_worker_that_never_syncs_is_not_reloaded(bundle):
 def test_worker_reload_warning_rolls_back_the_whole_cluster(bundle):
     old = {ti_rules.RULES_FILE: b"<group name=\"old,\"></group>\n"}
     m = FakeNode("master", old)
-    w = FakeWorker("worker1", m, lag=0, warn_if=lambda f: f.get(ti_rules.RULES_FILE) == bundle[ti_rules.RULES_FILE])
+    w = FakeWorker("worker1", m, lag=0, warn_if=lambda f: f.get(ti_rules.RULES_FILE) == bundle[ti_rules.RULES_FILE],
+                   validate_misses=True)
     r = safe_reload.apply(m, [w], bundle, sync_timeout_s=1, poll_s=0)
     assert not r.ok and r.nodes[0].result == "rolled_back" and r.nodes[1].result == "warnings"
     assert m.files[ti_rules.RULES_FILE] == old[ti_rules.RULES_FILE] and w.files[ti_rules.RULES_FILE] == old[ti_rules.RULES_FILE]
