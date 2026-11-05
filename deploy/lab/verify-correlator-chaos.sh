@@ -44,7 +44,7 @@ set -a; source .env; set +a
 export KAFKA_SECURITY_PROTOCOL=SASL_SSL
 export KAFKA_SASL_USERNAME=admin
 export KAFKA_SASL_PASSWORD="$KAFKA_ADMIN_PASSWORD"
-export KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"
+KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"; export KAFKA_SSL_CA_LOCATION
 
 GROUP=shadowtracer-correlate
 KAFKA_BOOTSTRAP=127.0.0.1:9094

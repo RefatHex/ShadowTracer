@@ -27,7 +27,7 @@ fi
 export KAFKA_SECURITY_PROTOCOL=SASL_SSL
 export KAFKA_SASL_USERNAME=admin
 export KAFKA_SASL_PASSWORD="${KAFKA_ADMIN_PASSWORD:-}"
-export KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"
+KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"; export KAFKA_SSL_CA_LOCATION
 # Rebrand Pass C prep: one setting for the install dir, default unchanged -
 # see docs/design/REBRAND_PASS_C.md.
 SHADOWTRACER_INSTALL_DIR="${SHADOWTRACER_INSTALL_DIR:-/var/ossec}"
@@ -114,16 +114,33 @@ echo "$cluster_out"
 check "master in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^master '"
 check "worker1 in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^worker1 '"
 check "worker2 in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^worker2 '"
+# Phase 6.1a: the test tenant's manager is its own single-node cluster
+# (TENANCY.md option A) - never a member of the main tenant's cluster, which
+# would sync the main tenant's client.keys/rules/lists onto it.
+TEST_MGR=shadowtracer-lab-shadowtracer-worker-test-1
+check "worker-test NOT in the main cluster" "! echo \"\$cluster_out\" | grep -q '^worker-test '"
+test_cluster_out="$(docker exec "$TEST_MGR" "${SHADOWTRACER_INSTALL_DIR}/bin/cluster_control" -l)"
+echo "$test_cluster_out"
+check "worker-test is master of its own one-node cluster" \
+    "echo \"\$test_cluster_out\" | grep -q '^worker-test  *master ' && [ \"\$(echo \"\$test_cluster_out\" | grep -vc '^NAME')\" = 1 ]"
+check "test cluster has its own name" \
+    "docker exec $TEST_MGR sed -n '/<cluster>/,/<\\/cluster>/p' ${SHADOWTRACER_INSTALL_DIR}/etc/ossec.conf | grep -q '<name>shadowtracer-test</name>'"
 
 echo "--- agents ---"
 agent_out="$(docker exec "$MASTER" "${SHADOWTRACER_INSTALL_DIR}/bin/agent_control" -l)"
 echo "$agent_out"
+test_agent_out="$(docker exec "$TEST_MGR" "${SHADOWTRACER_INSTALL_DIR}/bin/agent_control" -l)"
+echo "$test_agent_out"
+# Phase 6.1a: each agent is registered only with its own tenant's manager.
+check "agent-ubuntu-1 not registered on the main master" "! echo \"\$agent_out\" | grep -q 'Name: agent-ubuntu-1,'"
+check "agent-ubuntu-2 not registered on the test manager" "! echo \"\$test_agent_out\" | grep -q 'Name: agent-ubuntu-2,'"
 # Only the two Ubuntu agents are expected Active - Rocky agents have a known,
 # documented glibc bug (PHASE1_FINDINGS.md, Step 2) and are not a smoke-test
 # regression on their own.
 for a in agent-ubuntu-1 agent-ubuntu-2; do
-    check "$a Active" "echo \"\$agent_out\" | grep $a | grep -q Active"
-    if ! echo "$agent_out" | grep "$a" | grep -q Active; then
+    if [ "$a" = agent-ubuntu-1 ]; then a_out="$test_agent_out"; else a_out="$agent_out"; fi
+    check "$a Active" "echo \"\$a_out\" | grep $a | grep -q Active"
+    if ! echo "$a_out" | grep "$a" | grep -q Active; then
         # A recreated agent container has lost its client.keys and is refused
         # re-enrollment under its still-registered name (authd's default,
         # kept on purpose) - the fix is removing the old registration first.

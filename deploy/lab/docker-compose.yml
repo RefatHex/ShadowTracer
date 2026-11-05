@@ -269,6 +269,14 @@ services:
   # shipper (shipper-worker-test) ships under TEST_TENANT_KEY, never
   # TENANT_KEY - this is what keeps smoke-test.sh's real SSH-burst and
   # hostile-input traffic out of the main lab tenant.
+  #
+  # Phase 6.1a: its OWN single-node cluster (TENANCY.md option A). Until
+  # then it was a worker of shadowtracer-master, so the Wazuh cluster synced
+  # the main tenant's client.keys, etc/rules and etc/lists onto the test
+  # tenant's manager (THREAT_INTEL.md §1.7). Own cluster name and key, own
+  # enrollment password, own authd: agent-ubuntu-1 enrolls here, not on
+  # the master. Node name stays "worker-test" so alert identity
+  # (cluster.node) is unchanged.
   shadowtracer-worker-test:
     build: *manager-build
     image: shadowtracer-lab/manager:local
@@ -276,18 +284,21 @@ services:
     init: true
     restart: unless-stopped
     environment:
-      CLUSTER_NODE_TYPE: worker
+      CLUSTER_NAME: shadowtracer-test
+      CLUSTER_NODE_TYPE: master
       CLUSTER_NODE_NAME: worker-test
-      CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
-      ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
+      CLUSTER_MASTER_NAME: shadowtracer-worker-test
+      CLUSTER_KEY: ${TEST_CLUSTER_KEY:?set TEST_CLUSTER_KEY in deploy/lab/.env}
+      ENROLL_PASSWORD: ${TEST_ENROLL_PASSWORD:?set TEST_ENROLL_PASSWORD in deploy/lab/.env}
+      # Load-test syslog input for deploy/load/generate_load.py --target
+      # syslog (THROUGHPUT_BASELINE.md §2.1 used to add this by hand).
+      # Test manager only; never set on a main-tenant manager.
+      LOAD_TEST_SYSLOG_PORT: "5514"
       SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
       - ./alerts-worker-test:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
-    depends_on:
-      shadowtracer-master:
-        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.28.0.14
@@ -343,10 +354,13 @@ services:
       # manager, NOT shadowtracer-lb - this is the one agent smoke-test.sh's
       # real SSH-brute-force check uses, and it must never land on worker1
       # or worker2 (the main lab tenant's shippers) by way of the LB's
-      # non-sticky reassignment (see PHASE5C_SIGMA.md §9/§12). Enrollment
-      # still goes through shadowtracer-master (MANAGER_ENROLL_HOST, in
-      # *agent-env, unchanged) - only live event-data routing changes here.
+      # non-sticky reassignment (see PHASE5C_SIGMA.md §9/§12).
       AGENT_MANAGER_DATA_HOST: shadowtracer-worker-test
+      # Phase 6.1a: enrollment too - the test tenant's manager is its own
+      # cluster with its own authd and password, so this agent's key lives
+      # only there, never in the main tenant's client.keys.
+      MANAGER_ENROLL_HOST: shadowtracer-worker-test
+      ENROLL_PASSWORD: ${TEST_ENROLL_PASSWORD:?set TEST_ENROLL_PASSWORD in deploy/lab/.env}
     volumes: &agent-config-mounts
       - ./entrypoint-agent.sh:/entrypoint.sh:ro
       - ./healthcheck-agent.sh:/healthcheck.sh:ro

@@ -30,3 +30,7 @@ services:
   shadowtracer-worker-test:
     ports:
       - "0.0.0.0:1514:1514"
+      # Phase 6.1a: the test tenant's manager enrolls its own agents (own
+      # cluster, own TEST_ENROLL_PASSWORD); host 1515 is the master's, so a
+      # test-tenant VM agent enrolls with: agent-auth -m <host> -p 1525.
+      - "0.0.0.0:1525:1515"

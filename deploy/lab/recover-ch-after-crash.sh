@@ -137,7 +137,7 @@ q1 "INSERT INTO shadowtracer.events SELECT * FROM shadowtracer_recover.events_fi
 q1 "ALTER TABLE shadowtracer.fingerprint_occurrences DROP PARTITION ID '$FP_PART'"
 q1 "INSERT INTO shadowtracer.fingerprint_occurrences SELECT * FROM shadowtracer_recover.fp_final"
 for n in $N1 $N2; do for t in events events_hourly_rollup fingerprint_occurrences; do q $n "SYSTEM SYNC REPLICA shadowtracer.$t"; done; done
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   left=$(( $(q $N1 "SELECT count() FROM system.replication_queue WHERE database='shadowtracer' AND type='GET_PART'") + $(q $N2 "SELECT count() FROM system.replication_queue WHERE database='shadowtracer' AND type='GET_PART'") ))
   [ "$left" = 0 ] && break; sleep 2
 done

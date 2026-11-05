@@ -61,7 +61,7 @@ q1 "ALTER TABLE shadowtracer.fingerprint_occurrences DROP PARTITION ID '202611'"
 q1 "ALTER TABLE shadowtracer.dead_letter_events DROP PARTITION ID '202611'"
 
 echo "== 4. queue and mutations must clear"
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   left=$(( $(q $N1 "SELECT count() FROM system.replication_queue WHERE database='shadowtracer'") + $(q $N2 "SELECT count() FROM system.replication_queue WHERE database='shadowtracer'") ))
   muts=$(q1 "SELECT count() FROM system.mutations WHERE database='shadowtracer' AND NOT is_done")
   [ "$left" = 0 ] && [ "$muts" = 0 ] && break

@@ -8,16 +8,27 @@
 # way through is to remove the old registration on the master first, which
 # is what this does, instead of weakening authd.
 #
+# Phase 6.1a: "the master" is the agent's own enrollment manager
+# (MANAGER_ENROLL_HOST in docker-compose.yml) - shadowtracer-master for the
+# main tenant, shadowtracer-worker-test for the test tenant, which is its own
+# cluster. MASTER_OVERRIDE=<container> still overrides it.
+#
 # usage (from deploy/lab): ./recreate-agent.sh agent-ubuntu-1 [agent-ubuntu-2 ...]
 set -euo pipefail
-MASTER=${MASTER:-shadowtracer-lab-shadowtracer-master-1}
 BIN=${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/bin
+enroll_manager() {  # <agent-service> -> container id of its MANAGER_ENROLL_HOST service
+  local host
+  host=$(docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["environment"]["MANAGER_ENROLL_HOST"])' "$1")
+  docker compose ps -q "$host"
+}
 [ $# -ge 1 ] || { echo "usage: $0 <agent-service> [...]" >&2; exit 2; }
 
 for svc in "$@"; do
   cid=$(docker compose ps -q "$svc")
   [ -n "$cid" ] || { echo "no running container for service $svc" >&2; exit 1; }
   name=$(docker inspect "$cid" --format '{{.Config.Hostname}}')
+  MASTER=${MASTER_OVERRIDE:-$(enroll_manager "$svc")}
+  [ -n "$MASTER" ] || { echo "no running enrollment manager for $svc" >&2; exit 1; }
   # Same compose files the running project was created with (keeps any
   # gitignored override in effect for this service).
   files=$(docker inspect "$cid" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}')
@@ -30,7 +41,7 @@ for svc in "$@"; do
 
   id=$(docker exec "$MASTER" "$BIN/agent_control" -l | awk -v n="$name" -F', ' '$2 == "Name: " n {sub(/.*ID: /, "", $1); print $1}')
   if [ -n "$id" ]; then
-    echo "== $svc: removing old registration $id ($name) on the master"
+    echo "== $svc: removing old registration $id ($name) on $(docker inspect "$MASTER" --format '{{.Name}}')"
     docker exec "$MASTER" "$BIN/manage_agents" -r "$id" >/dev/null  # -r is non-interactive (sets OSSEC_ACTION_CONFIRMED)
   else
     echo "== $svc: no existing registration for $name"

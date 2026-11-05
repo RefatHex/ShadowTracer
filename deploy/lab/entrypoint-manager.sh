@@ -8,6 +8,9 @@ CLUSTER_NODE_TYPE="${CLUSTER_NODE_TYPE:-worker}"
 CLUSTER_NODE_NAME="${CLUSTER_NODE_NAME:-worker-1}"
 CLUSTER_KEY="${CLUSTER_KEY:?CLUSTER_KEY is required}"
 CLUSTER_MASTER_NAME="${CLUSTER_MASTER_NAME:-shadowtracer-master}"
+# Phase 6.1a: one cluster per tenant (TENANCY.md option A) - the test
+# tenant's manager sets its own name; the main tenant keeps "wazuh".
+CLUSTER_NAME="${CLUSTER_NAME:-wazuh}"
 ENROLL_PASSWORD="${ENROLL_PASSWORD:?ENROLL_PASSWORD is required}"
 # Rebrand Pass C prep: one setting for the install dir, default unchanged
 # (/var/ossec) - no path change yet, just removes the 41 scattered literal
@@ -29,6 +32,7 @@ if grep -q "<node>NODE_IP</node>" "$OSSEC_CONF"; then
         -e "s:<node>NODE_IP</node>:<node>${CLUSTER_MASTER_NAME}</node>:" \
         -e "s:<disabled>yes</disabled>:<disabled>no</disabled>:" \
         "$OSSEC_CONF"
+    sed -i "/<cluster>/,/<\/cluster>/ s:<name>wazuh</name>:<name>${CLUSTER_NAME}</name>:" "$OSSEC_CONF"
 
     # Phase 3 DECISIONS.md: pin hide_cluster_info to "no". The installed
     # template already ships <hidden>no</hidden> in the cluster block, but
@@ -61,6 +65,23 @@ if grep -q "<node>NODE_IP</node>" "$OSSEC_CONF"; then
     # volume) and is refused under that same rule - recreate agents with
     # deploy/lab/recreate-agent.sh, which removes the old registration on
     # the master first (manage_agents -r), instead of weakening authd here.
+fi
+
+# Load-test syslog input (test manager only; docker-compose.yml sets
+# LOAD_TEST_SYSLOG_PORT on shadowtracer-worker-test and nowhere else).
+# THROUGHPUT_BASELINE.md §2.1 used to add this block by hand, and it was
+# lost on every recreate.
+if [ -n "${LOAD_TEST_SYSLOG_PORT:-}" ] && ! grep -q "<port>${LOAD_TEST_SYSLOG_PORT}</port>" "$OSSEC_CONF"; then
+    cat >> "$OSSEC_CONF" <<EOF
+<ossec_config>
+  <remote>
+    <connection>syslog</connection>
+    <port>${LOAD_TEST_SYSLOG_PORT}</port>
+    <protocol>udp</protocol>
+    <allowed-ips>172.28.0.0/16</allowed-ips>
+  </remote>
+</ossec_config>
+EOF
 fi
 
 # Step 3 item 14 (data volume) temporarily flipped <logall>/<logall_json> on

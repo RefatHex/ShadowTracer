@@ -15,7 +15,7 @@ set -a; source .env; set +a
 export KAFKA_SECURITY_PROTOCOL=SASL_SSL
 export KAFKA_SASL_USERNAME=admin
 export KAFKA_SASL_PASSWORD="$KAFKA_ADMIN_PASSWORD"
-export KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"
+KAFKA_SSL_CA_LOCATION="$(pwd)/kafka-certs/ca.crt"; export KAFKA_SSL_CA_LOCATION
 
 PY_CORRELATE="../../shadowtracer/correlate/.venv/bin/python3"
 PY_BACKEND="../../shadowtracer/console/backend/.venv/bin/python3"
@@ -520,7 +520,7 @@ DELETE FROM tenants WHERE tenant_key = '$rare_tenant_key';
 -- that unique constraint, with the INSERT's error silently swallowed
 -- by its own >/dev/null - every event then dead-lettered as
 -- unknown_tenant for the rest of the run, which is what every one of
--- this script's "closed"/"campaign"/sequence checks were actually
+-- this script's closed/campaign/sequence checks were actually
 -- failing on, not a real pipeline bug).
 DELETE FROM tenants WHERE tenant_key = '$VERIFY_TENANT_KEY';
 " >/dev/null
