@@ -39,9 +39,9 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 
 | service | measured peak (MiB): docker stats / non-reclaimable* | limit |
 |---|---|---|
-| shadowtracer-master, -worker1, -worker2, -worker-test | 454 / 365 (main); 3,743 / 814 (test manager under load) | 1088m each |
-| ch-clickhouse-1, -2 | 1,420 / 1,052 | 2304m each (ClickHouse itself is capped at 1,800 MiB, `clickhouse/config.d/resources.xml`) |
-| kafka | 689 / 477 (heap `-Xmx512m`) | 768m |
+| shadowtracer-master, -worker1, -worker2, -worker-test | 454 / 365 (main); 3,743 / 814 (test manager under load) | 1216m each (was 1088m: hit `memory.max` 260k-810k times reclaiming `alerts.json` cache) |
+| ch-clickhouse-1, -2 | 1,420 / 1,052 | 2048m each (ClickHouse itself is capped at 1,800 MiB, `clickhouse/config.d/resources.xml`; 90 `max` events at 2304m) |
+| kafka | 689 / 477 during the load test; **724** non-reclaimable hours later (heap grows to `-Xmx512m`) | 1152m (was 768m: 18,693 `max` events, ~70 MB page cache left, broker timeouts in the ingest tests) |
 | postgres | 238 / 162 | 320m |
 | ch-keeper | 182 / 108 | 256m |
 | correlate-1, -2 | 219 / 165 | 288m each |
@@ -53,7 +53,15 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 | caddy | 61 / 15 | 96m |
 | shadowtracer-lb | 13 / 9 | 32m |
 | load generators (`deploy/load/syslog_fleet.sh` containers) | ~30 | 128m each |
-| **total of compose limits** | | **13,056 MiB (12.75 GiB)** |
+| **total of compose limits** | | **13,440 MiB (13.1 GiB)** |
+
+**Check `memory.events`, not only OOM kills.** A container can sit under its cap
+and still be starved: every `max` event in
+`/sys/fs/cgroup/system.slice/docker-<id>.scope/memory.events` is the kernel reclaiming
+inside that cgroup. Kafka at 768m never OOM-killed but hit `max` 18,693 times with
+~70 MB of page cache left, and the ingest test suite failed on broker timeouts. Size
+JVM and Kafka-like services on heap + off-heap + page cache, re-measure hours into a
+run (heaps grow), and keep `max` near zero for them.
 
 \* non-reclaimable = cgroup `anon + shmem + kernel`. `docker stats` also counts active
 page cache, which the kernel reclaims under a limit instead of OOM-killing. The test

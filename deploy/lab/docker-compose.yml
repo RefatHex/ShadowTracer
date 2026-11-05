@@ -202,8 +202,8 @@ services:
     hostname: shadowtracer-master
     init: true
     restart: unless-stopped
-    mem_limit: 1088m
-    memswap_limit: 1088m
+    mem_limit: 1216m
+    memswap_limit: 1216m
     environment:
       CLUSTER_NODE_TYPE: master
       CLUSTER_NODE_NAME: master
@@ -227,8 +227,8 @@ services:
     hostname: shadowtracer-worker1
     init: true
     restart: unless-stopped
-    mem_limit: 1088m
-    memswap_limit: 1088m
+    mem_limit: 1216m
+    memswap_limit: 1216m
     environment:
       CLUSTER_NODE_TYPE: worker
       CLUSTER_NODE_NAME: worker1
@@ -254,8 +254,8 @@ services:
     hostname: shadowtracer-worker2
     init: true
     restart: unless-stopped
-    mem_limit: 1088m
-    memswap_limit: 1088m
+    mem_limit: 1216m
+    memswap_limit: 1216m
     environment:
       CLUSTER_NODE_TYPE: worker
       CLUSTER_NODE_NAME: worker2
@@ -293,8 +293,8 @@ services:
     hostname: shadowtracer-worker-test
     init: true
     restart: unless-stopped
-    mem_limit: 1088m
-    memswap_limit: 1088m
+    mem_limit: 1216m
+    memswap_limit: 1216m
     environment:
       CLUSTER_NAME: shadowtracer-test
       CLUSTER_NODE_TYPE: master
@@ -470,8 +470,8 @@ services:
     image: apache/kafka:3.9.0
     hostname: kafka
     restart: unless-stopped
-    mem_limit: 768m
-    memswap_limit: 768m
+    mem_limit: 1152m
+    memswap_limit: 1152m
     environment:
       CLUSTER_ID: "${KAFKA_CLUSTER_ID:?set KAFKA_CLUSTER_ID in deploy/lab/.env, see .env.example}"
       KAFKA_NODE_ID: 1
@@ -603,8 +603,8 @@ services:
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-1
     restart: unless-stopped
-    mem_limit: 2304m
-    memswap_limit: 2304m
+    mem_limit: 2048m
+    memswap_limit: 2048m
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:
@@ -642,8 +642,8 @@ services:
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-2
     restart: unless-stopped
-    mem_limit: 2304m
-    memswap_limit: 2304m
+    mem_limit: 2048m
+    memswap_limit: 2048m
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:

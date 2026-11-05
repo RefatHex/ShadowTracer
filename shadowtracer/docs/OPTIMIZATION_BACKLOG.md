@@ -59,7 +59,7 @@ manager; shipper ~10,000/s; correlator ~530–550/s and Postgres-bound.
 | R4 | Post-crash ClickHouse recovery is manual | `recover-ch-after-crash.sh` needed a human approval | Runbook plus automated detection of broken parts in `/health/detail` | LATER | S |
 | R5 | Lab power cuts | Three cuts in one round | UPS for the dev machine | Now (non-code) | — |
 | R6 | Warm-up threshold (30 incidents) is a guess | Lab data only | Recheck against a pilot tenant | LATER | S |
-| R7 | Lab memory budget per service | WSL froze from memory exhaustion on 2026-11-05 (no limits on managers/console, `make -j10` build). Every service now has `mem_limit` = `memswap_limit`, total 13,056 MiB of the 13.5 GiB budget (`DEV_SETUP.md` "Lab memory budget"). Only ~770 MiB is left | Re-measure and re-budget whenever a service is added: Qdrant (~300 MB+), MLflow (+ its Postgres), MISP (2-3 GB) will not fit without raising WSL memory, trimming ClickHouse, or moving them to their own compose profile run on demand | Per feature | S |
+| R7 | Lab memory budget per service | WSL froze from memory exhaustion on 2026-11-05 (no limits on managers/console, `make -j10` build). Every service now has `mem_limit` = `memswap_limit`, total 13,440 MiB of the 13.5 GiB budget (Kafka raised to 1152m, ClickHouse cut to 2048m, managers 1216m after Kafka hit `memory.max` 18,693 times) (`DEV_SETUP.md` "Lab memory budget"). Only ~384 MiB is left | Re-measure and re-budget whenever a service is added: Qdrant (~300 MB+), MLflow (+ its Postgres), MISP (2-3 GB) will not fit without raising WSL memory, trimming ClickHouse, or moving them to their own compose profile run on demand | Per feature | S |
 
 ## 3. Security (before first customer)
 

@@ -103,8 +103,16 @@ EOF
 }
 run_step "lab reachable" require_lab_up
 
+# Kafka is TLS + SASL/SCRAM only (Phase 5.6 Item 1) and the suites build their
+# client config from KAFKA_* env (shadowtracer_ingest/kafka_security.py). Without
+# it they default to PLAINTEXT and the broker drops them in the TLS handshake -
+# found 2026-11-05: ingest failed 23 tests + 8 errors on exactly that.
 run_pytest() {
-    (cd "$REPO_ROOT/$1" && .venv/bin/python -m pytest -q)
+    (cd "$REPO_ROOT/$1" && \
+     KAFKA_SECURITY_PROTOCOL=SASL_SSL KAFKA_SASL_USERNAME=admin \
+     KAFKA_SASL_PASSWORD="$(grep '^KAFKA_ADMIN_PASSWORD=' "$REPO_ROOT/deploy/lab/.env" | cut -d= -f2-)" \
+     KAFKA_SSL_CA_LOCATION="$REPO_ROOT/deploy/lab/kafka-certs/ca.crt" \
+     .venv/bin/python -m pytest -q)
 }
 run_step "ingest tests" run_pytest shadowtracer/ingest
 run_step "correlate tests" run_pytest shadowtracer/correlate
