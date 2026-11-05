@@ -1,0 +1,37 @@
+{
+ "count": 2,
+ "next": null,
+ "results": [
+  {
+   "id": "6720f0c1a1b2c3d4e5f60718",
+   "name": "ShadowTracer lab test pulse",
+   "modified": "MODIFIED_PLACEHOLDER",
+   "created": "2026-11-01T00:00:00.000000",
+   "tlp": "white",
+   "tags": ["lab-test", "c2"],
+   "malware_families": [{"id": "x", "display_name": "LabRAT"}],
+   "attack_ids": [{"id": "T1071", "name": "Application Layer Protocol", "display_name": "T1071 - Application Layer Protocol"}],
+   "indicators": [
+    {"indicator": "45.33.32.157", "type": "IPv4", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1},
+    {"indicator": "45.33.32.156", "type": "IPv4", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1},
+    {"indicator": "45[.]33[.]32[.]158", "type": "IPv4", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1},
+    {"indicator": "SHA256_PLACEHOLDER", "type": "FileHash-SHA256", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1},
+    {"indicator": "1.1.1.1", "type": "IPv4", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1},
+    {"indicator": "10.1.2.3", "type": "IPv4", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1},
+    {"indicator": "evil.example\n10.:", "type": "domain", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1},
+    {"indicator": "hxxp://bad[.]example/x", "type": "URL", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1},
+    {"indicator": "someone@example.com", "type": "email", "created": "2026-11-01T00:00:00", "expiration": null, "is_active": 1}
+   ]
+  },
+  {
+   "id": "6720f0c1a1b2c3d4e5f60719",
+   "name": "Expired indicator",
+   "modified": "2026-01-01T00:00:00.000000",
+   "tlp": "green",
+   "tags": [],
+   "indicators": [
+    {"indicator": "45.33.32.159", "type": "IPv4", "created": "2026-01-01T00:00:00", "expiration": "2026-02-01T00:00:00", "is_active": 1}
+   ]
+  }
+ ]
+}

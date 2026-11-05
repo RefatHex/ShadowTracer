@@ -22,9 +22,18 @@ LIST_TYPES = ("ipv4", "ipv6", "domain", "url", "md5", "sha1", "sha256")
 EMPTY_LIST_KEY = "shadowtracer-ti-empty-list"
 
 # (native parent rule ids, decoded field, list type, lookup, description of the event)
+# Parents are where an event ends WITHOUT an alert (THREAT_INTEL.md §1.4): the grouping
+# parent 5700 (no sshd child matched), the level-0 leaf 5722 "Connection closed"
+# (srcip decoded, wazuh-logtest 2026-11-06), and the firewall grouping rule 4100
+# (iptables/ulogd lines decode srcip and dstip). Alerting rules (5710, 5712, ...) get
+# no TI child: ti-matcher annotates those (6.1c) so they are never replaced.
 ATTACHMENTS = (
-    ("5700", "srcip", "ipv4", "address_match_key", "sshd event"),
-    ("5700", "srcip", "ipv6", "match_key", "sshd event"),
+    ("5700, 5722", "srcip", "ipv4", "address_match_key", "sshd event"),
+    ("5700, 5722", "srcip", "ipv6", "match_key", "sshd event"),
+    ("4100", "dstip", "ipv4", "address_match_key", "outbound connection"),
+    ("4100", "dstip", "ipv6", "match_key", "outbound connection"),
+    ("4100", "srcip", "ipv4", "address_match_key", "inbound connection"),
+    ("4100", "srcip", "ipv6", "match_key", "inbound connection"),
     ("550, 554", "sha256", "sha256", "match_key", "FIM file"),
     ("550, 554", "sha1", "sha1", "match_key", "FIM file"),
     ("550, 554", "md5", "md5", "match_key", "FIM file"),
