@@ -1201,3 +1201,47 @@ incidents (`alert_count 0`, no `incident_alerts` rows):
 They are **not deleted**; that needs the owner's go-ahead. Read-only query:
 `SELECT … FROM incidents i WHERE alert_count = 0 AND NOT EXISTS (SELECT 1
 FROM incident_alerts a WHERE a.incident_id = i.id)`.
+
+## 14. Phase 6.1a throughput gate (2026-11-05, evening): host now has 6 CPUs
+
+**Changed host:** `.wslconfig` now gives WSL `processors=6` (was all 12), 16 GB
+memory and 8 GB swap. Every number above this section was measured on 12 CPUs. Every
+lab service also has a memory limit now (`DEV_SETUP.md` "Lab memory budget").
+
+6.1a changed no shipper, writer or correlator code. It changed analysisd's hot reload
+(ceiling A/B below) and the lab's memory limits.
+
+**analysisd, old vs new binary** (built identically; old is byte-identical to the
+previous image's), same host and manager, baseline fixture over TCP syslog, two pairs
+in opposite order: both hold 2,000/s with 0 drops. Saturated processing:
+
+| rate | old | new |
+|---|---|---|
+| 3,000/s (pair 1) | 2,178/s | 2,057/s |
+| 2,500/s (pair 2) | 1,849/s | 1,939/s |
+| 3,000/s (pair 2) | 1,668/s | 1,687/s |
+
+So the ceiling is unchanged within noise. It is ~2,000/s rather than §3.3's ~4,000/s
+because of the 6 CPUs.
+
+**End to end, §13 method** (`../load/e2e_step.sh <rate> 600 gate-r<rate> 12 50`):
+
+| step | writer lag | writer latency p50/p95/p99 | correlator | dead letters / restarts |
+|---|---|---|---|---|
+| 500/s | ≤3,150, flat | 2.1 / 5.8 / 7.6 s (§13: 1.1/2.0/2.9) | **lag grew 6.8k → 86k: ~190/s processed of ~490/s** (§13: flat ≤1,715) | 0 / 0 |
+| 2,000/s | ≤49k, flat | 9.7 / 21.9 / 24.6 s | lag grew ~1,650/s: ~335/s processed (§13: ~550/s) | 0 / 0 |
+
+**Gate not met for end to end at 500/s.** Attribution, measured:
+- Correlators alone (draining the backlog, no new input): **~580–650/s**, at or above
+  §13's 530–550/s ceiling. Their own capacity is unchanged.
+- Postgres limit 320 MiB → 1 GB live: drain rate 440–540/s, no gain. Postgres memory is
+  not the limit (its full I/O stall stayed 12–28%).
+- Correlators and writers never hit their memory caps (`memory.events` `max` delta 0).
+  Kafka (now 1152m) and the managers did hit theirs; that is page-cache reclaim.
+- Host while only draining: load average ~24 on 6 CPUs, 2.6% idle, 25.6% iowait. During
+  the step the same 6 CPUs also ran 12 syslog generator containers, the 200-agent
+  producer, analysisd, ClickHouse, Kafka and Postgres. Under that combined load the
+  correlators get starved; on 12 CPUs (§13) they were not.
+
+Decision for the owner: re-baseline every gate on the 6-CPU host (then this run is
+the new reference), or give WSL its 12 CPUs back for gate runs. Backlog T13.
