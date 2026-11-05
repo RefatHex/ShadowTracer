@@ -306,6 +306,8 @@ services:
       # syslog (THROUGHPUT_BASELINE.md §2.1 used to add this by hand).
       # Test manager only; never set on a main-tenant manager.
       LOAD_TEST_SYSLOG_PORT: "5514"
+      # The same input over TCP (no kernel drops; back-pressure instead).
+      LOAD_TEST_SYSLOG_TCP_PORT: "5515"
       SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro

@@ -84,6 +84,23 @@ if [ -n "${LOAD_TEST_SYSLOG_PORT:-}" ] && ! grep -q "<port>${LOAD_TEST_SYSLOG_PO
 EOF
 fi
 
+# Same, over TCP (LOAD_TEST_SYSLOG_TCP_PORT): a reader that falls behind
+# back-pressures the sender instead of the kernel dropping datagrams, so a
+# load test can check sent == written exactly (OPTIMIZATION_BACKLOG T12).
+# Wazuh refuses tcp,udp on one syslog block (remote-config.c:299-301).
+if [ -n "${LOAD_TEST_SYSLOG_TCP_PORT:-}" ] && ! grep -q "<port>${LOAD_TEST_SYSLOG_TCP_PORT}</port>" "$OSSEC_CONF"; then
+    cat >> "$OSSEC_CONF" <<EOF
+<ossec_config>
+  <remote>
+    <connection>syslog</connection>
+    <port>${LOAD_TEST_SYSLOG_TCP_PORT}</port>
+    <protocol>tcp</protocol>
+    <allowed-ips>172.28.0.0/16</allowed-ips>
+  </remote>
+</ossec_config>
+EOF
+fi
+
 # Step 3 item 14 (data volume) temporarily flipped <logall>/<logall_json> on
 # here to measure the archives.json-to-alerts.json ratio under real agent
 # activity - that measurement is done (see PHASE1_FINDINGS.md) and the raw

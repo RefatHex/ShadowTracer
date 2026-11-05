@@ -125,7 +125,10 @@ M	ruleset/rules/0017-wazuh-api_rules.xml
 M	ruleset/rules/0545-osquery_rules.xml
 M	src/active-response/restart-wazuh.c
 M	src/active-response/restart.sh
+M	src/analysisd/analysisd.c
 M	src/analysisd/compiled_rules/register_rule.sh
+M	src/analysisd/hotreload.h
+M	src/analysisd/lists_list.c
 M	src/client-agent/buffer.c
 M	src/headers/validate_op.h
 M	src/init/darwin-init.sh
@@ -147,6 +150,8 @@ M	src/init/wazuh-local.sh
 M	src/init/wazuh-server.sh
 M	src/os_execd/wcom.c
 M	src/shared/validate_op.c
+M	src/unit_tests/analysisd/test_analysisd_hotreload.c
+M	src/unit_tests/analysisd/test_lists_list.c
 M	src/unit_tests/shared/test_validate_op.c
 M	src/win32/version.rc
 M	wodles/utils.py

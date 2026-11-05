@@ -18,6 +18,8 @@
 #include "../../analysisd/cdb/cdb.h"
 #include "../../analysisd/analysisd.h"
 #include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -49,6 +51,48 @@ void test_os_remove_cdblist_OK(void **state)
 
     os_remove_cdblist(&l_node);
 
+}
+
+/* ShadowTracer 6.1a: a list opened by a lookup holds an fd and a mapping of the
+ * .cdb; removing it (every hot reload) must release both. */
+void test_os_remove_cdblist_releases_loaded_list(void **state)
+{
+    char path[] = "/tmp/st_cdb_test_XXXXXX";
+    int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    assert_int_equal(write(fd, "0123456789abcdef", 16), 16);
+    unlink(path);
+
+    ListNode *l_node;
+    os_calloc(1, sizeof(ListNode), l_node);
+    os_strdup("list.cdb", l_node->cdb_filename);
+    os_strdup("list", l_node->txt_filename);
+    cdb_init(&l_node->cdb, fd);
+    assert_non_null(l_node->cdb.map);
+    l_node->loaded = 1;
+
+    os_remove_cdblist(&l_node);
+
+    assert_null(l_node);
+    assert_int_equal(fcntl(fd, F_GETFD), -1);  /* fd closed */
+    assert_int_equal(errno, EBADF);
+}
+
+void test_os_remove_cdblist_unloaded_list_keeps_fds(void **state)
+{
+    int fd = open("/dev/null", O_RDONLY);
+    assert_true(fd >= 0);
+
+    ListNode *l_node;
+    os_calloc(1, sizeof(ListNode), l_node);
+    os_strdup("list.cdb", l_node->cdb_filename);
+    os_strdup("list", l_node->txt_filename);
+    l_node->cdb.fd = fd;   /* never opened by a lookup: loaded == 0 */
+
+    os_remove_cdblist(&l_node);
+
+    assert_true(fcntl(fd, F_GETFD) != -1);  /* not ours to close */
+    close(fd);
 }
 
 /* os_remove_cdbrules */
@@ -208,6 +252,8 @@ int main(void)
     const struct CMUnitTest tests[] = {
         // Tests os_remove_cdblist
         cmocka_unit_test(test_os_remove_cdblist_OK),
+        cmocka_unit_test(test_os_remove_cdblist_releases_loaded_list),
+        cmocka_unit_test(test_os_remove_cdblist_unloaded_list_keeps_fds),
         // Tests os_remove_cdbrules
         cmocka_unit_test(test_os_remove_cdbrules_OK),
         // Tests OS_FindList

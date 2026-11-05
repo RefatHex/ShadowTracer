@@ -12,6 +12,8 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <cmocka.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #include "../../analysisd/hotreload.h"
 #include "../wrappers/wazuh/os_xml/os_xml_wrappers.h"
@@ -1076,6 +1078,129 @@ void test_w_hotreload_create_ruleset_success(void ** state) {
 
 
 
+/* ShadowTracer 6.1a: w_hotreload_drain_queues() must process every pending event
+ * and alert with the old ruleset, never discard one (upstream freed them). Real
+ * queues, stand-in rule-matching and writer threads that use the same barrier
+ * calls as analysisd's own threads. */
+extern int num_rule_matching_threads;
+extern w_queue_t * decode_queue_event_output;
+extern w_queue_t * writer_queue;
+extern w_queue_t * writer_queue_log;
+extern w_queue_t * writer_queue_log_statistical;
+extern w_queue_t * writer_queue_log_firewall;
+
+#define DRAIN_EVENTS 500
+#define DRAIN_STOP ((time_t)-1)
+static int drain_written;
+static pthread_mutex_t drain_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static Eventinfo * drain_event(time_t t) {
+    Eventinfo * lf;
+    os_calloc(1, sizeof(Eventinfo), lf);
+    lf->generate_time = t;
+    return lf;
+}
+
+static void * drain_process_thread(__attribute__((unused)) void * arg) {
+    while (1) {
+        Eventinfo * lf = queue_pop_ex(decode_queue_event_output);
+        if (!lf || w_hotreload_process_barrier(lf)) {
+            continue;
+        }
+        if (lf->generate_time == DRAIN_STOP) {
+            os_free(lf);
+            return NULL;
+        }
+        usleep(100);                       /* "rule matching" */
+        queue_push_ex_block(writer_queue_log, lf);
+    }
+}
+
+static void * drain_writer_thread(void * arg) {
+    w_queue_t * queue = arg;
+    while (1) {
+        Eventinfo * lf = queue_pop_ex(queue);
+        if (!lf || w_hotreload_writer_barrier(lf)) {
+            continue;
+        }
+        if (lf->generate_time == DRAIN_STOP) {
+            os_free(lf);
+            return NULL;
+        }
+        usleep(50);                        /* "writing the alert" */
+        pthread_mutex_lock(&drain_mutex);
+        drain_written++;
+        pthread_mutex_unlock(&drain_mutex);
+        os_free(lf);
+    }
+}
+
+static int drain_written_now(void) {
+    pthread_mutex_lock(&drain_mutex);
+    int n = drain_written;
+    pthread_mutex_unlock(&drain_mutex);
+    return n;
+}
+
+void test_w_hotreload_drain_queues_processes_everything(void ** state) {
+    pthread_t process_threads[4], writer_threads[4];
+    w_queue_t ** writer_queues[] = {&writer_queue, &writer_queue_log, &writer_queue_log_statistical,
+                                    &writer_queue_log_firewall};
+
+    num_rule_matching_threads = 4;
+    decode_queue_event_output = queue_init(1024);
+    for (int i = 0; i < 4; i++) {
+        *writer_queues[i] = queue_init(64);    /* small: rule matching blocks on a full writer queue */
+    }
+    drain_written = 0;
+
+    /* Events pending when the reload starts (input is stopped by the write lock in analysisd) */
+    for (int i = 0; i < DRAIN_EVENTS; i++) {
+        queue_push_ex(decode_queue_event_output, drain_event(1));
+    }
+    for (int i = 0; i < 4; i++) {
+        pthread_create(&process_threads[i], NULL, drain_process_thread, NULL);
+        pthread_create(&writer_threads[i], NULL, drain_writer_thread, *writer_queues[i]);
+    }
+
+    w_hotreload_drain_queues();
+
+    /* Every pending event was matched and written before the switch could happen */
+    assert_int_equal(drain_written_now(), DRAIN_EVENTS);
+    assert_true(queue_empty_ex(decode_queue_event_output));
+    for (int i = 0; i < 4; i++) {
+        assert_true(queue_empty_ex(*writer_queues[i]));
+    }
+
+    /* Rule-matching threads stay parked until released */
+    queue_push_ex(decode_queue_event_output, drain_event(1));
+    usleep(100000);
+    assert_int_equal(drain_written_now(), DRAIN_EVENTS);
+
+    w_hotreload_release_process_threads();
+    for (int i = 0; i < 200 && drain_written_now() < DRAIN_EVENTS + 1; i++) {
+        usleep(10000);
+    }
+    assert_int_equal(drain_written_now(), DRAIN_EVENTS + 1);
+
+    /* A second reload works the same way (barrier counters reset) */
+    for (int i = 0; i < DRAIN_EVENTS; i++) {
+        queue_push_ex_block(decode_queue_event_output, drain_event(1));
+    }
+    w_hotreload_drain_queues();
+    assert_int_equal(drain_written_now(), 2 * DRAIN_EVENTS + 1);
+    w_hotreload_release_process_threads();
+
+    for (int i = 0; i < 4; i++) {
+        queue_push_ex_block(decode_queue_event_output, drain_event(DRAIN_STOP));
+    }
+    for (int i = 0; i < 4; i++) {
+        pthread_join(process_threads[i], NULL);
+        queue_push_ex_block(*writer_queues[i], drain_event(DRAIN_STOP));
+        pthread_join(writer_threads[i], NULL);
+    }
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
 
@@ -1112,6 +1237,9 @@ int main(void) {
         /* Test for w_hotreload_clean_ruleset */
 
         /* w_hotreload_reload */
+
+        /* w_hotreload_drain_queues (ShadowTracer 6.1a) */
+        cmocka_unit_test(test_w_hotreload_drain_queues_processes_everything),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

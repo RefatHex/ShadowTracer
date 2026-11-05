@@ -240,6 +240,45 @@ pthread_mutex_t hourly_alert_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* hot reload mutes */
 static pthread_rwlock_t g_hotreload_ruleset_mutex;
 
+/* ShadowTracer: hot reload barrier (see w_hotreload_drain_queues()).
+ * A marker pushed into a FIFO queue: when a consumer pops it, every item queued
+ * before it has been popped, and - because each consumer handles one item at a
+ * time - fully processed. Rule-matching threads park at the marker until the
+ * ruleset switch is done; writer threads just report that they reached it. */
+static Eventinfo hotreload_barrier_marker;
+#define HOTRELOAD_BARRIER (&hotreload_barrier_marker)
+static pthread_mutex_t hotreload_barrier_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t hotreload_barrier_cond = PTHREAD_COND_INITIALIZER;
+static unsigned int hotreload_parked;        ///< rule-matching threads parked at a marker
+static unsigned int hotreload_writers_done;  ///< writer threads past their marker
+static unsigned int hotreload_release_gen;   ///< bumped to release the parked threads
+
+bool w_hotreload_process_barrier(const Eventinfo * lf) {
+    if (lf != HOTRELOAD_BARRIER) {
+        return false;
+    }
+    w_mutex_lock(&hotreload_barrier_mutex);
+    unsigned int gen = hotreload_release_gen;
+    hotreload_parked++;
+    w_cond_broadcast(&hotreload_barrier_cond);
+    while (gen == hotreload_release_gen) {
+        w_cond_wait(&hotreload_barrier_cond, &hotreload_barrier_mutex);
+    }
+    w_mutex_unlock(&hotreload_barrier_mutex);
+    return true;
+}
+
+bool w_hotreload_writer_barrier(const Eventinfo * lf) {
+    if (lf != HOTRELOAD_BARRIER) {
+        return false;
+    }
+    w_mutex_lock(&hotreload_barrier_mutex);
+    hotreload_writers_done++;
+    w_cond_broadcast(&hotreload_barrier_cond);
+    w_mutex_unlock(&hotreload_barrier_mutex);
+    return true;
+}
+
 /* Reported mutexes */
 static pthread_mutex_t writer_threads_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1468,6 +1507,9 @@ void * w_writer_thread(__attribute__((unused)) void * args ){
     while(1){
         /* Receive message from queue */
         if (lf = queue_pop_ex(writer_queue), lf) {
+            if (w_hotreload_writer_barrier(lf)) {
+                continue;
+            }
 
             w_mutex_lock(&writer_threads_mutex);
             w_inc_archives_written(lf->agent_id);
@@ -1492,6 +1534,9 @@ void * w_writer_log_thread(__attribute__((unused)) void * args ){
     while(1){
         /* Receive message from queue */
         if (lf = queue_pop_ex(writer_queue_log), lf) {
+            if (w_hotreload_writer_barrier(lf)) {
+                continue;
+            }
 
             w_mutex_lock(&writer_threads_mutex);
             w_inc_alerts_written(lf->agent_id);
@@ -2033,6 +2078,10 @@ void * w_process_event_thread(__attribute__((unused)) void * id){
             continue;
         }
 
+        if (w_hotreload_process_barrier(lf)) {
+            continue;
+        }
+
         lf->tid = t_id;
         t_currently_rule = NULL;
 
@@ -2338,6 +2387,9 @@ void * w_writer_log_statistical_thread(__attribute__((unused)) void * args ){
     while(1){
         /* Receive message from queue */
         if (lf = queue_pop_ex(writer_queue_log_statistical), lf) {
+            if (w_hotreload_writer_barrier(lf)) {
+                continue;
+            }
 
             w_mutex_lock(&writer_threads_mutex);
             w_inc_stats_written();
@@ -2370,6 +2422,9 @@ void * w_writer_log_firewall_thread(__attribute__((unused)) void * args ){
     while(1){
         /* Receive message from queue */
         if (lf = queue_pop_ex(writer_queue_log_firewall), lf) {
+            if (w_hotreload_writer_barrier(lf)) {
+                continue;
+            }
 
             w_mutex_lock(&writer_threads_mutex);
             w_inc_firewall_written(lf->agent_id);
@@ -2496,10 +2551,9 @@ bool w_hotreload_reload(OSList * list_msg) {
     mdebug1("Blocking input threads to reload ruleset");
     w_rwlock_wrlock(&g_hotreload_ruleset_mutex);
 
-    // Drain queues if still some events are pending
-    mdebug1("Clearing pending events from queues");
+    // Finish every pending event with the old ruleset (never discard them)
+    mdebug1("Processing pending events with the old ruleset");
     w_hotreload_drain_queues();
-    usleep(5000);
 
     minfo("Reloading ruleset");
 
@@ -2508,6 +2562,9 @@ bool w_hotreload_reload(OSList * list_msg) {
 
     // Reset the internal decoders
     w_hotreload_reload_internal_decoders();
+
+    // Rule-matching threads resume with the new ruleset
+    w_hotreload_release_process_threads();
 
     // Run the new ruleset
     mdebug1("Unblocking input threads (Enable new ruleset)");
@@ -2535,43 +2592,65 @@ void w_hotreload_reload_internal_decoders() {
     fim_hot_reload();
 }
 
-/**
- * @brief Drains all events from a specific queue
- * @param queue The queue to drain
- */
-static void w_hotreload_drain_eventinfo_queue(w_queue_t *queue) {
-    Eventinfo *event;
-    while ((event = try_queue_pop_ex(queue)) != NULL) {
-        Free_Eventinfo(event);
-    }
-}
-
 void w_hotreload_drain_queues() {
-    // blocked during hotreload so we don't drain :
-    // - decode_queue_syscheck_input
-    // - decode_queue_syscollector_input
-    // - decode_queue_rootcheck_input
-    // - decode_queue_sca_input
-    // - decode_queue_hostinfo_input
-    // - decode_queue_winevt_input
-    // - dispatch_dbsync_input
-    // - upgrade_module_input
-    // - decode_queue_event_input
-
-    // Intermediary queues to drain
-    w_queue_t *queues_to_drain[] = {
-        decode_queue_event_output,
-        writer_queue_log,
+    /* ShadowTracer (Phase 6.1a): upstream 4.14.8 popped and FREED every event in
+     * decode_queue_event_output and every alert/archive in the writer queues
+     * here, because they still point into the old ruleset (decoder_info,
+     * generated_rule) and the old ruleset is freed right after the switch.
+     * Measured: 29 of 240,000 events lost over 5 reloads at 4,000/s
+     * (shadowtracer/docs/design/THREAT_INTEL.md §9.4).
+     *
+     * Instead, with input and decoders already stopped by the write lock, let
+     * the old ruleset finish its own events:
+     *   1. one barrier per rule-matching thread into decode_queue_event_output;
+     *      each thread parks on reaching one, so every event decoded with the
+     *      old decoders has been matched with the old rules;
+     *   2. one barrier per writer queue that carries Eventinfo; when every
+     *      writer has reached its barrier, every alert and archive produced
+     *      with the old ruleset has been written.
+     * The FTS queue carries plain strings (no ruleset pointers) and needs no
+     * barrier. The parked threads are released by
+     * w_hotreload_release_process_threads() after the switch. */
+    w_queue_t * writer_queues[] = {
         writer_queue,
+        writer_queue_log,
         writer_queue_log_statistical,
         writer_queue_log_firewall,
         NULL
     };
+    unsigned int n_process = (unsigned int)num_rule_matching_threads;
+    unsigned int n_writers = 0;
 
-    // Drain all queues
-    for (int i = 0; queues_to_drain[i] != NULL; i++) {
-        w_hotreload_drain_eventinfo_queue(queues_to_drain[i]);
+    w_mutex_lock(&hotreload_barrier_mutex);
+    hotreload_parked = 0;
+    hotreload_writers_done = 0;
+    w_mutex_unlock(&hotreload_barrier_mutex);
+
+    for (unsigned int i = 0; i < n_process; i++) {
+        queue_push_ex_block(decode_queue_event_output, HOTRELOAD_BARRIER);
     }
+    w_mutex_lock(&hotreload_barrier_mutex);
+    while (hotreload_parked < n_process) {
+        w_cond_wait(&hotreload_barrier_cond, &hotreload_barrier_mutex);
+    }
+    w_mutex_unlock(&hotreload_barrier_mutex);
+
+    for (int i = 0; writer_queues[i] != NULL; i++) {
+        queue_push_ex_block(writer_queues[i], HOTRELOAD_BARRIER);
+        n_writers++;
+    }
+    w_mutex_lock(&hotreload_barrier_mutex);
+    while (hotreload_writers_done < n_writers) {
+        w_cond_wait(&hotreload_barrier_cond, &hotreload_barrier_mutex);
+    }
+    w_mutex_unlock(&hotreload_barrier_mutex);
+}
+
+void w_hotreload_release_process_threads() {
+    w_mutex_lock(&hotreload_barrier_mutex);
+    hotreload_release_gen++;
+    w_cond_broadcast(&hotreload_barrier_cond);
+    w_mutex_unlock(&hotreload_barrier_mutex);
 }
 
 w_hotreload_ruleset_data_t * w_hotreload_switch_ruleset(w_hotreload_ruleset_data_t * new_ruleset) {

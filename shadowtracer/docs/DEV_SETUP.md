@@ -71,6 +71,12 @@ meantime.
 `-j$(nproc)`. The CI agent build container is capped at 6 GB. `.env` sets
 `COMPOSE_PARALLEL_LIMIT=1` so compose builds one image at a time (manager and both
 agent images each run a C/C++ build). Scratch build containers get `--memory` too.
+A full `make TARGET=server TEST=1` does not fit in 6 GB even at `-j4`: `cc1plus` was
+OOM-killed on the vulnerability scanner's C++ unit tests (2026-11-05). For C unit
+tests, build only the daemon under test and its libraries, then just those tests:
+`make TARGET=server DEBUG=1 TEST=1 -j2 wazuh-analysisd`, then in `unit_tests/build`
+`cmake -DTARGET=server .. && make -j2 test_lists_list test_analysisd_hotreload`
+(needs `libcmocka-dev` and `lcov`).
 
 **Load tests:** `deploy/load/generate_load.py` refuses to start, and stops a running step
 with exit code 3, when host `MemAvailable` drops below 1.5 GB

@@ -95,8 +95,27 @@ bool w_hotreload_ruleset_load_config(OS_XML * xml, XML_NODE conf_section_nodes, 
 /**
  * @brief Drain the analysisd queues, for hot reload purposes
  *
- * This function drains the analysisd queues to ensure they are empty before switching rulesets.
- * The events of the drained queues can refer to the old ruleset or can be used
- * for querying to wazuh-db.
+ * ShadowTracer: processes (never discards) every pending event and alert with the
+ * old ruleset before the switch. Must be called with the ruleset write lock held
+ * (input and decoders stopped). Leaves the rule-matching threads parked; call
+ * w_hotreload_release_process_threads() after switching the ruleset.
  */
 void w_hotreload_drain_queues();
+
+/**
+ * @brief Release the rule-matching threads parked by w_hotreload_drain_queues()
+ */
+void w_hotreload_release_process_threads();
+
+/**
+ * @brief Called by a rule-matching thread on every event it pops from decode_queue_event_output
+ * @return true if lf was a hot reload barrier: the thread was parked until the switch finished
+ *         and must not process lf; false for a real event
+ */
+bool w_hotreload_process_barrier(const Eventinfo * lf);
+
+/**
+ * @brief Called by a writer thread on every event it pops from its queue
+ * @return true if lf was a hot reload barrier (now acknowledged; must not be written or freed)
+ */
+bool w_hotreload_writer_barrier(const Eventinfo * lf);

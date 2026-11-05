@@ -325,6 +325,18 @@ void os_remove_cdblist(ListNode **l_node) {
         tmp = *l_node;
         *l_node = (*l_node)->next;
 
+        /* ShadowTracer (Phase 6.1a): a list opened by a lookup (_OS_CDBOpen) holds
+         * an fd and a mapping of the whole .cdb; upstream never released them, so
+         * every hot reload leaked one of each per looked-up list
+         * (shadowtracer/docs/design/THREAT_INTEL.md §9.5). */
+        if (tmp->loaded) {
+            cdb_free(&tmp->cdb);
+            if (tmp->cdb.fd >= 0) {
+                close(tmp->cdb.fd);
+            }
+            tmp->loaded = 0;
+        }
+
         os_free(tmp->cdb_filename);
         os_free(tmp->txt_filename);
         os_free(tmp);

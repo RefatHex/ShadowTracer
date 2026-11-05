@@ -191,7 +191,14 @@ def run_kafka(args, corpus):
 
 
 def run_syslog(args, corpus):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # UDP (the default) sheds load in the kernel when the manager falls behind;
+    # TCP back-pressures this sender instead, so sent == received can be checked.
+    if args.protocol == "tcp":
+        sock = socket.create_connection((args.host, args.port))
+        send = lambda packet: sock.sendall(packet + b"\n")  # remoted splits TCP syslog on '\n'
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        send = lambda packet: sock.sendto(packet, (args.host, args.port))
     seq = 0
     t0 = time.time()
     next_report = t0 + 10
@@ -209,7 +216,7 @@ def run_syslog(args, corpus):
         # Minimal RFC3164-shaped syslog: priority + timestamp + host + tag + message.
         ts = time.strftime("%b %d %H:%M:%S")
         packet = f"<86>{ts} load-test-host sshd[1]: {line}"
-        sock.sendto(packet.encode(), (args.host, args.port))
+        send(packet.encode())
         seq += 1
         sent_since_report += 1
         mem_guard(seq)
@@ -223,6 +230,8 @@ def run_syslog(args, corpus):
         remaining = next_send - time.time()
         if remaining > 0:
             time.sleep(remaining)
+    if args.protocol == "tcp":
+        sock.close()
     print(f"DONE seq={seq} elapsed={time.time()-t0:.1f}s", flush=True)
 
 
@@ -239,7 +248,8 @@ def main():
     p.add_argument("--bootstrap", default="127.0.0.1:9094", help="kafka target: bootstrap servers")
     p.add_argument("--tenant-key", help="kafka target: tenant key (topic derived from it)")
     p.add_argument("--host", default="127.0.0.1", help="syslog target: destination host")
-    p.add_argument("--port", type=int, default=5514, help="syslog target: destination UDP port")
+    p.add_argument("--port", type=int, default=5514, help="syslog target: destination port")
+    p.add_argument("--protocol", choices=["udp", "tcp"], default="udp", help="syslog target: transport")
     p.add_argument("--fixture", default=FIXTURES_PATH, help="corpus file (default: the anonymised fixture)")
     p.add_argument("--seed", type=int, help="fix the sample sequence, e.g. to A/B two fixtures")
     p.add_argument("--agents", type=int, default=50,
