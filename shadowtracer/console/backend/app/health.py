@@ -428,3 +428,43 @@ def clock_skew_per_node(settings: Settings, window_minutes: int = 60) -> dict:
         }
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
+
+
+def ti_list_versions(db: Session) -> dict:
+    """Phase 6.1a (THREAT_INTEL.md §4.16): which version of every ShadowTracer
+    threat-intel file each manager node holds, written by the safe reload
+    wrapper (shadowtracer/intel/shadowtracer_intel/safe_reload.py) after every
+    distribution. Per tenant: each node's last result and the short checksum of
+    each file. A tenant alerts when any node's last result is not ok/unchanged
+    (warnings, errors, sync_timeout, rolled_back, rejected) or a worker holds a
+    file whose checksum differs from its master's - that worker is matching
+    against different intel than the rest of its cluster."""
+    try:
+        rows = db.execute(text(
+            "SELECT tenant_key, node, role, path, sha256, entries, result, detail, checked_at "
+            "FROM ti_list_versions ORDER BY tenant_key, role DESC, node, path"
+        )).mappings().all()
+    except Exception as exc:  # noqa: BLE001 - missing table (pre-migration) or DB hiccup must not crash /health
+        db.rollback()
+        return {"error": str(exc), "tenants": {}, "alert": False}
+
+    tenants: dict = {}
+    for r in rows:
+        t = tenants.setdefault(r["tenant_key"], {"nodes": {}, "mismatched": [], "failed": [], "alert": False})
+        n = t["nodes"].setdefault(r["node"], {
+            "role": r["role"], "result": r["result"], "detail": r["detail"],
+            "checked_at": r["checked_at"].isoformat(), "files": {},
+        })
+        if r["path"] != "*":
+            n["files"][r["path"]] = {"sha256": (r["sha256"] or "")[:16] or None, "entries": r["entries"]}
+    for t in tenants.values():
+        masters = [n for n in t["nodes"].values() if n["role"] == "master"]
+        master_files = masters[0]["files"] if masters else {}
+        for name, n in t["nodes"].items():
+            if n["result"] not in ("ok", "unchanged"):
+                t["failed"].append(name)
+            shas = {p: f["sha256"] for p, f in n["files"].items()}
+            if n["role"] != "master" and shas != {p: f["sha256"] for p, f in master_files.items()}:
+                t["mismatched"].append(name)
+        t["alert"] = bool(t["failed"] or t["mismatched"])
+    return {"tenants": tenants, "alert": any(t["alert"] for t in tenants.values())}

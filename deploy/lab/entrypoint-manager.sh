@@ -84,6 +84,30 @@ if [ -n "${LOAD_TEST_SYSLOG_PORT:-}" ] && ! grep -q "<port>${LOAD_TEST_SYSLOG_PO
 EOF
 fi
 
+# Phase 6.1a: ShadowTracer threat-intel lists (THREAT_INTEL.md §4.3). A fixed
+# set of list files, declared once here on EVERY node (ossec.conf is not
+# cluster-synced); only their contents change, distributed by
+# shadowtracer/intel/shadowtracer_intel/safe_reload.py. A placeholder with one
+# never-matching key keeps each list compilable, so the TI rules that name them
+# always load. Must match ti_rules.LIST_TYPES x BANDS. Idempotent: runs on
+# every container start.
+TI_DIR="${SHADOWTRACER_INSTALL_DIR}/etc/lists/shadowtracer-ti"
+mkdir -p "$TI_DIR" && chown wazuh:wazuh "$TI_DIR" && chmod 770 "$TI_DIR"
+ti_decl=""
+for t in ipv4 ipv6 domain url md5 sha1 sha256; do
+    for band in high medium; do
+        f="$TI_DIR/$t-$band"
+        if [ ! -f "$f" ]; then
+            echo "shadowtracer-ti-empty-list:" > "$f"
+            chown wazuh:wazuh "$f"; chmod 660 "$f"
+        fi
+        ti_decl="${ti_decl}    <list>etc/lists/shadowtracer-ti/$t-$band</list>\n"
+    done
+done
+if ! grep -q "etc/lists/shadowtracer-ti/" "$OSSEC_CONF"; then
+    sed -i "0,/<\/ruleset>/s##${ti_decl}  </ruleset>#" "$OSSEC_CONF"
+fi
+
 # Same, over TCP (LOAD_TEST_SYSLOG_TCP_PORT): a reader that falls behind
 # back-pressures the sender instead of the kernel dropping datagrams, so a
 # load test can check sent == written exactly (OPTIMIZATION_BACKLOG T12).

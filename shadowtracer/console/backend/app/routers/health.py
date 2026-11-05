@@ -30,8 +30,10 @@ def health_detail(db: Session = Depends(get_db), settings=Depends(get_settings),
     ClickHouse replica health (dead-letter-ClickHouse incident,
     2026-10-08 - see clickhouse_replica_health's own docstring),
     per-manager clock skew (Phase 5C Step 0b - see clock_skew_per_node's
-    own docstring), and components stuck in a dead-letter retry loop
-    (Phase 5.6 closeout item 3 - see stuck_components' own docstring) -
+    own docstring), components stuck in a dead-letter retry loop
+    (Phase 5.6 closeout item 3 - see stuck_components' own docstring), and
+    the threat-intel list version on every manager node (Phase 6.1a - see
+    ti_list_versions' own docstring) -
     operational detail, not something every logged-in user should see."""
     return {
         "shipper_lag": health_checks.shipper_lag_per_node(settings),
@@ -41,4 +43,5 @@ def health_detail(db: Session = Depends(get_db), settings=Depends(get_settings),
         "clickhouse_replica_health": health_checks.clickhouse_replica_health(settings),
         "clock_skew_per_node": health_checks.clock_skew_per_node(settings),
         "stuck_components": health_checks.stuck_components(db, settings.stuck_retry_alert_seconds),
+        "ti_list_versions": health_checks.ti_list_versions(db),
     }

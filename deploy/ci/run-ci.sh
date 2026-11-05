@@ -109,6 +109,7 @@ run_pytest() {
 run_step "ingest tests" run_pytest shadowtracer/ingest
 run_step "correlate tests" run_pytest shadowtracer/correlate
 run_step "backend tests" run_pytest shadowtracer/console/backend
+run_step "intel tests" run_pytest shadowtracer/intel
 
 # --- 6. frontend --------------------------------------------------------
 run_frontend() {

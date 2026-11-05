@@ -425,3 +425,63 @@ def test_clock_skew_per_node_future_event_time_is_flagged(lab_env, test_clickhou
     finally:
         client.command(f"ALTER TABLE events DELETE WHERE cluster_node = '{node}'")
         client.close()
+
+
+def _ti_rows(db, rows):
+    from sqlalchemy import text as _t
+    for r in rows:
+        db.execute(_t(
+            "INSERT INTO ti_list_versions (tenant_key, node, path, role, sha256, entries, result, detail) "
+            "VALUES (:tenant_key, :node, :path, :role, :sha256, :entries, :result, '')"), r)
+    db.commit()
+
+
+def _ti_cleanup(db):
+    from sqlalchemy import text as _t
+    db.execute(_t("DELETE FROM ti_list_versions WHERE tenant_key LIKE 'ti-health-%'"))
+    db.commit()
+
+
+def test_ti_list_versions_consistent_cluster_does_not_alert(db):
+    try:
+        _ti_rows(db, [
+            {"tenant_key": "ti-health-a", "node": n, "path": p, "role": role, "sha256": "ab" * 32,
+             "entries": 1, "result": "ok"}
+            for n, role in (("master", "master"), ("worker1", "worker"))
+            for p in ("etc/lists/shadowtracer-ti/ipv4-high", "etc/rules/1000-shadowtracer_ti_rules.xml")])
+        report = health_checks.ti_list_versions(db)
+        t = report["tenants"]["ti-health-a"]
+        assert not t["alert"] and t["mismatched"] == [] and t["failed"] == []
+        assert t["nodes"]["worker1"]["files"]["etc/lists/shadowtracer-ti/ipv4-high"]["sha256"] == "ab" * 8
+    finally:
+        _ti_cleanup(db)
+
+
+def test_ti_list_versions_same_checksum_different_entries_is_not_a_mismatch(db):
+    try:
+        path = "etc/rules/1000-shadowtracer_ti_rules.xml"
+        _ti_rows(db, [
+            {"tenant_key": "ti-health-d", "node": "master", "path": path, "role": "master", "sha256": "cc" * 32, "entries": None, "result": "ok"},
+            {"tenant_key": "ti-health-d", "node": "worker1", "path": path, "role": "worker", "sha256": "cc" * 32, "entries": 10, "result": "ok"},
+        ])
+        assert health_checks.ti_list_versions(db)["tenants"]["ti-health-d"]["mismatched"] == []
+    finally:
+        _ti_cleanup(db)
+
+
+def test_ti_list_versions_flags_mismatched_worker_and_failed_reload(db):
+    try:
+        path = "etc/lists/shadowtracer-ti/ipv4-high"
+        _ti_rows(db, [
+            {"tenant_key": "ti-health-b", "node": "master", "path": path, "role": "master", "sha256": "aa" * 32, "entries": 1, "result": "ok"},
+            {"tenant_key": "ti-health-b", "node": "worker1", "path": path, "role": "worker", "sha256": "bb" * 32, "entries": 1, "result": "sync_timeout"},
+            {"tenant_key": "ti-health-c", "node": "master", "path": "*", "role": "master", "sha256": None, "entries": None, "result": "rejected"},
+        ])
+        report = health_checks.ti_list_versions(db)
+        assert report["alert"]
+        assert report["tenants"]["ti-health-b"]["mismatched"] == ["worker1"]
+        assert report["tenants"]["ti-health-b"]["failed"] == ["worker1"]
+        assert report["tenants"]["ti-health-c"]["failed"] == ["master"]
+        assert report["tenants"]["ti-health-c"]["nodes"]["master"]["files"] == {}
+    finally:
+        _ti_cleanup(db)
