@@ -14,7 +14,7 @@ import pytest
 from confluent_kafka import Consumer, Producer
 from confluent_kafka.admin import AdminClient, NewTopic
 
-from shadowtracer_ingest.dead_letter import send_to_dead_letter
+from shadowtracer_ingest.dead_letter import send_batch_to_dead_letter, send_to_dead_letter
 from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
 from shadowtracer_ingest.metrics import Metrics
 from shadowtracer_ingest.topics import alerts_topic_for_tenant, dead_letter_topic_for_tenant
@@ -238,3 +238,39 @@ def test_unreachable_broker_is_never_mistaken_for_an_offboarded_tenant(ch_client
             ch_client=ch_client, tenant_key="test", component="writer",
             source_location="x", error="x", raw_event="{}",
         )
+
+
+def test_a_burst_of_dead_letters_is_one_flush_and_one_insert(kafka_bootstrap, ch_client):
+    """A burst of malformed input (alerts.json lines split by a second writer,
+    THROUGHPUT_BASELINE.md §13) cost one producer flush plus one ClickHouse
+    round trip PER EVENT and held the shipper to ~25 lines/s. A batch must be
+    one flush and one insert, with every event still recorded in both sinks.
+    Counting wrappers around the real producer and client, not mocks."""
+    flushes, inserts = [], []
+
+    class CountingProducer(Producer):
+        def flush(self, *args):
+            flushes.append(1)
+            return super().flush(*args)
+
+    class CountingClickHouse:
+        def insert(self, table, rows, **kwargs):
+            inserts.append(len(rows))
+            return ch_client.insert(table, rows, **kwargs)
+
+    marker = f"burst-{uuid.uuid4().hex}"
+    failures = [(f"burst:{i}", marker, f"not json {i}") for i in range(300)]
+    try:
+        send_batch_to_dead_letter(
+            kafka_producer=CountingProducer({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()}),
+            ch_client=CountingClickHouse(), tenant_key=_SHARED_TEST_TENANT, component="shipper",
+            failures=failures,
+        )
+        assert flushes == [1] and inserts == [300], (flushes, inserts)
+        stored = ch_client.query(
+            "SELECT uniqExact(source_location) FROM dead_letter_events WHERE error = {m:String}", parameters={"m": marker},
+        ).result_rows[0][0]
+        assert stored == 300
+        assert _drain_dead_letter_topic(kafka_bootstrap, marker) is not None
+    finally:
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE error = '{marker}'")

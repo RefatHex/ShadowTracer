@@ -1065,7 +1065,7 @@ than one `write()`, and the generator's lines landed between the pieces:
 Fixes:
 - **Tooling:** `e2e_step.sh` no longer appends to `alerts.json`;
   analysisd is its only writer.
-- **Product:** the per-event dead-letter cost, fixed in the follow-up commit (§13.5).
+- **Product:** the per-event dead-letter cost, fixed in §13.5.
 
 ### 13.2 Per step: before (§12.4, 3 partitions, all syslog on one partition) vs after
 
@@ -1133,3 +1133,42 @@ group carry half the traffic. At 5,000/s the writers absorb ~3,300/s with
 lag ≤5 s, and analysisd under contention is the next limit.
 
 Next fix for the correlator: `THROUGHPUT_FIXES.md` §5 (proposal).
+
+### 13.5 Dead-letter bursts: one flush and one insert per batch (fixed)
+
+Cause (§13.1): `send_to_dead_letter` ran per event. Each call flushed the
+whole producer (in the shipper, the same producer that carries the
+batch's good lines) and made a synchronous ClickHouse insert.
+
+Fix:
+- `dead_letter.send_batch_to_dead_letter` produces every envelope of one
+  tenant, flushes once and inserts all rows in one ClickHouse insert.
+  `send_to_dead_letter` is now a one-item wrapper.
+- The **shipper** computes keys for its read batch (≤500 lines) first and
+  dead-letters the unparseable lines in one call, before producing the
+  good lines.
+- The **writer** and **correlator** collect the batch's permanent failures
+  per tenant and send each tenant's list once, still before the insert or
+  transaction and before the offset commit.
+- Unchanged:
+  - The durability order is the same (Kafka first, then ClickHouse).
+  - Retry-forever on a Kafka failure is the same. A retried batch can
+    duplicate envelopes in the topic but never loses one.
+  - The offboarded-tenant fallback (`TENANCY.md` §6) is the same.
+
+Measured on the test shipper: 5,000 malformed lines (`{"broken": "<marker> i"`)
+were appended to the idle test manager's `alerts.json` (`docker exec -i -u
+wazuh … cat >> alerts.json`; no load running, so analysisd wasn't writing),
+timed until the shipper's `offsets.json` reached the file size; rows and
+envelopes were counted by marker:
+
+| | drain time | lines/s | `dead_letter_events` rows | Kafka dead-letter envelopes |
+|---|---|---|---|---|
+| before (per event) | 696.0 s | 7 | 5,000 | 5,000 |
+| after (per batch) | 2.8 s (1 s polling) | ~1,800 | 5,000 | 5,000 |
+
+**×250 on a dead-letter burst**, with every event still recorded in both
+sinks. Test: `test_dead_letter.py::test_a_burst_of_dead_letters_is_one_flush_and_one_insert`
+(300 failures must be exactly 1 flush and 1 insert; it fails on the
+per-event code).
+

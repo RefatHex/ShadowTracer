@@ -78,34 +78,53 @@ def send_to_dead_letter(
     raw_event: str,
     metrics=None,
 ) -> None:
-    """Raises if the Kafka publish fails (caller must retry, not commit);
-    never raises if only the ClickHouse insert fails (logged and counted
-    on `metrics` as dead_letter_ch_failures if given, but swallowed).
+    """One event: see send_batch_to_dead_letter."""
+    send_batch_to_dead_letter(
+        kafka_producer=kafka_producer, ch_client=ch_client, tenant_key=tenant_key, component=component,
+        failures=[(source_location, error, raw_event)], metrics=metrics,
+    )
+
+
+def send_batch_to_dead_letter(
+    *,
+    kafka_producer,
+    ch_client,
+    tenant_key: str,
+    component: str,
+    failures: list[tuple[str, str, str]],
+    metrics=None,
+) -> None:
+    """Dead-letters every (source_location, error, raw_event) of one tenant
+    with ONE Kafka flush and ONE ClickHouse insert. Per event, a burst of
+    malformed input (e.g. lines split by a second writer appending to
+    alerts.json) cost a full producer flush plus a ClickHouse round trip
+    each and held a shipper to ~25 lines/s (THROUGHPUT_BASELINE.md §13).
+
+    Raises if the Kafka publish fails (caller must retry the whole call,
+    not commit - a retry may duplicate envelopes in the topic, never lose
+    one); never raises if only the ClickHouse insert fails (logged and
+    counted on `metrics` as dead_letter_ch_failures if given, but swallowed).
 
     Exception: if the tenant's dead-letter topic no longer exists (the
-    tenant was offboarded), the ClickHouse row becomes the durable record -
+    tenant was offboarded), the ClickHouse rows become the durable record -
     then a ClickHouse failure raises (caller retries) and success returns
     normally, counted as dead_letter_topic_missing."""
+    if not failures:
+        return
     failed_at = datetime.datetime.now(datetime.timezone.utc)
     tenant_key = tenant_key or ""
     # Phase 5.6 Item 1: per-tenant topic, not one shared
     # shadowtracer.events.dead-letter - every caller passes a tenant_key
     # derived from a per-tenant ACL'd topic (or, for the shipper, its own
-    # configured tenant), so this is never actually "" in practice any
-    # more - unlike before per-tenant topics, there's no "unknown tenant"
-    # case left where the caller doesn't already know which tenant this is.
+    # configured tenant), so this is never actually "" in practice.
     dead_letter_topic = dead_letter_topic_for_tenant(tenant_key)
-    encoded = raw_event.encode("utf-8", errors="replace")
-    raw_event_size = len(encoded)
-    raw_event_sha256 = hashlib.sha256(encoded).hexdigest()
-    raw_event_preview = _preview(encoded)
+    rows = []
+    for source_location, error, raw_event in failures:
+        encoded = raw_event.encode("utf-8", errors="replace")
+        rows.append([tenant_key, component, source_location, error, _preview(encoded), len(encoded),
+                     hashlib.sha256(encoded).hexdigest(), failed_at])
 
     if kafka_producer is not None:
-        envelope = {
-            "tenant_key": tenant_key, "component": component, "source_location": source_location,
-            "error": error, "raw_event_preview": raw_event_preview, "raw_event_size": raw_event_size,
-            "raw_event_sha256": raw_event_sha256, "failed_at": failed_at.isoformat(),
-        }
         # Durable record #1 - a failure here must propagate (see module
         # docstring): never caught here.
         #
@@ -127,10 +146,16 @@ def send_to_dead_letter(
                 delivery_error.append(err)
 
         try:
-            kafka_producer.produce(
-                dead_letter_topic, value=json.dumps(envelope).encode(),
-                headers=[("tenant_id", tenant_key.encode())], on_delivery=_on_delivery,
-            )
+            for t, c, loc, err, preview, size, sha, _ in rows:
+                envelope = {
+                    "tenant_key": t, "component": c, "source_location": loc, "error": err,
+                    "raw_event_preview": preview, "raw_event_size": size, "raw_event_sha256": sha,
+                    "failed_at": failed_at.isoformat(),
+                }
+                kafka_producer.produce(
+                    dead_letter_topic, value=json.dumps(envelope).encode(),
+                    headers=[("tenant_id", tenant_key.encode())], on_delivery=_on_delivery,
+                )
             still_pending = kafka_producer.flush(5)
             if still_pending or delivery_error:
                 raise RuntimeError(
@@ -142,42 +167,42 @@ def send_to_dead_letter(
             # topic is deleted, so this publish can never succeed, and
             # retrying it forever stalls every tenant on the caller's
             # partitions. Only when the topic is absent from the cluster's own
-            # metadata (not on a broker hiccup) does the ClickHouse row become
-            # the durable record - required, so its failure propagates.
+            # metadata (not on a broker hiccup) do the ClickHouse rows become
+            # the durable record - required, so their failure propagates.
             if ch_client is None or not _topic_missing(kafka_producer, dead_letter_topic):
                 raise
             # A publish that merely timed out is still queued in the producer;
-            # drop it, or every later flush() would report it as pending. This
-            # producer is flushed per call, so nothing else is queued here.
+            # drop it, or every later flush() would report it as pending.
+            # Callers never have other messages queued here: the writer and
+            # correlator use a dead-letter-only producer, and the shipper
+            # dead-letters a batch before producing its good lines.
             kafka_producer.purge()
             kafka_producer.poll(0)
-            _insert_dead_letter_row(ch_client, tenant_key, component, source_location,
-                                    f"{error} [dead-letter topic missing: tenant offboarded]",
-                                    raw_event_preview, raw_event_size, raw_event_sha256, failed_at)
-            logger.warning("dead-letter topic %s does not exist (tenant offboarded?) - recorded in "
-                           "ClickHouse only: component=%s %s", dead_letter_topic, component, source_location)
+            for r in rows:
+                r[3] = f"{r[3]} [dead-letter topic missing: tenant offboarded]"
+            _insert_dead_letter_rows(ch_client, rows)
+            logger.warning("dead-letter topic %s does not exist (tenant offboarded?) - %d event(s) recorded in "
+                           "ClickHouse only: component=%s first=%s", dead_letter_topic, len(rows), component, rows[0][2])
             if metrics is not None:
-                metrics.incr("dead_letter_topic_missing")
+                metrics.incr("dead_letter_topic_missing", len(rows))
             return
 
     if ch_client is not None:
         try:
-            _insert_dead_letter_row(ch_client, tenant_key, component, source_location, error,
-                                    raw_event_preview, raw_event_size, raw_event_sha256, failed_at)
+            _insert_dead_letter_rows(ch_client, rows)
         except Exception as exc:  # noqa: BLE001 - best-effort secondary sink: the Kafka copy above is already durable, so this must never crash the caller or block the pipeline
             logger.warning(
                 "dead-letter ClickHouse insert failed (Kafka dead-letter topic copy already durable) "
-                "component=%s tenant=%s: %s", component, tenant_key, exc,
+                "component=%s tenant=%s rows=%d: %s", component, tenant_key, len(rows), exc,
             )
             if metrics is not None:
                 metrics.incr("dead_letter_ch_failures")
 
 
-def _insert_dead_letter_row(ch_client, tenant_key, component, source_location, error,
-                            raw_event_preview, raw_event_size, raw_event_sha256, failed_at) -> None:
+def _insert_dead_letter_rows(ch_client, rows) -> None:
     ch_client.insert(
         "dead_letter_events",
-        [[tenant_key, component, source_location, error, raw_event_preview, raw_event_size, raw_event_sha256, failed_at]],
+        rows,
         column_names=[
             "tenant_id", "component", "source_location", "error",
             "raw_event_preview", "raw_event_size", "raw_event_sha256", "failed_at",

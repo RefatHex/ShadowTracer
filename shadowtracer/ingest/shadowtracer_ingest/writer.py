@@ -41,7 +41,7 @@ import clickhouse_connect
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from sqlalchemy import create_engine
 
-from .dead_letter import send_to_dead_letter
+from .dead_letter import send_batch_to_dead_letter
 from .metrics import Metrics
 from .normalizer import normalize_alert
 from .retry import retry_with_backoff, consumer_heartbeat
@@ -232,6 +232,7 @@ def run(
             # Validation and dead-lettering stay per message; every surviving
             # row goes into ONE insert for the whole batch (module docstring).
             batch_rows = []
+            dead: dict[str, list] = {}  # tenant -> [(source_location, error, raw_line)]
             by_partition: dict[tuple[str, int], list] = {}
             for msg in batch_msgs:
                 by_partition.setdefault((msg.topic(), msg.partition()), []).append(msg)
@@ -276,19 +277,8 @@ def run(
                     # missing envelope_version header.
                     if header_tenant_id is not None and header_tenant_id != topic_tenant:
                         metrics.incr("messages_failed")
-                        retry_with_backoff(
-                            lambda: send_to_dead_letter(
-                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=topic_tenant,
-                                component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
-                                error=f"tenant_topic_mismatch: topic claims {topic_tenant!r}, header claims {header_tenant_id!r}",
-                                raw_event=raw_line, metrics=metrics,
-                            ),
-                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
-                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
-                            poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, topic_tenant),
-                        )
-                        clear_stuck(pg_engine, retry_component)
+                        dead.setdefault(topic_tenant, []).append(
+                            (f"{msg_topic}:{partition}:{msg.offset()}", f"tenant_topic_mismatch: topic claims {topic_tenant!r}, header claims {header_tenant_id!r}", raw_line))
                         continue
                     # Phase 5.6 Item 4: a missing header predates this change
                     # (treated as version 1, the only shape that ever
@@ -299,19 +289,8 @@ def run(
                     # pre-envelope dead letters were (VERSIONING.md).
                     if envelope_version_raw is not None and envelope_version_raw != str(ENVELOPE_VERSION):
                         metrics.incr("messages_failed")
-                        retry_with_backoff(
-                            lambda: send_to_dead_letter(
-                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=topic_tenant,
-                                component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
-                                error=f"unsupported_envelope_version: got {envelope_version_raw!r}, this writer only understands {ENVELOPE_VERSION}",
-                                raw_event=raw_line, metrics=metrics,
-                            ),
-                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
-                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
-                            poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, topic_tenant),
-                        )
-                        clear_stuck(pg_engine, retry_component)
+                        dead.setdefault(topic_tenant, []).append(
+                            (f"{msg_topic}:{partition}:{msg.offset()}", f"unsupported_envelope_version: got {envelope_version_raw!r}, this writer only understands {ENVELOPE_VERSION}", raw_line))
                         continue
                     # Phase 5C Step 0: a forged/stale/deleted tenant_key must
                     # never create silent orphaned ClickHouse rows - checked
@@ -326,40 +305,15 @@ def run(
                     # mismatch check above already catches that).
                     if not tenant_cache.is_known(topic_tenant or ""):
                         metrics.incr("messages_failed")
-                        retry_with_backoff(
-                            lambda: send_to_dead_letter(
-                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=topic_tenant,
-                                component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
-                                error="unknown_tenant", raw_event=raw_line, metrics=metrics,
-                            ),
-                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
-                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
-                            poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, topic_tenant),
-                        )
-                        clear_stuck(pg_engine, retry_component)
+                        dead.setdefault(topic_tenant, []).append(
+                            (f"{msg_topic}:{partition}:{msg.offset()}", "unknown_tenant", raw_line))
                         continue
                     try:
                         ev = normalize_alert(raw_line, topic_tenant or "")
                     except Exception as exc:  # noqa: BLE001 - any parse/normalize failure is permanent, never retried: dead-letter and move on
                         metrics.incr("messages_failed")
-                        # The dead-letter call itself only ever raises for
-                        # its Kafka-publish half (ClickHouse failures are
-                        # caught inside it) - retried forever, same as any
-                        # other transient infra failure, so this event is
-                        # never silently lost with no durable record at all.
-                        retry_with_backoff(
-                            lambda: send_to_dead_letter(
-                                kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=topic_tenant,
-                                component="writer", source_location=f"{msg_topic}:{partition}:{msg.offset()}",
-                                error=f"{type(exc).__name__}: {exc}", raw_event=raw_line, metrics=metrics,
-                            ),
-                            max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
-                            max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
-                            poll_fn=lambda: consumer_heartbeat(consumer),
-                            on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, topic_tenant),
-                        )
-                        clear_stuck(pg_engine, retry_component)
+                        dead.setdefault(topic_tenant, []).append(
+                            (f"{msg_topic}:{partition}:{msg.offset()}", f"{type(exc).__name__}: {exc}", raw_line))
                         continue
                     if ev.cluster_node_fell_back:
                         logger.warning(
@@ -368,6 +322,25 @@ def run(
                         )
                         metrics.incr("cluster_node_fallback_count")
                     batch_rows.append(_row(ev))
+
+            # One dead-letter call per tenant for the whole batch (one flush,
+            # one ClickHouse insert), before the insert and the commit below.
+            # It only ever raises for its Kafka-publish half (ClickHouse
+            # failures are caught inside it) - retried forever, same as any
+            # other transient infra failure, so no event is ever silently
+            # lost with no durable record at all.
+            for dl_tenant, failures in dead.items():
+                retry_with_backoff(
+                    lambda: send_batch_to_dead_letter(
+                        kafka_producer=dead_letter_producer, ch_client=ch, tenant_key=dl_tenant,
+                        component="writer", failures=failures, metrics=metrics,
+                    ),
+                    max_attempts=None, base_delay=INSERT_BASE_DELAY_SECONDS,
+                    max_delay=INSERT_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                    poll_fn=lambda: consumer_heartbeat(consumer),
+                    on_retry=lambda attempt, exc2: _on_dead_letter_retry(attempt, exc2, dl_tenant),
+                )
+                clear_stuck(pg_engine, retry_component)
 
             if batch_rows:
                 ranges = ";".join(

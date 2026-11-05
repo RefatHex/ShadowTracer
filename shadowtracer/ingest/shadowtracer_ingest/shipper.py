@@ -29,7 +29,7 @@ import time
 
 from confluent_kafka import KafkaException, Producer
 
-from .dead_letter import send_to_dead_letter
+from .dead_letter import send_batch_to_dead_letter, send_to_dead_letter
 from .metrics import Metrics
 from .topics import alerts_topic_for_tenant
 from .retry import retry_with_backoff
@@ -224,29 +224,34 @@ def run(
             did_work = True
 
             delivery_errors.clear()
+            # Keys first: every unparseable line of the batch is dead-lettered
+            # in ONE call (one flush, one ClickHouse insert), before any good
+            # line is produced - per line, a burst of broken lines held the
+            # shipper to ~25 lines/s (THROUGHPUT_BASELINE.md §13).
+            keyed, failures = [], []
             for line, byte_offset in batch:
                 try:
-                    key = partition_key(line, tenant_id).encode()
+                    keyed.append((line, byte_offset, partition_key(line, tenant_id).encode()))
                 except Exception as exc:  # noqa: BLE001 - any parse failure is permanent, never retried: dead-letter and move on (deeply nested JSON, invalid UTF-8, wrong types, ... none of these succeed on a retry)
-                    metrics.incr("lines_failed")
-                    # send_to_dead_letter only ever raises for its Kafka-
-                    # publish half (a ClickHouse-side failure is caught
-                    # inside it) - retried forever, same as any other
-                    # transient infra failure, so this line is never left
-                    # with no durable record anywhere.
-                    retry_with_backoff(
-                        lambda: send_to_dead_letter(
-                            kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_id,
-                            component="shipper", source_location=f"{source.path}:{byte_offset}",
-                            error=f"{type(exc).__name__}: {exc}", raw_event=line, metrics=metrics,
-                        ),
-                        max_attempts=None, base_delay=DEAD_LETTER_BASE_DELAY_SECONDS,
-                        max_delay=DEAD_LETTER_MAX_DELAY_SECONDS, stop_flag=stop_flag,
-                        on_retry=lambda attempt, exc2: logger.warning(
-                            "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
-                        ),
-                    )
-                    continue
+                    failures.append((f"{source.path}:{byte_offset}", f"{type(exc).__name__}: {exc}", line))
+            if failures:
+                metrics.incr("lines_failed", len(failures))
+                # send_batch_to_dead_letter only ever raises for its Kafka-
+                # publish half (a ClickHouse-side failure is caught inside
+                # it) - retried forever, same as any other transient infra
+                # failure, so no line is ever left with no durable record.
+                retry_with_backoff(
+                    lambda: send_batch_to_dead_letter(
+                        kafka_producer=producer, ch_client=ch_client, tenant_key=tenant_id,
+                        component="shipper", failures=failures, metrics=metrics,
+                    ),
+                    max_attempts=None, base_delay=DEAD_LETTER_BASE_DELAY_SECONDS,
+                    max_delay=DEAD_LETTER_MAX_DELAY_SECONDS, stop_flag=stop_flag,
+                    on_retry=lambda attempt, exc2: logger.warning(
+                        "dead-letter Kafka publish attempt %d failed (transient - retrying): %s", attempt, exc2,
+                    ),
+                )
+            for line, byte_offset, key in keyed:
                 value = line.encode()
                 headers = [
                     ("tenant_id", tenant_id.encode()),

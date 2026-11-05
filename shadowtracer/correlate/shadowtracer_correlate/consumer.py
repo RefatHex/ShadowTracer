@@ -32,7 +32,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest"))
-from shadowtracer_ingest.dead_letter import send_to_dead_letter  # noqa: E402
+from shadowtracer_ingest.dead_letter import send_batch_to_dead_letter  # noqa: E402
 from shadowtracer_ingest.normalizer import normalize_alert  # noqa: E402
 from shadowtracer_ingest.retry import consumer_heartbeat  # noqa: E402
 from shadowtracer_ingest.retry_state import mark_stuck, clear_stuck  # noqa: E402
@@ -85,7 +85,7 @@ def _wait_polling(stop_flag, delay, consumer) -> bool:
 
 def _dead_letter_with_retry(stop_flag, metrics, consumer, pg_engine, retry_component, group_id, **kwargs) -> bool:
     """Returns True once the dead-letter write succeeds durably (via the
-    Kafka dead-letter topic - send_to_dead_letter only ever raises for
+    Kafka dead-letter topic - send_batch_to_dead_letter only ever raises for
     that half, since a ClickHouse-side failure is already caught inside
     it), retrying forever with backoff in between - same as any other
     transient infra failure, so a permanently bad event is never left
@@ -101,7 +101,7 @@ def _dead_letter_with_retry(stop_flag, metrics, consumer, pg_engine, retry_compo
     attempt = 0
     while True:
         try:
-            send_to_dead_letter(metrics=metrics, **kwargs)
+            send_batch_to_dead_letter(metrics=metrics, **kwargs)
             clear_stuck(pg_engine, retry_component)
             return True
         except Exception as exc:  # noqa: BLE001 - the Kafka publish itself failing is transient, not bad data
@@ -196,12 +196,11 @@ def run(
     if started_flag is not None:
         started_flag.set()
 
-    def dead_letter(msg, tenant_key, raw_line, error) -> bool:
+    def dead_letter(tenant_key, failures) -> bool:
         return _dead_letter_with_retry(
             stop_flag, metrics, consumer, engine, retry_component, group_id,
             kafka_producer=dead_letter_producer, ch_client=ch_client, tenant_key=tenant_key,
-            component="correlator", source_location=f"{msg.topic()}:{msg.partition()}:{msg.offset()}",
-            error=error, raw_event=raw_line,
+            component="correlator", failures=failures,
         )
 
     try:
@@ -218,6 +217,7 @@ def run(
             # also commits everything before N in that partition.
             good = []  # (msg, event)
             handled = []  # every message whose offset may be committed once the batch is done
+            dead = {}  # tenant_key -> [(source_location, error, raw_line)], one dead-letter call each
             shutting_down = False
             for msg in msgs:
                 if msg.error():
@@ -267,13 +267,16 @@ def run(
 
                 if error is not None:
                     metrics.incr("messages_failed")
-                    if not dead_letter(msg, tenant_key, raw_line, error):
-                        shutting_down = True  # graceful shutdown mid-retry: commit nothing, the batch is redelivered
-                        break
+                    dead.setdefault(tenant_key, []).append(
+                        (f"{msg.topic()}:{msg.partition()}:{msg.offset()}", error, raw_line))
                 else:
                     good.append((msg, event))
                 handled.append(msg)
 
+            for dl_tenant, failures in dead.items():
+                if not dead_letter(dl_tenant, failures):
+                    shutting_down = True  # graceful shutdown mid-retry: commit nothing, the batch is redelivered
+                    break
             if shutting_down:
                 continue
             profiler.mark("prepare")
