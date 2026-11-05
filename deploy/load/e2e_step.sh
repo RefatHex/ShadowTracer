@@ -33,6 +33,12 @@ disk() {
 }
 restarts() { docker ps --format '{{.Names}}' | grep -E "$PIPE" | sort | xargs docker inspect --format '{{.Name}} restarts={{.RestartCount}} started={{.State.StartedAt}}'; }
 
+# Lab memory guard: never start a step on a host that is already short
+# (generate_load.py repeats the check every second during the step).
+avail_mb=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)
+if [ "$avail_mb" -lt 1536 ]; then
+  echo "ABORT: MemAvailable ${avail_mb} MB < 1536 MB before the step - not started"; exit 3
+fi
 echo "### step rate=$RATE dur=${DUR}s run_id=$RUN syslog=$SYSLOG_RATE/s devices=$DEVICES agents=$AGENT_RATE/s over $AGENTS agents"
 echo "--- disk before"; disk
 echo "--- containers before"; restarts

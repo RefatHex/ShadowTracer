@@ -14,10 +14,14 @@ names=()
 for i in $(seq 1 "$N"); do
   name="loadgen-$RUN-$i"
   names+=("$name")
-  docker run -d --rm --name "$name" --network "$NETWORK" -v "$LOAD_DIR:/load:ro" --entrypoint python \
+  # Lab memory budget: a generator needs ~30 MB; cap it (no swap). generate_load.py
+  # itself stops the step (exit 3) if host MemAvailable drops below 1.5 GB.
+  docker run -d --name "$name" --memory 128m --memory-swap 128m --network "$NETWORK" -v "$LOAD_DIR:/load:ro" --entrypoint python \
     shadowtracer-lab/ingest:local /load/generate_load.py --target syslog --host "$MANAGER" --port 5514 \
     --run-id "$RUN-d$i" --rate "$PER" --duration "$DUR" >/dev/null
 done
 echo "$N devices x $PER/s = $(( N * PER ))/s for ${DUR}s -> $MANAGER:5514"
-docker wait "${names[@]}" >/dev/null 2>&1 || true
-echo "fleet done"
+codes=$(docker wait "${names[@]}" 2>/dev/null | sort | uniq -c | tr '\n' ' ')
+docker logs "${names[0]}" 2>&1 | grep ABORT || true
+docker rm "${names[@]}" >/dev/null 2>&1 || true
+echo "fleet done (generator exit codes, count code: $codes; 3 = aborted on low host memory)"

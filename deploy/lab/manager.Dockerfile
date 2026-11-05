@@ -38,7 +38,10 @@ RUN apt-get update -qq && \
 
 WORKDIR /wazuh
 COPY . .
-RUN cd src && make deps && make TARGET=server -j4
+# Build parallelism is capped (lab memory budget, shadowtracer/docs/DEV_SETUP.md):
+# each C/C++ compile job can take ~0.5-1 GB; -j4 keeps a build under ~4 GB.
+ARG BUILD_JOBS=4
+RUN cd src && make deps && make TARGET=server -j${BUILD_JOBS}
 
 COPY deploy/lab/preloaded-vars-server.conf /wazuh/etc/preloaded-vars.conf
 RUN sed -i "s|^USER_DIR=.*|USER_DIR=\"${INSTALL_DIR}\"|" /wazuh/etc/preloaded-vars.conf

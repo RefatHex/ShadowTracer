@@ -191,6 +191,10 @@ x-closer-env: &closer-env
   CLOSER_POLL_INTERVAL_SECONDS: "30"
   METRICS_PORT: "9105"
 
+# Lab memory budget: every service has mem_limit = memswap_limit (no container
+# swap), sized from the peak measured under the 4,000/s load test plus ~30%; the
+# total must stay under 13.5 GiB (WSL 16 GB minus 2.5 GB for builds and the OS).
+# Table and method: shadowtracer/docs/DEV_SETUP.md "Lab memory budget".
 services:
   shadowtracer-master:
     build: *manager-build
@@ -198,6 +202,8 @@ services:
     hostname: shadowtracer-master
     init: true
     restart: unless-stopped
+    mem_limit: 1088m
+    memswap_limit: 1088m
     environment:
       CLUSTER_NODE_TYPE: master
       CLUSTER_NODE_NAME: master
@@ -221,6 +227,8 @@ services:
     hostname: shadowtracer-worker1
     init: true
     restart: unless-stopped
+    mem_limit: 1088m
+    memswap_limit: 1088m
     environment:
       CLUSTER_NODE_TYPE: worker
       CLUSTER_NODE_NAME: worker1
@@ -246,6 +254,8 @@ services:
     hostname: shadowtracer-worker2
     init: true
     restart: unless-stopped
+    mem_limit: 1088m
+    memswap_limit: 1088m
     environment:
       CLUSTER_NODE_TYPE: worker
       CLUSTER_NODE_NAME: worker2
@@ -283,6 +293,8 @@ services:
     hostname: shadowtracer-worker-test
     init: true
     restart: unless-stopped
+    mem_limit: 1088m
+    memswap_limit: 1088m
     environment:
       CLUSTER_NAME: shadowtracer-test
       CLUSTER_NODE_TYPE: master
@@ -309,6 +321,8 @@ services:
     image: haproxy:2.9-alpine
     hostname: shadowtracer-lb
     restart: unless-stopped
+    mem_limit: 32m
+    memswap_limit: 32m
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
@@ -342,6 +356,8 @@ services:
     hostname: agent-ubuntu-1
     init: true
     restart: unless-stopped
+    mem_limit: 192m
+    memswap_limit: 192m
     # Phase 5C-1: auditd needs this to load rules / enable the kernel
     # audit subsystem (confirmed directly - it starts but immediately
     # exits on "Error sending enable request (Operation not permitted)"
@@ -381,6 +397,8 @@ services:
     hostname: agent-ubuntu-2
     init: true
     restart: unless-stopped
+    mem_limit: 192m
+    memswap_limit: 192m
     cap_add:
       - AUDIT_CONTROL
     environment:
@@ -404,6 +422,8 @@ services:
     hostname: agent-rocky-1
     init: true
     restart: unless-stopped
+    mem_limit: 192m
+    memswap_limit: 192m
     cap_add:
       - AUDIT_CONTROL
     environment:
@@ -427,6 +447,8 @@ services:
     hostname: agent-rocky-2
     init: true
     restart: unless-stopped
+    mem_limit: 192m
+    memswap_limit: 192m
     cap_add:
       - AUDIT_CONTROL
     environment:
@@ -445,8 +467,9 @@ services:
   kafka:
     image: apache/kafka:3.9.0
     hostname: kafka
-    mem_limit: 768m
     restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 768m
     environment:
       CLUSTER_ID: "${KAFKA_CLUSTER_ID:?set KAFKA_CLUSTER_ID in deploy/lab/.env, see .env.example}"
       KAFKA_NODE_ID: 1
@@ -554,8 +577,9 @@ services:
   ch-keeper:
     image: clickhouse/clickhouse-keeper:24.8
     hostname: ch-keeper
-    mem_limit: 256m
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
     volumes:
       - ./clickhouse/keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
       - ch-keeper-data:/var/lib/clickhouse
@@ -576,8 +600,9 @@ services:
   ch-clickhouse-1:
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-1
-    mem_limit: 2304m
     restart: unless-stopped
+    mem_limit: 2304m
+    memswap_limit: 2304m
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:
@@ -614,8 +639,9 @@ services:
   ch-clickhouse-2:
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-2
-    mem_limit: 2304m
     restart: unless-stopped
+    mem_limit: 2304m
+    memswap_limit: 2304m
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     environment:
@@ -649,8 +675,9 @@ services:
   postgres:
     image: postgres:16-alpine
     hostname: postgres
-    mem_limit: 256m
     restart: unless-stopped
+    mem_limit: 320m
+    memswap_limit: 320m
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in deploy/lab/.env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/lab/.env}
@@ -679,6 +706,8 @@ services:
     hostname: shipper-worker1
     command: ["python3", "run_shipper.py"]
     restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
     environment:
       <<: *shipper-env
       MANAGER_NAME: shadowtracer-worker1
@@ -705,6 +734,8 @@ services:
     hostname: shipper-worker2
     command: ["python3", "run_shipper.py"]
     restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
     environment:
       <<: *shipper-env
       MANAGER_NAME: shadowtracer-worker2
@@ -732,6 +763,8 @@ services:
     hostname: shipper-worker-test
     command: ["python3", "run_shipper.py"]
     restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
     environment:
       <<: *shipper-test-env
       MANAGER_NAME: shadowtracer-worker-test
@@ -756,6 +789,8 @@ services:
     hostname: writer-1
     command: ["python3", "run_writer.py"]
     restart: unless-stopped
+    mem_limit: 192m
+    memswap_limit: 192m
     environment: *writer-env
     volumes:
       - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
@@ -776,6 +811,8 @@ services:
     hostname: writer-2
     command: ["python3", "run_writer.py"]
     restart: unless-stopped
+    mem_limit: 192m
+    memswap_limit: 192m
     environment: *writer-env
     volumes:
       - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
@@ -798,6 +835,8 @@ services:
     hostname: correlate-1
     command: ["python3", "run_correlator.py"]
     restart: unless-stopped
+    mem_limit: 288m
+    memswap_limit: 288m
     environment: *correlate-env
     volumes:
       - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
@@ -818,6 +857,8 @@ services:
     hostname: correlate-2
     command: ["python3", "run_correlator.py"]
     restart: unless-stopped
+    mem_limit: 288m
+    memswap_limit: 288m
     environment: *correlate-env
     volumes:
       - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
@@ -838,6 +879,8 @@ services:
     hostname: closer-1
     command: ["python3", "run_closer.py"]
     restart: unless-stopped
+    mem_limit: 96m
+    memswap_limit: 96m
     environment: *closer-env
     depends_on:
       postgres:
@@ -856,6 +899,8 @@ services:
     hostname: closer-2
     command: ["python3", "run_closer.py"]
     restart: unless-stopped
+    mem_limit: 96m
+    memswap_limit: 96m
     environment: *closer-env
     depends_on:
       postgres:
@@ -875,6 +920,8 @@ services:
     image: shadowtracer-lab/console-backend:local
     hostname: console-backend-1
     restart: unless-stopped
+    mem_limit: 160m
+    memswap_limit: 160m
     environment: *console-backend-env
     volumes:
       - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
@@ -896,6 +943,8 @@ services:
     image: shadowtracer-lab/console-backend:local
     hostname: console-backend-2
     restart: unless-stopped
+    mem_limit: 160m
+    memswap_limit: 160m
     environment: *console-backend-env
     volumes:
       - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
@@ -917,6 +966,8 @@ services:
     image: shadowtracer-lab/console-caddy:local
     hostname: caddy
     restart: unless-stopped
+    mem_limit: 96m
+    memswap_limit: 96m
     depends_on:
       - console-backend-1
       - console-backend-2

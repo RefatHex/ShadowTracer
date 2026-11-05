@@ -138,7 +138,11 @@ run_step "frontend (lint, test, build)" run_frontend
 # path is never triggered. Reproduced directly: `cp -r` failed this way
 # at `make TARGET=agent` every time; `cp -a` passed every time.
 run_agent_build() {
-    docker run --rm -v "$REPO_ROOT:/src:ro" ubuntu:22.04 bash -c '
+    # Lab memory budget (shadowtracer/docs/DEV_SETUP.md): capped container and
+    # -j BUILD_JOBS (default 4), never -j$(nproc) - a 12-job C/C++ build next to
+    # the running lab exhausted WSL's memory on 2026-11-05.
+    docker run --rm --memory 6g --memory-swap 6g -e BUILD_JOBS="${BUILD_JOBS:-4}" \
+        -v "$REPO_ROOT:/src:ro" ubuntu:22.04 bash -c '
         set -e
         cp -a /src /build
         cd /build
@@ -147,7 +151,7 @@ run_agent_build() {
             git curl wget ca-certificates
         cd src
         make deps TARGET=agent
-        make TARGET=agent -j"$(nproc)"
+        make TARGET=agent -j"$BUILD_JOBS"
     '
 }
 run_step "agent build (ubuntu:22.04)" run_agent_build

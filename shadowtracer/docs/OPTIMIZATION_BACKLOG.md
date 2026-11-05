@@ -47,6 +47,7 @@ manager; shipper ~10,000/s; correlator ~530–550/s and Postgres-bound.
 | T9 | Throughput of new feature consumers | TI matcher, ML scorer, embedder not measured yet | Measure each consumer's ceiling when it is built (feature phases record it here) | Per feature | S |
 | T10 | analysisd collapses on many-source brute force | Moved to **S9** (security) on 2026-11-05: attacker-triggered event loss | — | MOVED S9 | — |
 | T11 | integratord is serial fork/exec per alert | `src/os_integrator/integrator.c:278-460`: one process per matching alert, waits for it. Estimated 3–20 alerts/s with an HTTPS call (not measured) | Measure in 6.3 with the VT script; if FIM bursts lag, run the script as a long-lived worker fed by a queue | LATER | S |
+| T12 | Load-test syslog over UDP drops in the kernel when the pipeline is busy | 2026-11-05, test manager, 4,000/s for 60 s, no reloads: 4,561 of 240,000 lost as UDP `RcvbufErrors` with the shipper/writers/correlators running (10,349 with the manager's memory cap lifted, so not the cap); 0 with the shipper stopped (THREAT_INTEL.md §9). analysisd itself dropped nothing. Lab agents use TCP, so this affects load tests and real UDP syslog senders, not agents | Larger receive buffer for the manager's syslog socket (`rmem`), pace load tests against the pipeline's ceiling, or send load over TCP syslog | LATER | S |
 
 ## 2. Reliability and operations
 
@@ -58,6 +59,7 @@ manager; shipper ~10,000/s; correlator ~530–550/s and Postgres-bound.
 | R4 | Post-crash ClickHouse recovery is manual | `recover-ch-after-crash.sh` needed a human approval | Runbook plus automated detection of broken parts in `/health/detail` | LATER | S |
 | R5 | Lab power cuts | Three cuts in one round | UPS for the dev machine | Now (non-code) | — |
 | R6 | Warm-up threshold (30 incidents) is a guess | Lab data only | Recheck against a pilot tenant | LATER | S |
+| R7 | Lab memory budget per service | WSL froze from memory exhaustion on 2026-11-05 (no limits on managers/console, `make -j10` build). Every service now has `mem_limit` = `memswap_limit`, total 13,056 MiB of the 13.5 GiB budget (`DEV_SETUP.md` "Lab memory budget"). Only ~770 MiB is left | Re-measure and re-budget whenever a service is added: Qdrant (~300 MB+), MLflow (+ its Postgres), MISP (2-3 GB) will not fit without raising WSL memory, trimming ClickHouse, or moving them to their own compose profile run on demand | Per feature | S |
 
 ## 3. Security (before first customer)
 

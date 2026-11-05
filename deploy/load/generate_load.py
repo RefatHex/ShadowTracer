@@ -51,6 +51,34 @@ def load_corpus(path=FIXTURES_PATH):
 
 AGENTS = 50  # distinct simulated agents (--agents)
 
+# Lab memory guard (2026-11-05: WSL froze from memory exhaustion during a load
+# test). Checked before the step and every second during it; below the floor
+# the step stops cleanly with exit code 3 instead of pushing the host into swap.
+MIN_MEM_AVAILABLE_MB = 1536
+MEM_ABORT_EXIT = 3
+_mem_next_check = 0.0
+
+
+def mem_available_mb() -> int:
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    raise RuntimeError("MemAvailable missing from /proc/meminfo")
+
+
+def mem_guard(sent: int) -> None:
+    global _mem_next_check
+    now = time.monotonic()
+    if now < _mem_next_check:
+        return
+    _mem_next_check = now + 1.0
+    avail = mem_available_mb()
+    if avail < MIN_MEM_AVAILABLE_MB:
+        print(f"ABORT: MemAvailable {avail} MB < {MIN_MEM_AVAILABLE_MB} MB after {sent} events - "
+              f"step stopped, not pushed further", flush=True)
+        sys.exit(MEM_ABORT_EXIT)
+
 
 def tag_json_event(event: dict, run_id: str, seq: int) -> dict:
     """Returns a copy with agent identity rewritten to carry run_id - the
@@ -95,6 +123,7 @@ def run_shipper(args, corpus):
             f.write(json.dumps(event) + "\n")
             seq += 1
             sent_since_report += 1
+            mem_guard(seq)
             if seq % 50 == 0:
                 f.flush()
             now = time.time()
@@ -144,6 +173,7 @@ def run_kafka(args, corpus):
         )
         seq += 1
         sent_since_report += 1
+        mem_guard(seq)
         producer.poll(0)
         now = time.time()
         if now >= next_report:
@@ -182,6 +212,7 @@ def run_syslog(args, corpus):
         sock.sendto(packet.encode(), (args.host, args.port))
         seq += 1
         sent_since_report += 1
+        mem_guard(seq)
         now = time.time()
         if now >= next_report:
             elapsed = now - t0
@@ -196,8 +227,11 @@ def run_syslog(args, corpus):
 
 
 def main():
+    global MIN_MEM_AVAILABLE_MB
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--target", required=True, choices=["shipper", "kafka", "syslog"])
+    p.add_argument("--min-mem-available-mb", type=int, default=MIN_MEM_AVAILABLE_MB,
+                   help="abort the step (exit 3) if host MemAvailable drops below this")
     p.add_argument("--rate", type=int, required=True, help="events/s")
     p.add_argument("--duration", type=int, required=True, help="seconds")
     p.add_argument("--run-id", required=True, help="tag embedded in every event, for later cleanup")
@@ -211,6 +245,8 @@ def main():
     p.add_argument("--agents", type=int, default=50,
                    help="shipper/kafka targets: distinct simulated agent identities (agent.id) to spread events over")
     args = p.parse_args()
+    MIN_MEM_AVAILABLE_MB = args.min_mem_available_mb
+    mem_guard(0)  # refuse to start a step on a host that is already short
 
     global AGENTS
     AGENTS = args.agents

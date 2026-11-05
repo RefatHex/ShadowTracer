@@ -13,7 +13,10 @@ RUN dnf install -y -q --allowerasing \
 
 WORKDIR /wazuh
 COPY . .
-RUN cd src && make deps && make TARGET=agent -j4
+# Build parallelism is capped (lab memory budget, shadowtracer/docs/DEV_SETUP.md):
+# each C/C++ compile job can take ~0.5-1 GB; -j4 keeps a build under ~4 GB.
+ARG BUILD_JOBS=4
+RUN cd src && make deps && make TARGET=agent -j${BUILD_JOBS}
 
 FROM rockylinux:9 AS runtime
 
