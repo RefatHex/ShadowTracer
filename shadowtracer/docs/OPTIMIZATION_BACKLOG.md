@@ -45,7 +45,7 @@ manager; shipper ~10,000/s; correlator ~530–550/s and Postgres-bound.
 | T7 | TLS/SASL overhead unmeasured | No plaintext listener left to compare | One comparison run on a throwaway broker | LATER | S |
 | T8 | fsync cost on writes | Turned on after power-cut corruption | Measure write ceiling with/without; production relies on replicas on separate hosts | LATER | S |
 | T9 | Throughput of new feature consumers | TI matcher, ML scorer, embedder not measured yet | Measure each consumer's ceiling when it is built (feature phases record it here) | Per feature | S |
-| T10 | analysisd collapses on many-source brute force | 6.0 spike (`design/THREAT_INTEL.md` §9.1): sshd "invalid user" lines from unique source IPs at 3,000/s offered → 1,485–2,301 processed/s, queue full, drops from ~30 s; analysisd still at 553% CPU after the sender stopped. Likely rule 5712 (`if_matched_sid 5710`, `same_source_ip`, 120 s window) scanning a list that never finds 8 matches. Not caused by TI. | Confirm with perf; then cap/ index the per-rule prev-matched list by srcip, or lower the timeframe for this rule family | NEXT-OPT | M |
+| T10 | analysisd collapses on many-source brute force | Moved to **S9** (security) on 2026-11-05: attacker-triggered event loss | — | MOVED S9 | — |
 | T11 | integratord is serial fork/exec per alert | `src/os_integrator/integrator.c:278-460`: one process per matching alert, waits for it. Estimated 3–20 alerts/s with an HTTPS call (not measured) | Measure in 6.3 with the VT script; if FIM bursts lag, run the script as a long-lived worker fed by a queue | LATER | S |
 
 ## 2. Reliability and operations
@@ -73,6 +73,7 @@ From `THREAT_MODEL.md` §11–12. Kafka TLS/SASL + per-tenant topics are DONE.
 | S6 | Secrets rotation | Runbook written; implement automation | LATER | M |
 | S7 | Agent↔manager channel never re-audited | Review or explicit out-of-scope decision | BFC | S |
 | S8 | VM ports open on all interfaces | `docker-compose.vm.yml` override only, enrollment password on | While VMs are used | S |
+| S9 | **Attacker-triggered event loss in analysisd** (was T10). An invalid-user SSH spray from many source IPs at 3,000/s held analysisd to 1,485–2,301 processed/s with drops from ~30 s and 553% CPU after the sender stopped (`design/THREAT_INTEL.md` §9.1). An attacker who can reach sshd on monitored hosts can blind the manager to everything else. Likely rule 5712 (`if_matched_sid 5710`, `same_source_ip`, 120 s) scanning a history that never reaches 8 matches. Not caused by TI | Confirm with perf; then index the per-rule prev-matched list by source IP or bound the scan; drop alarm in `/health/detail` (events_dropped rate); per-agent EPS limits as a stopgap | BFC | M |
 
 ## 4. Rebrand
 
@@ -98,6 +99,6 @@ From `THREAT_MODEL.md` §11–12. Kafka TLS/SASL + per-tenant topics are DONE.
 | U1 | GitHub Actions blocked at account level | `runner_id: 0` on every run; local `run-ci.sh` in use | Contact GitHub Support | — |
 | U2 | `.deb`/`.rpm` packaging | Needs a Linux build VM (WSL2 lacks vsyscall) | BFC | M |
 | U3 | CMocka load-balancer regression test | Never run | LATER | S |
-| U4 | Upstream bug reports to Wazuh | Buffer requeue, LB NULL pointer, `wazuh_apid.py` shebang | LATER | S |
+| U4 | Upstream bug reports to Wazuh | Buffer requeue, LB NULL pointer, `wazuh_apid.py` shebang; from 6.0 (`design/THREAT_INTEL.md` §1.5, §9.4-9.5, §9.2): **hot reload frees queued events and unwritten alerts** (29/240,000 lost over 5 reloads; fix itself in 6.1a), **CDB fd/mmap leak per reload**, **`address_match_key_value` inverted**; also `PUT /lists/files` not atomic and rejects URL keys, reload reports success while dropping rules, `Lists_OP_MakeCDB` ignores `cdb_make_add` errors and leaks the temp FILE on a failed open (`lists_make.c:52-59,140`) | LATER | S |
 | U5 | Tenancy model revisit | Dedicated managers chosen; shared model documented | When tenant count grows | — |
-| U6 | Upstream reports from the 6.0 TI audit | `design/THREAT_INTEL.md` §1, §9: hot reload frees queued events (the fix itself is 6.1, not deferred); CDB fd/mmap leak per reload; `address_match_key_value` result inverted; `PUT /lists/files` not atomic and rejects URL keys; `Lists_OP_MakeCDB` ignores `cdb_make_add` errors and leaks the temp FILE on a failed open (`lists_make.c:52-59,140`) | LATER | S |
+| U6 | Upstream reports from the 6.0 TI audit | Merged into U4 on 2026-11-05 | MERGED U4 | — |

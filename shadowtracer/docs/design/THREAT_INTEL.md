@@ -1,6 +1,12 @@
 # Phase 6.0 — Threat intelligence: Wazuh alignment audit and design
 
-Status: **design, awaiting approval** (no feature code in 6.0). Date: 2026-11-05.
+Status: **design; 6.0 decisions recorded in §0.1** (no feature code in 6.0). Date: 2026-11-05.
+
+Revision 2 (6.0 addendum, same day): added §1.10 observable coverage from real lab
+data, §2 source catalogue with abuse.ch and YARA-X, §4.6–§4.16 (normalisation, entry
+validation, allowlists and warninglists, poisoning, confidence and aging, multi-source
+dedup, feed failure, TLP, analyst context, feed metrics, list version per manager),
+a STIX 2.1-compatible store schema in §4.1, updated §7 licences and §8 VERIFY.
 Scope: `FEATURE_PLAN.md` §4 / 6.0. Source cited is this repository at the 4.14.8 fork
 point plus ShadowTracer changes (`UPSTREAM.md`); line numbers are from `main` at
 `bc2c901516`. Spike measurements are in §9 with commands and output.
@@ -45,6 +51,23 @@ point plus ShadowTracer changes (`UPSTREAM.md`); line numbers are from `main` at
    list leaves analysisd's ceiling at the baseline's ~4,000/s and costs no measurable
    CPU at 4–20k/s lookups per second (§9.3). Reload of the whole ruleset takes
    0.36–0.98 s (§9.4).
+
+### 0.1 Owner decisions on 6.0 (2026-11-05)
+
+- Split `worker-test` into its own cluster: **approved** (6.1a).
+- analysisd hot-reload fix as an inherited-file change: **approved** (6.1a).
+- OTX and VirusTotal: **customer-supplied keys** in the product, under the customer's own
+  agreement; ShadowTracer's own keys only for the lab and the report.
+- abuse.ch is the default commercial-safe feed family, terms checked in §7: only
+  Feodo Tracker, SSL Blacklist and YARAify are CC0; URLhaus, ThreatFox and
+  MalwareBazaar need a Spamhaus subscription for commercial use, so they follow the
+  customer-key model too.
+- `address_match_key_value` is never used; a test fails if any generated or shipped
+  ShadowTracer rule uses it (6.1a item 3).
+- T10 (many-source invalid-user spray halves analysisd) is an attacker-triggered
+  event-loss risk: moved to the security section of `OPTIMIZATION_BACKLOG.md`.
+- The reload loss, the fd/mmap leak and the inverted lookup are on the upstream report
+  list (backlog U4).
 
 ---
 
@@ -316,6 +339,44 @@ Built-in VirusTotal (`integrations/virustotal.py`, rules `ruleset/rules/0490-vir
   `alerts.json` rotates past it, and turns alert volume into API load on MISP/OTX. §2
   forbids it on the hot path; this design keeps it off every per-alert path.
 
+### 1.10 Observable coverage in the lab today (real data)
+
+Queried from ClickHouse `shadowtracer.events` on 2026-11-05. Main tenant
+`eec7135f…`: 18,781 alerts, 2026-10-01 → 2026-11-04. (The test tenant's 4.4 M alerts
+are almost all synthetic load-test traffic and are left out.)
+
+```
+SELECT decoder_name, location, rule_id, count() n, countIf(src_endpoint_ip!='') with_src,
+       uniqExact(src_endpoint_ip) ips
+FROM events WHERE tenant_id='eec7135f91067739afe1cd3b3273bb72' GROUP BY 1,2,3 ORDER BY n DESC
+ json   osquery            24010 5743     0 | sca  sca  19008 5121 0 | sca sca 19007 4614 0 | sca sca 19009 2156 0
+ sshd   /var/log/auth.log   5710  498   498  (5 distinct IPs)
+ sshd   /var/log/auth.log   5712    6     6
+ syscheck_new_entry syscheck 554    1     0   … (dpkg, adduser, agent start/stop rows omitted)
+-- every tenant: dst_endpoint_ip is empty on every row
+-- extra_fields keys matching url|domain|host|query|hash|sha|md5|dstip|dest_ip: only
+--   data.srcip (sshd), data.osquery.columns.hostname (the agent's own name), syscheck.{md5,sha1,sha256}_after (1 row)
+```
+
+Agent log sources (`<localfile>` in each agent's `ossec.conf`): `auth.log` / `secure`,
+`dpkg.log`, `audit.log` (auditd, Phase 5C-1), journald (Rocky), command outputs;
+FIM `<directories>` on all four agents; osquery and SCA.
+
+| IOC type | Lab source today | Sample (real lab alert) | Can match now? | What would enable it |
+|---|---|---|---|---|
+| Source IP | sshd via `auth.log`/`secure`, rules 5710/5712 (`data.srcip`) | `Oct  9 18:14:34 agent-ubuntu-1 sshd[120977]: Invalid user smoketest1791569673 from ::1 port 33734` → 5710, `src_endpoint_ip=::1` | **yes** (CDB on 5700 children, `ti-matcher` on 5710/5712) | already there; more sources come with any network log below |
+| Destination IP | **none**: no lab decoder emits `dstip` | — | **no** | firewall logs (iptables/nftables `LOG` on agents, `iptables` decoder), Suricata `eve.json` on a lab sensor (`dest_ip`), Sysmon event 3 on the Windows VM (D1) |
+| Domain | **none** | — | **no** | DNS query logs: Suricata DNS (`dns.rrname`), Sysmon 22 (`win.eventdata.queryName`, D1), unbound/bind query logs; proxy logs |
+| URL | **none** | — | **no** | Squid access log (full URL in `url`), Suricata HTTP (`http.hostname` + `http.url`); web-server logs carry only paths |
+| File hash | FIM (syscheck) rules 550/554 | 554 "File added to the system." on agent-ubuntu-1, `syscheck.path=/var/ossec/lab-fim-test/testfile.txt`, `sha256_after=852e5319…95b7` | **yes** (CDB on 550/554, VirusTotal on new hashes) | also Sysmon 1/15 hashes after a decoder split (§1.3) |
+
+So today only **source IPs** and **FIM hashes** can match. Destination IP, domain and URL
+IOCs can be stored, retro-hunted and shown, but they cannot match anything until a
+network/DNS/proxy log source is added. The cheapest lab option is iptables `LOG` rules on
+the Linux agents (destination IPs). Suricata on one lab sensor would add DNS and HTTP.
+6.1 should add one of them so the dst-IP/domain paths are exercised end to end (VERIFY
+6.1-13).
+
 ---
 
 ## 2. Per-source design
@@ -326,15 +387,40 @@ Built-in VirusTotal (`integrations/virustotal.py`, rules `ruleset/rules/0490-vir
 | **MISP** | feed-only by default: MISP-format feeds (`manifest.json` + event files), attributes with `to_ids=true`; server mode (6.2, separate compose profile) via PyMISP `restSearch(to_ids=True, published=True, timestamp=…)` | same | periodic only |
 | **VirusTotal** | not a feed. (a) FIM: integratord runs a new `custom-shadowtracer-virustotal` script (v3, SHA-256, per-tenant key, on-disk cache, token-bucket budget, same output shape so rules 87100-87106 still apply); (b) on demand from the console through the backend with the same cache and budget. Hashes only, never uploads | VT verdicts land in the IOC store (`source=virustotal`) so later sightings hit locally | per **new** FIM hash, capped by budget; per analyst click |
 
-Known-bad hashes from OTX/MISP are matched locally by CDB on FIM rules before any VT
-call is needed.
+| **abuse.ch Feodo Tracker** | botnet C2 IP blocklist (JSON/CSV download), CC0 | CDB + `ti-matcher` | periodic only |
+| **abuse.ch ThreatFox / URLhaus / MalwareBazaar** | REST/export with the customer's Auth-Key (Spamhaus subscription for commercial use); ThreatFox gives IP:port, domains, URLs, hashes with malware family and `confidence_level` | CDB + `ti-matcher` (+ hash context for FIM) | periodic only |
+
+Known-bad hashes from OTX/MISP/abuse.ch are matched locally by CDB on FIM rules before
+any VT call is needed.
+
+Keys: OTX, VirusTotal, ThreatFox/URLhaus/MalwareBazaar and MISP servers use **keys the
+customer supplies** under their own agreement (§0.1), stored per tenant as secrets;
+ShadowTracer's own keys are used only in the lab.
+
+**VirusTotal is per-tenant opt-in** (`ti_tenant_settings.vt_enabled`, default off,
+admin-only, audited). With it off, no hash from that tenant is ever sent: integratord
+is not configured with the VT script on that tenant's managers, and the console's
+"check on VirusTotal" button is disabled. With it on, only SHA-256 hashes are sent,
+never files, and never hashes whose IOC or FIM context is TLP:RED or AMBER+STRICT (§4.13).
+
+### 2.1 abuse.ch feeds and YARA-X: include now, later, or drop
+
+| Item | Licence / terms | Proposal | Why |
+|---|---|---|---|
+| Feodo Tracker (C2 IPs) | CC0, commercial use free (abuse.ch terms §3.4) | **include now** (6.1, default global feed) | the one commercial-safe IP feed; lab sshd source IPs can match |
+| SSL Blacklist | CC0 (§3.4) | **later** | needs TLS certificate or JA3 logs, none in the lab |
+| YARAify | CC0 (§3.4) | **later** (with YARA-X) | rule/scan service, only useful once files are scanned |
+| ThreatFox | commercial use "may require a paid subscription" (§4.1) | **include now** as a customer-key source (6.2), lab/report use under the non-commercial terms | multi-type IOCs with malware family and confidence; best confidence input |
+| URLhaus | same as ThreatFox | **later** | no URL or domain log source in the lab yet (§1.10) |
+| MalwareBazaar | same as ThreatFox | **later, with 6.3** | hash context for FIM next to VirusTotal; fewer VT calls |
+| YARA-X | BSD-3-Clause ([github.com/VirusTotal/yara-x](https://github.com/VirusTotal/yara-x)) | **later** (not in 6.x) | Wazuh FIM gives hashes, not file contents; scanning needs an agent-side or quarantine design of its own, never on the hot path |
 
 ## 3. What stays Wazuh-native, what ShadowTracer builds
 
 | Piece | Owner | Why |
 |---|---|---|
 | IOC lookup inside analysisd (CDB + rules) | Wazuh-native | only analysisd sees events that produce no alert |
-| Rule attachment for non-alerting events | ShadowTracer rule file (new) | children loaded after native siblings (§1.4) |
+| Rule attachment for non-alerting events | ShadowTracer rule file (new) | `accuracy="0"` children run after native siblings (§1.4) |
 | FIM hash match (550/554) | Wazuh-native, ShadowTracer lists | replacing "file added" with "known-bad hash" is the intended result |
 | List sync master → workers | Wazuh cluster | already syncs `etc/lists` (§1.7) |
 | Reload | Wazuh hot reload, orchestrated by ShadowTracer | §4.4 |
@@ -373,60 +459,105 @@ recorded once because the `ti_hits` key is the same.
 
 ## 4. Store, generation, distribution, reload
 
-### 4.1 IOC store (Postgres, ShadowTracer database)
+### 4.1 IOC store (Postgres, ShadowTracer database), STIX 2.1-compatible
+
+Field names follow the STIX 2.1 Indicator object (OASIS STIX 2.1, §4.7 Indicator,
+[docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html](https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html))
+so a later TAXII export is a projection, not a migration. One row per **observable per
+tenant scope**. Each source's claim about it is a separate `ioc_sightings` row: that is
+what makes multi-source dedup (§4.11) and per-source trust (§4.10) possible.
 
 ```sql
 CREATE TYPE ioc_type AS ENUM ('ipv4','ipv6','cidr4','cidr6','domain','url','md5','sha1','sha256');
+CREATE TYPE tlp AS ENUM ('clear','green','amber','amber+strict','red');
 
 CREATE TABLE ti_sources (
   id            bigserial PRIMARY KEY,
   tenant_id     text NULL,              -- NULL = global source
-  kind          text NOT NULL,          -- otx | misp_feed | misp_server | virustotal | manual
+  kind          text NOT NULL,          -- otx | misp_feed | misp_server | abusech_feodo | abusech_threatfox | virustotal | manual
   name          text NOT NULL,
-  config        jsonb NOT NULL,         -- URLs, filters; secrets only by reference
+  stix_identity text NOT NULL,          -- created_by_ref: identity--<uuid5(source)>
+  trust         real NOT NULL CHECK (trust BETWEEN 0 AND 1),          -- §4.10
+  default_tlp   tlp NOT NULL,
+  config        jsonb NOT NULL,         -- URLs, filters; secrets only by reference (customer-supplied keys)
   enabled       boolean NOT NULL DEFAULT true,
-  default_ttl   interval NOT NULL,
-  sync_cursor   text,                   -- OTX modified_since / MISP timestamp
-  last_sync_at  timestamptz,
-  last_error    text
+  sync_cursor   text,
+  last_success_at timestamptz, last_attempt_at timestamptz, last_error text,
+  last_good_snapshot_sha256 text        -- §4.12
 );
 
-CREATE TABLE iocs (
+CREATE TABLE iocs (                     -- STIX: indicator
   id            bigserial PRIMARY KEY,
+  stix_id       text NOT NULL UNIQUE,   -- indicator--<uuid5(tenant scope, type, value)>, stable across syncs
   tenant_id     text NULL,              -- NULL = global; else private to that tenant
   type          ioc_type NOT NULL,
-  value         text NOT NULL,          -- normalised (lower-case hex/domains, canonical IP/CIDR, IDNA)
-  source_id     bigint NOT NULL REFERENCES ti_sources(id),
-  source_ref    text,                   -- OTX pulse id / MISP event+attribute uuid
-  confidence    smallint NOT NULL CHECK (confidence BETWEEN 0 AND 100),
-  tlp           text,
-  tags          text[] NOT NULL DEFAULT '{}',
-  first_seen    timestamptz NOT NULL,
+  value         text NOT NULL,          -- normalised (§4.6)
+  pattern       text NOT NULL,          -- STIX pattern, e.g. [ipv4-addr:value = '198.51.100.7']
+  pattern_type  text NOT NULL DEFAULT 'stix',
+  indicator_types text[] NOT NULL,      -- malicious-activity, anomalous-activity, …
+  name          text, description text,
+  labels        text[] NOT NULL DEFAULT '{}',   -- tags, malware family
+  kill_chain_phases jsonb NOT NULL DEFAULT '[]',-- [{kill_chain_name:'mitre-attack', phase_name:…}] + technique ids
+  tlp           tlp NOT NULL,           -- most restrictive over its sightings (object_marking_refs on export)
+  confidence    smallint NOT NULL,      -- combined, 0-100 (§4.10), recomputed on sighting change
+  valid_from    timestamptz NOT NULL,   -- first_seen across sources
   last_seen     timestamptz NOT NULL,
-  expires_at    timestamptz NOT NULL,
-  revoked_at    timestamptz NULL,
-  created_at    timestamptz NOT NULL DEFAULT now(),
-  UNIQUE NULLS NOT DISTINCT (tenant_id, type, value, source_id)   -- PostgreSQL 15+, lab runs 16
+  valid_until   timestamptz NOT NULL,   -- = expiry (§4.10)
+  revoked       boolean NOT NULL DEFAULT false,
+  created       timestamptz NOT NULL DEFAULT now(),
+  modified      timestamptz NOT NULL DEFAULT now(),
+  UNIQUE NULLS NOT DISTINCT (tenant_id, type, value)   -- PostgreSQL 15+, lab runs 16
 );
-CREATE INDEX ON iocs (tenant_id, type) WHERE revoked_at IS NULL;
-CREATE INDEX ON iocs (created_at);     -- retro-hunt watermark
+CREATE INDEX ON iocs (tenant_id, type) WHERE NOT revoked;
+CREATE INDEX ON iocs (created);         -- retro-hunt watermark
 
-CREATE TABLE ti_list_versions (         -- what was generated and where it is live
+CREATE TABLE ioc_sightings (            -- one row per (ioc, source): provenance and analyst context
+  ioc_id        bigint NOT NULL REFERENCES iocs(id),
+  source_id     bigint NOT NULL REFERENCES ti_sources(id),
+  source_ref    text,                   -- OTX pulse id / MISP event+attribute uuid / abuse.ch id
+  reference_url text,                   -- external_references[].url
+  source_confidence smallint,           -- what the source said, 0-100 or NULL
+  tlp           tlp NOT NULL,
+  labels        text[] NOT NULL DEFAULT '{}',
+  mitre         text[] NOT NULL DEFAULT '{}',
+  first_seen    timestamptz NOT NULL, last_seen timestamptz NOT NULL,
+  revoked_at    timestamptz NULL,
+  PRIMARY KEY (ioc_id, source_id)
+);
+
+CREATE TABLE ti_allowlist (             -- §4.8
+  id bigserial PRIMARY KEY,
+  tenant_id   text NULL,                -- NULL = global
+  type        ioc_type NOT NULL, value text NOT NULL,   -- exact value or CIDR
+  kind        text NOT NULL,            -- warninglist | manual | fp_marking | protected_asset
+  reason      text NOT NULL, origin_ref text,          -- warninglist name / ti_hit id
+  created_by  text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at  timestamptz NULL
+);
+
+CREATE TABLE ti_tenant_settings (
+  tenant_id text PRIMARY KEY, vt_enabled boolean NOT NULL DEFAULT false,
+  source_trust_overrides jsonb NOT NULL DEFAULT '{}', retro_days smallint NOT NULL DEFAULT 7
+);
+
+CREATE TABLE ti_list_versions (         -- §4.16: what was generated and where it is live
   tenant_id text NOT NULL, list_name text NOT NULL, sha256 text NOT NULL,
   entries integer NOT NULL, generated_at timestamptz NOT NULL,
-  node_status jsonb NOT NULL,           -- {node: {synced_at, reloaded_at}}
+  node_status jsonb NOT NULL,           -- {node: {txt_sha256, cdb_sha256, synced_at, reloaded_at, reload_result}}
   PRIMARY KEY (tenant_id, list_name, sha256)
 );
 ```
 
 ClickHouse `ti_hits` (ReplicatedReplacingMergeTree, ORDER BY
-`(tenant_id, alert_time, cluster_node, alert_id, ioc_type, ioc_value)`): columns for
-the IOC id, sources, confidence, `origin` (`cdb` | `matcher` | `retro`) and the
-incident id when known. Replays and retro-hunt re-runs collapse to one row.
+`(tenant_id, alert_time, cluster_node, alert_id, ioc_type, ioc_value)`): IOC id,
+`sources Array(String)`, combined confidence, `origin` (`cdb` | `matcher` | `retro`),
+incident id when known, analyst verdict when marked. Replays and retro-hunt re-runs
+collapse to one row. `ti_source_metrics` is described in §4.15.
 
-Upserts: an IOC seen again refreshes `last_seen` and `expires_at`; a source that
-withdraws it (OTX pulse removed, MISP `to_ids` false or attribute deleted) sets
-`revoked_at`.
+Upserts: an IOC seen again refreshes its sighting's `last_seen` and the IOC's
+`valid_until`; a source that withdraws it (OTX pulse removed, MISP `to_ids` false or
+attribute deleted, abuse.ch status removed) sets that sighting's `revoked_at`; the IOC
+is revoked when no live sighting remains.
 
 ### 4.2 Per-tenant private lists under dedicated managers
 
@@ -445,18 +576,20 @@ the tenant of the topic it is reading.
 Fixed files (declared once per node in `ossec.conf`; `ossec.conf` is not synced):
 
 ```
-etc/lists/shadowtracer-ti/ipv4      address_match_key   exact IPs + octet-aligned prefixes "10.1.2."
-etc/lists/shadowtracer-ti/ipv6      match_key           quoted keys
-etc/lists/shadowtracer-ti/domain    match_key
-etc/lists/shadowtracer-ti/url       match_key           quoted keys
-etc/lists/shadowtracer-ti/md5       match_key
-etc/lists/shadowtracer-ti/sha1      match_key
-etc/lists/shadowtracer-ti/sha256    match_key
+etc/lists/shadowtracer-ti/ipv4-{high,medium}     address_match_key   exact IPs + octet-aligned prefixes "10.1.2."
+etc/lists/shadowtracer-ti/ipv6-{high,medium}     match_key           quoted keys
+etc/lists/shadowtracer-ti/domain-{high,medium}   match_key
+etc/lists/shadowtracer-ti/url-{high,medium}      match_key           quoted keys
+etc/lists/shadowtracer-ti/md5-{high,medium}      match_key
+etc/lists/shadowtracer-ti/sha1-{high,medium}     match_key
+etc/lists/shadowtracer-ti/sha256-{high,medium}   match_key
 ```
+Band lists carry the confidence (§4.10); `low` lives only in `ti-matcher`.
 
-- Select `revoked_at IS NULL AND expires_at > now() + <one sync interval>` for
-  `tenant_id IS NULL OR tenant_id = T`, sort, write `key:` lines. Validate every value
-  against a strict per-type pattern; drop and count rejects.
+- Select non-revoked IOCs with `valid_until > now() + <one sync interval>` for
+  `tenant_id IS NULL OR tenant_id = T` that the TLP rules allow for T (§4.13), minus
+  allowlists (§4.8), band by confidence (§4.10), sort, write `key:` lines with the
+  writer of §4.7.
 - IPv4 CIDRs are expanded into octet-aligned prefixes when that takes ≤ 256 entries
   (any /8, /16, /24 is one entry; a /20 is sixteen `/24` prefixes); larger expansions go
   to `ti-matcher` only.
@@ -496,11 +629,10 @@ drops queued events until the analysisd fix lands (§9.4, §6).
 
 ### 4.5 Expiry and retro-hunt
 
-- **Expiry:** `expires_at = min(source valid_until, last_seen + ttl(type, source))`.
-  Defaults (tunable per source): IPs 30 days, URLs 30 days, domains 90 days, hashes
-  365 days. Lists drop expired IOCs at the next generation (worst-case staleness = sync
-  interval + distribution time, measured in 6.1); `ti-matcher` checks `expires_at` at
-  lookup time, so it is exact.
+- **Expiry:** `valid_until` from confidence decay and hard TTLs (§4.10). Lists drop
+  expired IOCs at the next generation (worst-case staleness = sync interval +
+  distribution time, measured in 6.1); `ti-matcher` checks `valid_until` at lookup time,
+  so it is exact.
 - **Retro-hunt:** a scheduled job (every sync) takes IOCs with
   `created_at > watermark` (or re-activated) per tenant and searches the last N days
   (default 7, cap 30) of that tenant's `events` in ClickHouse: `src_endpoint_ip`,
@@ -510,6 +642,204 @@ drops queued events until the analysisd fix lands (§9.4, §6).
   `ti_hits` with `origin='retro'` (idempotent), and the watermark advances only after
   the hunt commits. Limit: only alerts are stored; events that produced no alert can't
   be retro-hunted (archives are not shipped).
+
+### 4.6 Normalisation
+
+Applied in `ti-sync` before anything is stored. Feed values are untrusted input.
+- **Refang:** `hxxp`/`hxxps` → `http`/`https`, `[.]` `(.)` `{.}` `[dot]` → `.`, `[:]` → `:`,
+  `[@]`/`[at]` → `@`; then validate. A value that is still defanged-looking afterwards
+  is rejected.
+- **Domains:** strip whitespace and a trailing `.`, lower-case, IDNA 2008 to A-labels
+  (punycode); labels 1–63 chars of `[a-z0-9-]`, total ≤ 253, at least two labels. Wildcards
+  (`*.evil.com`) become a `domain` suffix entry for `ti-matcher` only (CDB can't match
+  suffixes, §1.3).
+- **IPv4:** canonical dotted quad. Leading zeros are rejected (`010.1.1.1` is ambiguous:
+  octal or decimal).
+- **IPv6:** compressed lower-case form; IPv4-mapped `::ffff:a.b.c.d` is stored as IPv4.
+- **CIDR:** host bits masked off; IPv4 prefixes shorter than /16 and IPv6 shorter than
+  /32 are rejected from feeds (a poisoned `0.0.0.0/1` would match half the internet);
+  expansion for CDB as in §4.3.
+- **Private and special ranges excluded from global IOCs:** loopback, RFC 1918,
+  link-local, CGNAT 100.64/10, multicast, reserved, documentation ranges, unspecified,
+  and the IPv6 equivalents (`ipaddress` `is_private`/`is_reserved`/… plus 100.64/10). They
+  are allowed only in **tenant-private** intel, where a tenant can flag its own
+  internal host.
+- **URLs:** scheme and host lower-cased, host normalised as a domain, default port
+  dropped, fragment dropped, percent-encoding normalised (decode unreserved, upper-case
+  hex), length ≤ 2,048.
+- **Hashes:** lower-case hex of exactly 32/40/64 characters. Hashes of the empty file
+  (`d41d8cd98f00b204e9800998ecf8427e`, `da39a3ee5e6b4b0d3255bfef95601890afd80709`,
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`) are rejected.
+
+### 4.7 Entry validation and escaping before writing a CDB list
+
+What a raw feed value could do to a list file, from `lists_make.c`:
+
+| Crafted value | Effect if written as-is |
+|---|---|
+| embedded newline, e.g. `evil.com\n10.:` | `fgets` reads a second line (`:61`): **adds an entry**. Here a 10.0.0.0/8 prefix that turns every internal address into a TI hit (alert flood) |
+| > 65,534 bytes | `fgets` splits the line; the tail becomes its own entry |
+| unquoted `:` (IPv6, URL) | key cut at the first `:` (`:107-113`): `2001` or `http` becomes the key |
+| unbalanced `"` | line silently skipped (`:90-91`, `:126-128`): the IOC disappears |
+| empty key (`:`) | key `""`: matches an empty field value |
+| NUL byte | `strlen` truncation: a shorter key than intended |
+
+Writer rules (one function writes every list; nothing else touches the files):
+1. Only normalised values that pass the per-type grammar of §4.6 are written; the
+   grammars contain no newline, `"`, NUL, control character or whitespace. Rejects
+   are counted per source (`rejected` metric, §4.15) and never written.
+2. Keys that contain `:` (IPv6, URLs) are written as `"key":`. A URL can't contain a
+   raw `"` because §4.6 percent-encodes it.
+3. Values (after the `:`) are empty. Nothing from a feed is ever written after the
+   separator.
+4. After writing, the file is re-read and parsed with the same rules as
+   `Lists_OP_MakeCDB`. The key set must equal the intended set exactly, or nothing is
+   published.
+
+Proof required in 6.1 (VERIFY 6.1-5): a fuzz/crafted corpus (the rows above, plus random
+bytes) goes through normalise → write → re-parse with the set check (unit test), then
+through a real reload on the test manager: the reload response has no warnings, the
+expected entries match in logtest, and an injected-looking string (`10.0.0.5`) does not.
+
+### 4.8 Allowlists, warninglists and false-positive marking
+
+Three allowlist layers, all in `ti_allowlist`, applied **at list generation and in
+`ti-matcher`**. An allowlisted observable is never written to a list and never
+produces a `ti_hits` row:
+- **MISP warninglists** (CC0, [github.com/MISP/misp-warninglists](https://github.com/MISP/misp-warninglists)),
+  refreshed weekly. *Hard* (suppress): RFC 1918 and other special ranges, public DNS
+  resolvers, top-ranked domains (Tranco/Cloudflare Radar lists), the empty-file hashes.
+  *Soft* (keep, but cap confidence at 40 and tag `warninglist:<name>`): cloud and CDN
+  ranges, URL shorteners, VPN/datacenter ranges. Attackers really do use those, so
+  hiding them outright would hide real hits.
+- **Global allowlist** (operator, audited).
+- **Per-tenant allowlist** (tenant admin, audited), including **protected assets** (§4.9).
+
+**"Mark TI hit as false positive"** (console, analyst role, audited):
+1. adds `(type, value)` to **that tenant's** allowlist with `kind='fp_marking'`,
+   `origin_ref=<ti_hit id>`, optional expiry;
+2. records a **label** (verdict `false_positive`, analyst, time, IOC id, sources, incident
+   id) in the 7.0 labels table, so ML training sees it;
+3. increments the FP count of every source that listed it (§4.15);
+4. regenerates that tenant's lists at the next sync (or immediately if the analyst asks).
+It never edits the global IOC or another tenant's view.
+
+### 4.9 Poisoning: protected assets, and no automatic blocking
+
+- **Protected-asset allowlist** per tenant: the tenant's own public IPs and ranges,
+  domains, mail and VPN gateways, and known-good software hashes. A feed entry that hits
+  a protected asset is **never listed** and raises a `ti_conflict` event in
+  `/health/detail` and the console for a human to review. It may be poisoning, or the
+  asset may really be compromised; a person decides.
+- Feed-level guards: the CIDR breadth limit (§4.6), private ranges never global (§4.6),
+  and the change-volume guard of §4.12.
+- **TI never triggers automatic blocking.** No active response is bound to the
+  `shadowtracer_ti` group or to TI rule ids, and a 6.1 test fails if a generated rule or
+  `ossec.conf` binds one. SOAR (later) may propose a block from a TI hit, but only with
+  human approval.
+
+### 4.10 Confidence, per-source trust and aging
+
+- **Per-source trust** `trust ∈ [0,1]` (`ti_sources.trust`, per-tenant override in
+  `ti_tenant_settings`). Defaults: tenant manual 1.0; tenant's own MISP 0.9; abuse.ch
+  Feodo/ThreatFox 0.8; MISP community feeds 0.6; OTX subscribed pulses 0.5; VirusTotal
+  verdict 0.8 (≥ 5 engines), 0.4 (1–4).
+- **Source confidence** `c ∈ [0,1]`: the source's own value where it has one
+  (ThreatFox `confidence_level`, MISP confidence taxonomy), else 0.7.
+- **Decay** by type, from the sighting's `last_seen`: half-life IP 7 days, URL 14 days,
+  domain 30 days, hash 180 days; `d(t) = 0.5^(age/half_life)`.
+- **Combined confidence** (noisy-OR over live sightings):
+  `C = 100 · (1 − Π_s (1 − trust_s · c_s · d_s(t)))`, recomputed at each sync.
+- **Expiry** (`valid_until`): when C would fall below 20 at the current decay, capped by
+  a hard maximum TTL (IP 30 d, URL 30 d, domain 90 d, hash 365 d) and by any source
+  `valid_until`.
+- **Alert level from confidence.** A CDB rule's level is static and
+  `address_match_key_value` is banned (§0.1), so confidence is expressed through
+  **band lists**: `…-high` (C ≥ 75 → TI rule level 12), `…-medium` (50 ≤ C < 75 → level
+  8). `low` (20 ≤ C < 50) is `ti-matcher`-only: recorded as a hit and shown on incidents,
+  but it raises no Wazuh alert. Within the `accuracy="0"` group the higher-level rule
+  is tried first (§1.4), so an observable in both bands alerts once at the high level.
+  `ti-matcher` stores the exact C.
+
+### 4.11 Multi-source dedup: one alert per observable
+
+- The store holds one `iocs` row per observable per tenant scope; sources are
+  `ioc_sightings` rows (§4.1).
+- List generation writes each observable **once**, in exactly one band list, from the
+  combined confidence. So one event raises **one** TI alert however many feeds list the
+  observable.
+- `ti_hits` is keyed on alert identity + observable, and `sources` lists every live
+  source with its reference. The CDB alert, the `ti-matcher` row and a retro-hunt row for
+  the same alert and observable collapse to one row (ReplacingMergeTree).
+- Global and tenant-private sightings of the same value merge into the tenant-scope
+  view at generation time; the global row is never modified by tenant data.
+
+### 4.12 Feed failure, last good list, staleness
+
+- Each source sync is all-or-nothing: fetch, parse, validate into a staging table, then
+  commit in one transaction. A sync that fails (HTTP error, parse error, auth error,
+  schema change) changes nothing. The source keeps its last good IOCs, which still age
+  and expire normally; `last_error` and `last_attempt_at` are set.
+- **Change-volume guard:** if a sync would remove > 30% of a source's live IOCs, or add
+  more than 5× its usual daily volume, it is held as `pending_review` instead of committed.
+  This covers truncated downloads and poisoning bursts.
+- **Never publish an empty or partial list:** list generation refuses to publish a file
+  that is empty while the live version is not, or that shrinks by > 30% without matching
+  expiries/revocations/allowlist entries. Files are complete before the rename (§4.3).
+  The safe reload wrapper (6.1a) keeps the old lists and rules on any reload warning.
+- **Staleness in `/health/detail`** (degrades, never fails `/health/ready`): per source
+  `last_success_at`, age, `last_error`, held syncs; per tenant and manager the live
+  list version and its age (§4.16).
+
+### 4.13 TLP and distribution
+
+Each sighting carries a TLP (OTX pulse TLP, MISP `tlp:*` tags, abuse.ch TLP:CLEAR, manual
+entries choose one), and each IOC carries the most restrictive TLP of its live sightings.
+- **Tenant-private intel and TLP:RED never leave that tenant:** never in a global list,
+  another tenant's lists or `ti-matcher` set, an export (STIX/TAXII later), a
+  VirusTotal request, or the 7.7 LLM agent's tool results. TLP:RED is excluded from the
+  agent even within its own tenant, because sending it to an external LLM is disclosure.
+- **TLP:AMBER+STRICT** stays inside the tenant whose source it came from. For a global
+  source carrying AMBER+STRICT, it is matched only for the operator's own tenant.
+- **TLP:AMBER / GREEN / CLEAR** from global sources may be matched for every tenant,
+  subject to the source's own terms (§7).
+- Enforcement: every read of IOCs goes through one store function that takes a
+  `purpose` (`match`, `export`, `external_lookup`, `llm`, `display`) and the caller's
+  tenant, and applies these rules in SQL. One test per purpose proves a TLP:RED IOC and
+  a tenant-private IOC are invisible to every other tenant and purpose.
+
+### 4.14 Analyst context per IOC
+
+Stored per IOC/sighting and shown on incident detail (TI panel) and in the IOC browser:
+- observable (displayed defanged, e.g. `198.51.100[.]7`), type, combined confidence and
+  band, TLP;
+- per source: name, trust, source confidence, reference (OTX pulse id, MISP event uuid,
+  abuse.ch entry id) with a link (`https://otx.alienvault.com/pulse/<id>`, the MISP
+  event URL, `https://threatfox.abuse.ch/ioc/<id>/`, the Feodo or MalwareBazaar page),
+  first and last seen at the source;
+- description, tags and malware family, MITRE ATT&CK technique ids (OTX
+  `attack_ids`, MISP galaxies, ThreatFox malware → technique where given);
+- local first seen, last seen, `valid_until`, sightings in this tenant (count, last
+  alert), false-positive markings and allowlist entries.
+
+### 4.15 Feed metrics
+
+`ti_source_metrics` (ClickHouse SummingMergeTree, per day × tenant × source): active,
+added, expired, revoked, rejected (validation), allowlisted, held syncs; hits by origin
+(`cdb`, `matcher`, `retro`), distinct observables hit, FP markings, hits reviewed.
+Derived: **FP rate** = FP-marked ÷ reviewed hits (also ÷ all hits, both shown), hits
+per 1,000 active IOCs, time from first publication to first hit. Shown on the
+source-settings page. Trust is tuned by an admin; it is never changed automatically in
+6.x.
+
+### 4.16 List version per manager in health
+
+For each tenant and each manager node, `/health/detail` shows each TI list's live
+version (content SHA-256 prefix), entry count, `generated_at`, `loaded_at`, whether the
+node's `.txt` and `.cdb` checksums match the master's, and the last reload result
+(`ok` / `warnings: …` / `held`). The data comes from `ti_list_versions.node_status`,
+written by the safe reload wrapper (6.1a item 3). A node whose version lags the
+master's for more than two sync intervals shows as degraded.
 
 ## 5. Throughput
 
@@ -551,11 +881,16 @@ frees events; CDB fd leak on reload; `address_match_key_value` inversion (confir
 
 | Source | Terms | Status |
 |---|---|---|
-| AlienVault/LevelBlue OTX | EULA ([levelblue.com/terms/otx-eula](https://www.levelblue.com/terms/otx-eula)): "free to end users for non-commercial use"; §2.3 forbids commercially exploiting OTX or making it available "as a service bureau", and republishing/distributing OTX content; no effective date given | **UNCLEAR for production.** Fine for the lab/dev. A hosted multi-tenant product looks like service-bureau use: get a written LevelBlue agreement before any customer install (BFC) |
-| VirusTotal | Public API: 4 req/min, 500/day, "must not be used in commercial products or services" or "business workflows that do not contribute new files" ([public-vs-premium-api](https://docs.virustotal.com/reference/public-vs-premium-api)); premium terms per contract | Public key for the lab only; per-tenant premium key in production |
+| AlienVault/LevelBlue OTX | EULA ([levelblue.com/terms/otx-eula](https://www.levelblue.com/terms/otx-eula)): "free to end users for non-commercial use"; §2.3 forbids commercially exploiting OTX or making it available "as a service bureau", and republishing/distributing OTX content; no effective date given | **Decided (§0.1):** customer-supplied key under the customer's own agreement in the product; our key for the lab and the report only |
+| VirusTotal | Public API: 4 req/min, 500/day, "must not be used in commercial products or services" or "business workflows that do not contribute new files" ([public-vs-premium-api](https://docs.virustotal.com/reference/public-vs-premium-api)); premium terms per contract | **Decided (§0.1):** customer-supplied key, per-tenant opt-in (§2); our public key for the lab only |
 | MISP software | AGPL-3.0 (server). We only call its API / read its feed format; PyMISP is BSD-2-Clause | Licences to recheck when 6.2 adds dependencies |
 | MISP default feeds | Per feed. CIRCL OSINT feed: no licence or TLP statement on the feed index ([circl.lu/doc/misp/feed-osint](https://www.circl.lu/doc/misp/feed-osint/)); its training material says it carries TLP:WHITE events. Some default feeds need a licence (e.g. Bambenek) ([misp-project.org/feeds](https://www.misp-project.org/feeds)) | **UNCLEAR per feed:** 6.2 records each enabled feed's terms; enable only feeds with stated terms |
 | Wazuh shipped lists/rules | GPLv2 (`0999-malicious-ioc-rules.xml` header) | inherited, fine |
+| abuse.ch Feodo Tracker, SSL Blacklist, YARAify | "free to use without limitations according to Creative Commons principles (CC0)", "for both commercial and non-commercial purposes" (abuse.ch Terms of Use §3.4, effective 2025-11-04, updated 2026-10-21, [abuse.ch/terms-of-use](https://abuse.ch/terms-of-use/)); platform access requires authentication at auth.abuse.ch (§2.1) | **default commercial-safe feed** (Feodo now) |
+| abuse.ch URLhaus, ThreatFox, MalwareBazaar | use "with commercial or for-profit needs may require a paid subscription", managed by Spamhaus (§4.1); free use limited to not-for-profit with query/export volume limits (§3.1-3.2) | customer-supplied Auth-Key/subscription in the product; lab and report use under the non-profit terms |
+| MISP warninglists | "licensed under CC0 1.0 Universal" ([github.com/MISP/misp-warninglists](https://github.com/MISP/misp-warninglists)); X4BNet-derived VPN/datacenter lists keep their MIT notice | fine; keep the MIT notice with those lists |
+| YARA-X | BSD-3-Clause ([github.com/VirusTotal/yara-x](https://github.com/VirusTotal/yara-x)) | fine if adopted later (§2.1) |
+| STIX 2.1 / TAXII 2.1 | OASIS open standards | field compatibility only (§4.1) |
 
 ## 8. VERIFY list
 
@@ -568,10 +903,18 @@ frees events; CDB fd leak on reload; `address_match_key_value` inversion (confir
 6. Reload under load loses no events after the analysisd fix (§9.4 method: sent = received = alerts).
 7. Worker reload ordering: change the list, run §4.4, check each worker matches the new IOC and not the removed one; repeat 20 times.
 8. Rule generator: logtest per decoder family shows the `accuracy="0"` TI child fires for a non-alerting event (not yet shown in 6.0: no probe line reached it) and never pre-empts a native sibling; level-0 leaves inventoried; reload responses with any warning fail the distribution.
-9. Expiry: an IOC past `expires_at` stops matching after the next sync (CDB) and immediately (`ti-matcher`).
+9. Expiry: an IOC past `valid_until` stops matching after the next sync (CDB) and immediately (`ti-matcher`).
 10. Replay of the same alerts adds no `ti_hits` duplicates.
 11. Throughput gate: hot path within 5%; analysisd ceiling with real list sizes; `ti-matcher` ceiling ≥ 3,300/s (T9).
 12. OTX licence position recorded; key read from a secret; incremental sync resumes from its cursor after a restart.
+13. One network log source (iptables `LOG` or Suricata) added in the lab so a destination-IP (and, with Suricata, domain) IOC matches end to end (§1.10).
+14. Normalisation unit tests: every rule of §4.6, including defanged, IDNA, IPv4-mapped IPv6, leading-zero IPv4, too-broad CIDRs, private ranges rejected from global and accepted tenant-private.
+15. Allowlists: a warninglisted (hard) value never reaches a list or `ti_hits`; a soft one is capped at 40; FP marking adds a tenant allowlist row and a label, regenerates only that tenant's lists, and never touches the global IOC.
+16. Protected asset in a feed → not listed, `ti_conflict` raised; no active response bound to TI rules (test).
+17. Confidence: band assignment and decay unit-tested; one event on an observable listed by three sources → one TI alert, one `ti_hits` row with three sources.
+18. Feed failure: a truncated or empty download changes nothing and is visible in `/health/detail`; a 40% shrink is held; the live list version on every node is unchanged.
+19. TLP: per-purpose test (`match`, `export`, `external_lookup`, `llm`, `display`) proves TLP:RED and tenant-private IOCs never cross the tenant boundary.
+20. Feodo Tracker (CC0) as the first default feed; terms re-checked at implementation time.
 
 **6.2 (MISP)**
 1. Feed-only mode imports only `to_ids=true` attributes; each enabled feed's terms recorded.
@@ -579,6 +922,7 @@ frees events; CDB fd leak on reload; `address_match_key_value` inversion (confir
 3. A tenant-private MISP's IOCs reach only that tenant's lists and matcher set; canary IOC never matches another tenant.
 
 **6.3 (VirusTotal)**
+0. Per-tenant opt-in: with `vt_enabled=false` no request leaves for that tenant (request counter stays 0 under FIM churn); toggling is audited.
 1. `custom-shadowtracer-virustotal` on FIM 554: known-bad test hash → 87105-shaped alert; unknown hash → 87103; cache hit makes no request (count requests).
 2. Budget: a burst of 500 new files stays within the per-minute and per-day budget; overflow is queued or marked, never silently dropped.
 3. Per-tenant key isolation; the key is not visible in `ps` (options file instead of argv).
@@ -589,6 +933,7 @@ frees events; CDB fd leak on reload; `address_match_key_value` inversion (confir
 2. Retro-hunt: IOC added after the matching alert produces one `retro` hit; bounded query time recorded; tenant filter proven.
 3. IOC browser and source settings admin-only and audited.
 4. Tenant isolation end to end: tenant-private IOC never appears in another tenant's console, lists or hits.
+5. Analyst context (§4.14) shown for a real hit, with working reference links; feed metrics (§4.15) show hits and FP rate per source; list version per manager (§4.16) visible.
 
 ## 9. Spike measurements (2026-11-05, test manager only)
 
@@ -659,7 +1004,7 @@ after the sender stopped. The likely cause is frequency rule 5712 (`if_matched_s
 5710`, `same_source_ip`, `frequency="8"`, `timeframe="120"`) scanning its whole
 120-second history for each event, because with unique IPs it never finds 8 matches.
 That is a property of the native ruleset under a many-source brute force, not of TI.
-Moved to `OPTIMIZATION_BACKLOG.md` T10 and switched the lookup fixture to rule 5715.
+Recorded as `OPTIMIZATION_BACKLOG.md` S9 (security; first filed as T10) and switched the lookup fixture to rule 5715.
 
 ### 9.2 Rule placement and lookup types (`wazuh-logtest` on the test manager)
 
@@ -846,5 +1191,5 @@ cluster (VERIFY 6.1-7).
    ```
    `cluster_control -l` still lists `worker-test`; both containers healthy.
 
-The renamed spike files (~36 GB on the lab disk) can be deleted on the owner's word;
-they hold no tenant data, only spike alerts and the one stats alert.
+The renamed spike files (~36 GB) were deleted on the owner's instruction after
+revision 2 (see the 6.1a notes).
