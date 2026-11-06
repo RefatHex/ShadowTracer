@@ -12,6 +12,7 @@ from .routers import auth as auth_router
 from .routers import fingerprints as fingerprints_router
 from .routers import health as health_router
 from .routers import incidents as incidents_router
+from .routers import ti as ti_router
 from .security_headers import SecurityHeadersMiddleware, install_generic_error_handler
 
 
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router.router)
     app.include_router(alerts_router.router)
     app.include_router(incidents_router.router)
+    app.include_router(ti_router.router)
     app.include_router(fingerprints_router.router)
     app.include_router(agents_router.router)
     app.include_router(attack_coverage_router.router)

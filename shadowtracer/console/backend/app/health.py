@@ -539,3 +539,31 @@ def ti_matcher(db: Session, settings: Settings, behind_alert_seconds: int = 300)
         "behind": behind, "alert": bool(behind),
     })
     return out
+
+
+def virustotal(db: Session) -> dict:
+    """Phase 6.3: per tenant, VirusTotal opt-in, today's calls against the daily budget,
+    hashes waiting in the queue, cached verdicts. A full budget only queues lookups
+    ("budget_reached"): it is reported here, never an error and never in readiness."""
+    try:
+        rows = db.execute(text(
+            "SELECT t.tenant_key, coalesce(s.vt_enabled, false) AS enabled, coalesce(s.vt_daily_budget, 0) AS daily_budget, "
+            " (SELECT count(*) FROM vt_calls c WHERE c.tenant_key = t.tenant_key AND c.called_at >= date_trunc('day', now())) AS calls_today, "
+            " (SELECT count(DISTINCT r.sha256) FROM vt_requests r WHERE r.tenant_key = t.tenant_key AND r.state = 'pending') AS queued, "
+            " (SELECT count(*) FROM vt_verdicts v WHERE v.tenant_key = t.tenant_key AND v.expires_at > now()) AS cached_verdicts, "
+            " (SELECT max(called_at) FROM vt_calls c WHERE c.tenant_key = t.tenant_key) AS last_call_at, "
+            " (SELECT outcome FROM vt_calls c WHERE c.tenant_key = t.tenant_key ORDER BY called_at DESC LIMIT 1) AS last_outcome "
+            "FROM tenants t LEFT JOIN ti_tenant_settings s ON s.tenant_key = t.tenant_key "
+            "WHERE s.tenant_key IS NOT NULL OR EXISTS (SELECT 1 FROM vt_requests r WHERE r.tenant_key = t.tenant_key) "
+            "ORDER BY t.tenant_key")).mappings().all()
+    except Exception as exc:  # noqa: BLE001 - missing table (pre-migration) or DB hiccup must not crash /health
+        db.rollback()
+        return {"error": str(exc), "tenants": {}}
+    tenants = {}
+    for r in rows:
+        tenants[r["tenant_key"]] = {
+            **{k: r[k] for k in ("enabled", "daily_budget", "calls_today", "queued", "cached_verdicts", "last_outcome")},
+            "last_call_at": r["last_call_at"].isoformat() if r["last_call_at"] else None,
+            "budget_reached": bool(r["enabled"] and r["queued"] and r["calls_today"] >= r["daily_budget"]),
+        }
+    return {"tenants": tenants, "budget_reached": [t for t, v in tenants.items() if v["budget_reached"]]}

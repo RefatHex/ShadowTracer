@@ -19,10 +19,11 @@
 set -euo pipefail
 # Needs both replicas: the "ha" compose profile (6.1c follow-up).
 if ! docker ps -q -f name=^shadowtracer-lab-ch-clickhouse-2-1$ -f status=running | grep -q .; then
-    echo "ch-clickhouse-2 is not running: start the ha profile first:"
-    echo "  docker compose --env-file .env --env-file ha.env up -d && ./create-clickhouse-schema.sh"
+    echo "ch-clickhouse-2 is not running: start the ha profile first: ./ha.sh up (./ha.sh down afterwards)"
     exit 2
 fi
+# R7: ti-sync and ti-matcher stay stopped while "ha" runs (memory cap); ./ha.sh down restarts them.
+docker compose stop ti-sync ti-matcher >/dev/null 2>&1 || true
 LOG=${LOG:-recover-ch-after-crash.$(date +%Y%m%d-%H%M%S).log}
 exec > >(tee "$LOG") 2>&1
 set -a; source .env; set +a

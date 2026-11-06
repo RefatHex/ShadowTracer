@@ -47,4 +47,5 @@ def health_detail(db: Session = Depends(get_db), settings=Depends(get_settings),
         "ti_list_versions": health_checks.ti_list_versions(db),
         "ti_sources": health_checks.ti_sources(db),
         "ti_matcher": health_checks.ti_matcher(db, settings),
+        "virustotal": health_checks.virustotal(db),
     }

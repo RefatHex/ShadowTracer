@@ -243,9 +243,41 @@ def run_once(engine, env=os.environ) -> list:
     return report
 
 
+def vt_worker_from_env(engine, env=os.environ):
+    """6.3: TI_VT_KEYS = {"<tenant_key>": "<env var holding that tenant's VirusTotal key>"};
+    VT_PER_MINUTE / VT_PER_DAY: the key's limits (default: the public API's 4 and 500).
+    Opt-in itself is ti_tenant_settings.vt_enabled (console, admin-only, audited)."""
+    from . import vt
+    keys = {t: env.get(var, "") for t, var in json.loads(env.get("TI_VT_KEYS", "{}")).items()}
+    ch = None
+    if env.get("CLICKHOUSE_HOST"):
+        import clickhouse_connect
+        ch = clickhouse_connect.get_client(host=env["CLICKHOUSE_HOST"], port=int(env.get("CLICKHOUSE_PORT", "8123")),
+                                           username=env.get("CLICKHOUSE_USER", "default"),
+                                           password=env.get("CLICKHOUSE_PASSWORD", ""),
+                                           database=env.get("CLICKHOUSE_DATABASE", "shadowtracer"))
+    return vt.VTWorker(engine, json.loads(env.get("TI_CLUSTERS", "[]")), {t: k for t, k in keys.items() if k},
+                       safe_reload.DockerNode, ch=ch, per_minute=int(env.get("VT_PER_MINUTE", vt.PUBLIC_PER_MINUTE)),
+                       per_day=int(env.get("VT_PER_DAY", vt.PUBLIC_PER_DAY)))
+
+
+def _vt_loop(engine, interval: float) -> None:
+    worker = None
+    while True:
+        try:
+            worker = worker or vt_worker_from_env(engine)
+            worker.step()
+        except Exception:  # noqa: BLE001 - VirusTotal trouble never stops feed syncs
+            log.exception("VirusTotal worker step failed")
+        time.sleep(interval)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     engine = create_engine(database_url(), pool_pre_ping=True)
+    import threading
+    threading.Thread(target=_vt_loop, args=(engine, float(os.environ.get("TI_VT_INTERVAL_SECONDS", "10"))),
+                     daemon=True, name="vt-worker").start()
     interval = int(os.environ.get("TI_SYNC_INTERVAL_SECONDS", "900"))
     while True:
         try:

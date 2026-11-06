@@ -5,7 +5,7 @@ import pytest
 
 from shadowtracer_intel import safe_reload, ti_rules
 
-RULESET = {"ruleset/rules/0015-ossec_rules.xml": [550, 554], "ruleset/rules/0045-firewall_rules.xml": [4100],
+RULESET = {"ruleset/rules/0490-virustotal_rules.xml": [87100, 87105], "ruleset/rules/0015-ossec_rules.xml": [550, 554], "ruleset/rules/0045-firewall_rules.xml": [4100],
            "ruleset/rules/0095-sshd_rules.xml": [5700, 5710, 5715, 5722]}
 
 

@@ -53,29 +53,27 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 | caddy | 61 / 15 | 80m (96m until 6.1c) |
 | shadowtracer-lb | 13 / 9 | 32m |
 | ti-sync (6.1b) | 74 steady; 6.2: OOM-killed at 256m importing CERT Polska's 126k domains until observations/rows were made compact, then 111 MiB for that import measured locally (lab peak below) | 256m (128m until 6.2) |
-| ti-matcher (6.1c) | 77 draining a 300,000-message backlog at ~8,500/s (librdkafka prefetch capped at 16 MiB; with the 64 MiB default it OOM-killed at 128m); 6.2: one set per tenant now holds ~135k IOCs | 256m (128m until 6.2) |
+| ti-matcher (6.1c) | 77 draining a 300,000-message backlog at ~8,500/s (librdkafka prefetch capped at 16 MiB; with the 64 MiB default it OOM-killed at 128m); 6.2: one set per tenant now holds ~135k IOCs; 6.3: two sets plus a reload were OOM-killed at 256m (anon 259 MB) | 384m (6.3; 256m in 6.2, 128m in 6.1c) |
 | load generators (`deploy/load/syslog_fleet.sh` containers) | ~30 | 128m each |
-| **total, default profile** (6.2) | | **9,472 MiB (9.25 GiB)**, 4,352 MiB under the cap |
-| **total, `ha` profile** (6.2) | | **14,160 MiB**: 336 MiB **over** the 13,824 MiB cap (shipper-master +104, ti-sync and ti-matcher +128 each). Only for chaos/failover runs; backlog R7 |
+| **total, default profile** (6.3) | | **9,600 MiB (9.4 GiB)**, 4,224 MiB under the cap |
+| **total, `ha` profile** (6.3) | | 14,160 MiB with every service; **13,648 MiB as run by `./ha.sh up`** (ti-sync and ti-matcher stopped), under the cap. Backlog R7 closed |
 
 **Compose profiles (6.2 housekeeping).** The default profile runs one ClickHouse replica,
 the master as the main tenant's only manager (the LB sends agents to it as its backup
 server, `shipper-master` ships its alerts) and the test tenant's manager. The `ha` profile
 adds `ch-clickhouse-2`, `shadowtracer-worker1/2` and `shipper-worker1/2`; chaos and failover
-scripts need it:
+runs need it. Switch with `./ha.sh up` / `./ha.sh down`: while "ha" runs, **ti-sync and
+ti-matcher are stopped** (owner decision 2026-11-06, backlog R7), which keeps the "ha"
+limits at 13,648 MiB, under the cap. `ha.sh up` also runs `create-clickhouse-schema.sh` so
+ch-clickhouse-2 gets every table created meanwhile.
 
-```
-docker compose --env-file .env --env-file ha.env up -d && ./create-clickhouse-schema.sh
-```
 `ha.env` also switches ch-clickhouse-1 to the two-replica cluster definition
 (`clickhouse/config.d/cluster.xml`; the default mounts `cluster-single.xml`, so ON CLUSTER
 DDL never waits for a replica that is not deployed - `distributed_ddl_output_mode=
 throw_only_active` does not cover a plain cluster, tested on 24.8) and the console's
 replica and shipper lists. `smoke-test.sh` checks whichever profile is up (`HA=1` forces
 `ha`); `recover-ch-after-crash.sh` and `repair-ch-lost-parts.sh` refuse to run without
-replica 2. Back to default: `docker compose --profile ha rm -sf shadowtracer-worker1
-shadowtracer-worker2 shipper-worker1 shipper-worker2 ch-clickhouse-2` (volumes kept), then
-`docker compose up -d`. Recreating the master drops its agent registrations: re-enroll the
+replica 2. Back to default: `./ha.sh down` (volumes of the ha services kept). Recreating the master drops its agent registrations: re-enroll the
 main tenant's agents with `./recreate-agent.sh agent-ubuntu-2 agent-rocky-1 agent-rocky-2`.
 
 **Check `memory.events`, not only OOM kills.** A container can sit under its cap

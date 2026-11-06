@@ -596,6 +596,57 @@ Lab checks (2026-11-06):
 | CIRCL OSINT import | 312 events, 274,339 IOCs (table above) |
 | real OTX | first sync 9,020 received, 8,241 unique (table above); later incremental syncs 598 updates, 0 rejected, no HTTP 429 |
 
+### 3.4 Built in 6.3 (2026-11-06): VirusTotal
+
+**Limits and terms** (docs.virustotal.com/reference/public-vs-premium-api, read
+2026-11-06): "The Public API is limited to 500 requests per day and a rate of 4 requests
+per minute"; it "must not be used in commercial products or services". So every tenant
+brings its own (premium) key; the lab uses ShadowTracer's free key for tests only.
+`VT_PER_MINUTE` / `VT_PER_DAY` set a key's limits (default 4 / 500).
+
+**Automatic path (FIM).** integratord (`<integration>` `custom-shadowtracer-virustotal`,
+rules 550/554, installed by the manager entrypoint) runs
+`shadowtracer/intel/integrations/custom-shadowtracer-virustotal.py` once per new or
+changed file. It makes no network call and holds no key: it writes the SHA-256, the
+alert identity, path and agent to `var/shadowtracer-vt/` on that manager (atomic rename,
+capped at 10,000 files). ti-sync's VirusTotal worker thread (`vt.py`, every 10 s):
+1. collects each manager's spool (lab transport: `docker exec`, backlog S10); a tenant
+   with VirusTotal **off has its spool deleted unread** - no hash of it is stored or sent;
+2. answers each pending hash from the tenant's verdict cache (`vt_verdicts`, 30 days for
+   malicious, 7 for clean/unknown) or with one `GET /api/v3/files/{sha256}` when the key's
+   per-minute and per-day limits and the tenant's daily budget allow; otherwise the hash
+   waits in the queue (`vt_requests`) and `/health/detail.virustotal` reports
+   `budget_reached` - never an error. HTTP 429 pauses that key for 65 s. Every call is in
+   `vt_calls` (key fingerprint, never the key). A call that times out counts against the
+   budget (VirusTotal may have served it) and is retried on the next step;
+3. sends a malicious verdict back to the alert's own manager as an analysisd event in the
+   exact shape of Wazuh's `integrations/virustotal.py`, so 0490's 87100/87105 decode it and
+   ShadowTracer's TI rule **110100** (child of 87105, `virustotal.origin = shadowtracer`,
+   level 12) raises the alert: file, malicious/total engines, top labels. It also becomes a
+   tenant-private TLP:AMBER sha256 IOC (source `virustotal:<tenant>`; the next list
+   deploy turns later sightings into CDB hits, which replace 554, so integratord never asks
+   for a known hash again) and is linked to the FIM alert's incident (`incident_ti`,
+   ClickHouse `ti_matches` with origin `virustotal`), raising its priority.
+
+Clean and unknown verdicts are cached but raise no alert. Hashes only: no file is ever
+uploaded. **Opt-in** is per tenant (`ti_tenant_settings.vt_enabled`, default off, daily
+budget default 500), set by `PUT /api/ti/settings` (admin, audited).
+
+**On demand** (analyst+, audited): `POST /api/ti/virustotal/lookups {sha256}` returns the
+cached verdict (200) or queues the hash for the same worker, cache and budget (202
+`queued` / `budget_reached`); `GET /api/ti/virustotal/{sha256}` polls. The backend never
+holds a key or calls VirusTotal. Console button: 6.4.
+
+Lab checks (2026-11-06; test tenant opted in, main tenant not):
+
+| check | result |
+|---|---|
+| EICAR dropped in agent-ubuntu-1's FIM directory | 554 -> one request -> VirusTotal 62/64 malicious (`virus.eicar/test`, first submitted 2006-05-22, link) -> rule 110100 level 12 on agent-ubuntu-1 (its own incident); the 554 alert's incident 394304 linked (`incident_ti` sources `virustotal`, confidence 90), priority 5 -> 12 |
+| same hash again (copy at another path) | `served_from = cache`, second 110100 alert, no call |
+| main tenant (opt-in off), new file on agent-ubuntu-2 | 554 on the main tenant; the master's spool discarded unread ("VirusTotal off, discarded 1"), 0 requests, 0 calls |
+| daily budget forced to 1 | a new distinct hash stays `pending`, no call; `/health/detail.virustotal.budget_reached` lists the test tenant (calls_today 2, queued 1); the analyst API answers `202 budget_reached` for it and `cached` for EICAR |
+| VirusTotal calls during the whole check | **2**: one read timeout (20 s), then the successful lookup |
+
 ---
 
 ## 4. Store, generation, distribution, reload

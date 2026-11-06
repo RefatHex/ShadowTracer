@@ -57,6 +57,39 @@ class DockerNode:
         node that is down must show up as a failed distribution, not be skipped."""
         return subprocess.run(["docker", "inspect", self.container], capture_output=True).returncode == 0
 
+    # --- 6.3 VirusTotal spool (custom-shadowtracer-virustotal) and analysisd event queue ---
+    SPOOL = "var/shadowtracer-vt"
+
+    def spool_take(self, limit: int = 500) -> list:
+        """[(file name, request dict)] - read only; spool_delete() once they are stored."""
+        out = self._sh(f"cd '{self._abs(self.SPOOL)}' 2>/dev/null || exit 0; ls -1 2>/dev/null | grep '^[0-9a-f]\\{{64\\}}\\..*\\.json$' "
+                       f"| head -{int(limit)} | while read f; do printf '%s\\t' \"$f\"; tr -d '\\n' < \"$f\"; echo; done")
+        taken = []
+        for line in out.decode(errors="replace").splitlines():
+            name, _, body = line.partition("\t")
+            try:
+                taken.append((name, json.loads(body)))
+            except ValueError:
+                taken.append((name, {}))                      # unreadable: deleted with the rest
+        return taken
+
+    def spool_delete(self, names: list) -> None:
+        names = [n for n in names if re.fullmatch(r"[0-9a-f]{64}\.[0-9A-Za-z._]+\.json", n)]
+        if names:
+            self._sh(f"cd '{self._abs(self.SPOOL)}' && rm -f " + " ".join(f"'{n}'" for n in names))
+
+    def spool_discard(self) -> int:
+        """Delete every spooled request unread (tenant opted out); returns how many."""
+        out = self._sh(f"cd '{self._abs(self.SPOOL)}' 2>/dev/null || {{ echo 0; exit 0; }}; "
+                       "n=$(ls -1 | grep -c '\\.json$'); find . -maxdepth 1 -name '*.json' -delete; echo $n")
+        return int(out.strip() or 0)
+
+    def send_event(self, message: str) -> None:
+        """One event into analysisd's queue socket, as Wazuh's integrations do."""
+        py = ("import socket,sys; s=socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); "
+              f"s.connect('{self._abs('queue/sockets/queue')}'); s.send(sys.stdin.buffer.read()); s.close()")
+        self._sh(f"'{self._abs('framework/python/bin/python3')}' -c \"{py}\"", stdin=message.encode())
+
     def _sh(self, script: str, stdin: bytes = None) -> bytes:
         res = subprocess.run(["docker", "exec", "-i", self.container, "sh", "-c", script],
                              input=stdin, capture_output=True)

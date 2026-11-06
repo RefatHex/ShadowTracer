@@ -108,6 +108,28 @@ if ! grep -q "etc/lists/shadowtracer-ti/" "$OSSEC_CONF"; then
     sed -i "0,/<\/ruleset>/s##${ti_decl}  </ruleset>#" "$OSSEC_CONF"
 fi
 
+# Phase 6.3: ShadowTracer VirusTotal integration (THREAT_INTEL.md §1.8, §3.4). integratord
+# runs it for every new-file / changed-file FIM alert (550, 554); it only spools the
+# hash locally (no network, no key). ti-sync's VT worker enforces the tenant's opt-in,
+# the verdict cache and the API budget. Mounted read-only at /shadowtracer-integrations.
+if [ -f /shadowtracer-integrations/custom-shadowtracer-virustotal.py ]; then
+    for f in custom-shadowtracer-virustotal custom-shadowtracer-virustotal.py; do
+        install -o root -g wazuh -m 750 "/shadowtracer-integrations/$f" "${SHADOWTRACER_INSTALL_DIR}/integrations/$f"
+    done
+    install -d -o wazuh -g wazuh -m 770 "${SHADOWTRACER_INSTALL_DIR}/var/shadowtracer-vt"
+    if ! grep -q "<name>custom-shadowtracer-virustotal</name>" "$OSSEC_CONF"; then
+        cat >> "$OSSEC_CONF" <<EOF
+<ossec_config>
+  <integration>
+    <name>custom-shadowtracer-virustotal</name>
+    <rule_id>550,554</rule_id>
+    <alert_format>json</alert_format>
+  </integration>
+</ossec_config>
+EOF
+    fi
+fi
+
 # Same, over TCP (LOAD_TEST_SYSLOG_TCP_PORT): a reader that falls behind
 # back-pressures the sender instead of the kernel dropping datagrams, so a
 # load test can check sent == written exactly (OPTIMIZATION_BACKLOG T12).

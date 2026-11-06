@@ -215,6 +215,7 @@ services:
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
+      - ../../shadowtracer/intel/integrations:/shadowtracer-integrations:ro   # 6.3 VirusTotal spooler
       # 6.1c follow-up: without the "ha" profile there are no workers, so the LB sends
       # the main tenant's agents to the master (its backup server) and shipper-master
       # ships this.
@@ -245,6 +246,7 @@ services:
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
+      - ../../shadowtracer/intel/integrations:/shadowtracer-integrations:ro   # 6.3 VirusTotal spooler
       # shipper-worker1 (Phase 4 follow-up 2) mounts this same host path
       # read-only and tails it from there.
       - ./alerts-worker1:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
@@ -273,6 +275,7 @@ services:
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
+      - ../../shadowtracer/intel/integrations:/shadowtracer-integrations:ro   # 6.3 VirusTotal spooler
       - ./alerts-worker2:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
     depends_on:
       shadowtracer-master:
@@ -320,6 +323,7 @@ services:
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
+      - ../../shadowtracer/intel/integrations:/shadowtracer-integrations:ro   # 6.3 VirusTotal spooler
       - ./alerts-worker-test:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
     networks:
       lab:
@@ -855,6 +859,19 @@ services:
       TI_FEED_CIRCL_OSINT: "1"
       # A tenant's own MISP server: none in the lab (no MISP container, memory).
       TI_MISP_SERVERS: ${TI_MISP_SERVERS:-[]}
+      # 6.3 VirusTotal: each tenant's key comes from the env var named here (customer-
+      # supplied in the product; the lab's free public key for both). Opt-in is per tenant
+      # in Postgres (PUT /api/ti/settings, admin-only, audited), default off.
+      VT_API_KEY: ${VT_API_KEY:-}
+      TI_VT_KEYS: >-
+        {"${TENANT_KEY}": "VT_API_KEY", "${TEST_TENANT_KEY}": "VT_API_KEY"}
+      VT_PER_MINUTE: "4"
+      VT_PER_DAY: "500"
+      TI_VT_INTERVAL_SECONDS: "10"
+      CLICKHOUSE_HOST: ch-clickhouse-1
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+      CLICKHOUSE_DATABASE: shadowtracer
       TI_CLUSTERS: >-
         [{"tenant_key": "${TENANT_KEY:?set TENANT_KEY in deploy/lab/.env}",
           "nodes": [["master", "shadowtracer-lab-shadowtracer-master-1"],
@@ -882,9 +899,12 @@ services:
     image: shadowtracer-lab/ti-matcher:local
     hostname: ti-matcher
     restart: unless-stopped
-    # 6.2: 256m (128m until 6.2) - one IOC set per tenant incl. 126k CERT Polska domains (backlog T17).
-    mem_limit: 256m
-    memswap_limit: 256m
+    # 384m (6.3; 256m in 6.2, 128m in 6.1c): one ~135k-IOC set per tenant (126k CERT Polska
+    # domains) - two sets plus a reload hit 256m (OOM-killed 2026-11-06 03:53). Backlog T17
+    # (share the global part) brings it back down. Stopped while "ha" runs (ha.sh), so the
+    # ha budget is unchanged.
+    mem_limit: 384m
+    memswap_limit: 384m
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_GROUP_ID: shadowtracer-ti-matcher

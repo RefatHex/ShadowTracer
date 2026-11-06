@@ -92,7 +92,12 @@ until docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
 done
 ./create-clickhouse-schema.sh
 
-docker compose up -d
+if [ "$HA" = 1 ]; then
+    # R7: ti-sync and ti-matcher stay stopped while "ha" runs (memory cap; ./ha.sh).
+    docker compose up -d $(docker compose config --services | grep -vx -e ti-sync -e ti-matcher)
+else
+    docker compose up -d
+fi
 
 # Only wait on the services expected to reach healthy. agent-rocky-1/2 have a
 # known, documented glibc bug (PHASE1_FINDINGS.md Step 2) and never go

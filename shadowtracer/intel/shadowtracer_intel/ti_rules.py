@@ -40,6 +40,12 @@ ATTACHMENTS = (
 )
 
 
+# 6.3: a malicious VirusTotal verdict (vt.py sends it in Wazuh's own integration shape,
+# decoded by 0490's 87100 and matched by 87105) becomes ONE ShadowTracer TI alert: this
+# child replaces 87105's alert for the same event. 87105 has no frequency dependants.
+VT_RULE_ID = 110100
+
+
 def list_names() -> list:
     return [f"{t}-{band}" for t in LIST_TYPES for band, _ in BANDS]
 
@@ -68,6 +74,15 @@ def rules_xml() -> str:
                 "  </rule>",
             ]
             rule_id += 1
+    out += [
+        f'  <rule id="{VT_RULE_ID}" level="12" accuracy="0">',
+        "    <if_sid>87105</if_sid>",
+        "    <field name=\"virustotal.origin\">^shadowtracer$</field>",
+        "    <description>Threat intel (VirusTotal): $(virustotal.source.file) is malicious - $(virustotal.positives)/$(virustotal.total) engines ($(virustotal.labels))</description>",
+        "    <group>ti_high,ti_virustotal,</group>",
+        "    <options>no_full_log</options>",
+        "  </rule>",
+    ]
     out.append("</group>")
     return "\n".join(out) + "\n"
 
