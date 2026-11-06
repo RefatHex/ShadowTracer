@@ -1315,3 +1315,35 @@ that step (cycles ended 09:03 and 09:18), ti-matcher has its own consumer group 
 no matches for the load, so the cause is not identified yet (backlog T18). Load rows from
 this gate stay in the test tenant (tagged `g64-r500`, `g64-r2000`, `g64-ceil`) until the
 run-id purge tool (R8) exists.
+
+## 17. T18: correlator lag at 500/s - cause and fix (2026-11-06, after the gate)
+
+**Cause: two correlator replicas writing the same incident rows.** Agent `000` alerts (the
+manager: every syslog device) were partitioned per device (`shipper.partition_key`:
+`tenant|location`) but correlated per agent (`000|srcip:…`, `000|user:…`). Two devices
+reporting the same source IP or user put alerts for ONE incident on two partitions, owned
+by two replicas. Each batch is one Postgres transaction holding its `SELECT … FOR UPDATE`
+row locks for the whole batch (~2.5 s), so the other replica waited. Measured on a 300 s
+500/s step with per-batch profiling and `pg_stat_activity` sampling every 2 s:
+`incident_lock` took 363 s of 533 s database time (40,207 statements, ~9 ms each), 218
+samples of a backend waiting on `Lock/transactionid` while the holder was idle in
+transaction; `pg_blocking_pids` showed correlate-1 waiting on correlate-2 every time (never
+the closer, ti-matcher, the VirusTotal worker or the console). Not the cause: dead tuples
+(`incidents` 14%, autovacuum 29 runs), host iowait (6%), ti-sync (idle), ti-matcher (no
+writes for load). Real agents are unaffected: one agent's alerts stay on one partition.
+
+**Fix:** for agent `000` the correlation key is per device, `000@<location>|…` - the same
+key the shipper partitions by, so an incident is written by exactly one replica.
+Cross-device activity is still grouped by campaigns. `incidents.agent_id` stays `000`.
+
+**Rerun of the 500/s step (600 s, §13 method):**
+
+| 500/s | gate §16 | after the fix | §13 |
+|---|---|---|---|
+| correlator lag | 3.2k -> 15.9k | **≤1,794, flat; 0 within 30 s of the end** | ≤1,715, flat |
+| correlator latency p50/p95/p99 | 12.6 / 58.6 / 65.1 s | **1.3 / 2.4 / 2.7 s** | 1.3 / 2.4 / 3.3 s |
+| writer latency p50/p95/p99 | 1.1 / 1.9 / 2.3 s | 1.1 / 2.0 / 2.5 s | 1.1 / 2.0 / 2.9 s |
+| `incident_lock` per statement | ~9 ms | **~0.95 ms** | — |
+| lock-wait samples | 218 per 300 s | 36 per 600 s | — |
+
+0 dead letters, 0 restarts, ti-matcher lag ≤468 throughout. **500/s end to end holds again.**

@@ -365,3 +365,18 @@ def test_replica_that_loses_the_race_for_a_new_incident_leaves_no_empty_incident
     assert out["results"][0].incident_id == a_id
     rows = db.execute(select(incidents.c.id, incidents.c.alert_count).where(incidents.c.tenant_key == tenant)).all()
     assert rows == [(a_id, 1)], rows
+
+
+def test_manager_syslog_alerts_are_keyed_per_device():
+    """T18 (2026-11-06): agent 000 alerts from two syslog devices with the same source IP
+    belong to different incidents (each device is its own partition and correlator replica);
+    one device's alerts still share one key; real agents are unchanged."""
+    a, b = _event(agent_id="000", src_ip="203.0.113.5"), _event(agent_id="000", src_ip="203.0.113.5")
+    a.location, b.location = "10.0.0.11", "10.0.0.12"
+    c = _event(agent_id="000", src_ip="203.0.113.5")
+    c.location = "10.0.0.11"
+    ka, kb, kc = (correlation_key_and_basis(e)[0] for e in (a, b, c))
+    assert ka != kb and ka == kc and ka == "000@10.0.0.11|srcip:203.0.113.5"
+    real = _event(agent_id="001", src_ip="203.0.113.5")
+    real.location = "/var/log/auth.log"
+    assert correlation_key_and_basis(real)[0] == "001|srcip:203.0.113.5"

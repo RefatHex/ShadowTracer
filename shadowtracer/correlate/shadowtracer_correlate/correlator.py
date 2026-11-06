@@ -52,12 +52,20 @@ def correlation_key_and_basis(event) -> tuple[str, str] | None:
     since rule_groups preserves the order Wazuh's rule definition gives
     it). None if the alert has none of these fields - it genuinely can't
     be correlated into anything, by any basis."""
+    # Agent "000" is the manager: every syslog device it receives from. Its alerts are keyed
+    # per device (location), the same key the shipper partitions them by (shipper.py
+    # partition_key), so one incident is only ever written by the one correlator replica that
+    # owns that partition. Keyed by "000" alone, two devices reporting the same IP or user
+    # made two replicas update the same incident row, each holding the row lock for a whole
+    # batch (~2.5 s): THROUGHPUT_BASELINE §17, backlog T18. Cross-device activity is still
+    # grouped one level up, by campaigns.
+    who = event.agent_id if event.agent_id != "000" else f"000@{event.location}"
     if event.src_endpoint_ip:
-        return f"{event.agent_id}|srcip:{event.src_endpoint_ip}", "source_ip"
+        return f"{who}|srcip:{event.src_endpoint_ip}", "source_ip"
     if event.actor_user:
-        return f"{event.agent_id}|user:{event.actor_user}", "user"
+        return f"{who}|user:{event.actor_user}", "user"
     if event.rule_groups:
-        return f"{event.agent_id}|rulegroup:{event.rule_groups[0]}", "rule_group"
+        return f"{who}|rulegroup:{event.rule_groups[0]}", "rule_group"
     return None
 
 
