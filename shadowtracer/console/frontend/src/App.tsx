@@ -8,6 +8,8 @@ import { FingerprintDetailPage } from './FingerprintDetailPage'
 import { FingerprintsPage } from './FingerprintsPage'
 import { IncidentDetailPage } from './IncidentDetailPage'
 import { IncidentsPage } from './IncidentsPage'
+import { IocBrowserPage } from './IocBrowserPage'
+import { TiSettingsPage } from './TiSettingsPage'
 import { LoginPage } from './LoginPage'
 
 // A handful of screens - deliberately no router library for this: one
@@ -19,6 +21,8 @@ type View =
   | { name: 'fingerprints' }
   | { name: 'fingerprint'; key: string }
   | { name: 'attack-coverage' }
+  | { name: 'iocs' }
+  | { name: 'ti-settings' }
   | { name: 'about' }
 
 function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => void }) {
@@ -28,6 +32,8 @@ function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => voi
     { label: 'Incidents', view: { name: 'incidents' } },
     { label: 'Attack library', view: { name: 'fingerprints' } },
     { label: 'ATT&CK coverage', view: { name: 'attack-coverage' } },
+    { label: 'Threat intel', view: { name: 'iocs' } },
+    { label: 'TI settings', view: { name: 'ti-settings' } },
   ]
   return (
     <header className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-6 py-4">
@@ -81,9 +87,26 @@ function Footer() {
   )
 }
 
+// 6.4: a link can open one screen directly (#/incidents/42, #/iocs, #/ti-settings); there
+// is still no router - the hash is read on load and whenever it changes.
+function viewFromHash(): View {
+  const h = window.location.hash
+  const incident = /^#\/incidents\/(\d+)$/.exec(h)
+  if (incident) return { name: 'incident', id: Number(incident[1]) }
+  if (h === '#/iocs') return { name: 'iocs' }
+  if (h === '#/ti-settings') return { name: 'ti-settings' }
+  return { name: 'alerts' }
+}
+
 function AppContent() {
   const { session, restoring } = useAuth()
-  const [view, setView] = useState<View>({ name: 'alerts' })
+  const [view, setView] = useState<View>(viewFromHash)
+
+  useEffect(() => {
+    const onHash = () => setView(viewFromHash())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
 
   // Avoid flashing the login form while the one-time refresh-cookie
   // check (AuthContext) is still in flight on page load.
@@ -105,6 +128,8 @@ function AppContent() {
         <FingerprintDetailPage fingerprintKey={view.key} onBack={() => setView({ name: 'fingerprints' })} />
       )}
       {view.name === 'attack-coverage' && <AttackCoveragePage />}
+      {view.name === 'iocs' && <IocBrowserPage />}
+      {view.name === 'ti-settings' && <TiSettingsPage />}
       {view.name === 'about' && <AboutPage />}
       <Footer />
     </div>

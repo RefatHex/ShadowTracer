@@ -1276,3 +1276,42 @@ The memory limits from `DEV_SETUP.md` were in place.
 Decision for the owner (backlog T14): look at the lab disk (which drive the WSL vhdx is
 on, other load on it, the swap file on E:) before re-measuring. No 6.1a code is on the
 writer/correlator path.
+
+## 16. Phase 6 throughput gate, end of 6.4 (2026-11-06 09:04-09:30 UTC)
+
+**Set-up:** 12 CPUs, 16 GB, ClickHouse fsync on. **Default compose profile**: one
+ClickHouse replica and no worker1/worker2 (§13 and §15 ran with two replicas, so writer
+numbers are not like for like). ti-sync, ti-matcher and the VirusTotal worker ran
+throughout (ti-matcher reading the same test-tenant topic; one ti-sync cycle at 09:18
+overlapped the 2,000/s step; VirusTotal is off for the test tenant, R10, so the worker
+made no calls). Method as §13: `e2e_step.sh <rate> 600 g64-r<rate> 12 50` (12 syslog
+devices + 200 Kafka agents), backlog skipped before each step. Ceilings: writers and
+correlators stopped, a Kafka backlog produced, then drained by each group alone
+(`st-runs/gate-6.4/run.sh`). The generator hit `BufferError: Queue full` at 10,000/s
+after ~135k messages, so the ceiling backlog was ~135k, not 300k.
+
+| measure | §13 (2026-11-05, before 6.1) | §15 (6.1a rerun) | **6.4 gate** |
+|---|---|---|---|
+| 500/s writer lag | ≤1,161, flat | ≤4,701, flat | **≤1,000, flat** |
+| 500/s writer latency p50/p95/p99 | 1.1 / 2.0 / 2.9 s | 2.9 / 7.1 / 9.7 s | **1.1 / 1.9 / 2.3 s** |
+| 500/s correlator lag | ≤1,715, flat | 6.7k → 127k (~280/s processed) | **3.2k → 15.9k in 6 min, then flat; 0 within a minute after the step** |
+| 500/s correlator latency p50/p95/p99 | 1.3 / 2.4 / 3.3 s | — | **12.6 / 58.6 / 65.1 s** |
+| 2,000/s writer lag | ≤7.3k, flat | grows to 725k | **≤4.8k, flat** |
+| 2,000/s writer latency p50/p95/p99 | 1.5 / 2.6 / 3.2 s | 30.5 / 374.8 / 430 s | **1.3 / 2.5 / 3.5 s** |
+| 2,000/s correlator | grows ~1,450/s (~550/s processed) | grows ~1,550/s | **grows ~1,320/s (~680/s processed)** |
+| ti-matcher lag (500 / 2,000/s) | — | — | **≤489 / ≤576, flat**; 20-35% CPU, ≤169 MiB |
+| writer drain ceiling | ~3,300/s (§12.1, two replicas) | ~800/s (all caps lifted) | **~4,500-7,800/s** (130.6k drained in ~30 s) |
+| correlator drain ceiling (50 synthetic agents) | ~800-890/s (§12.2) | ~310/s | **~1,350-1,700/s** |
+
+Every step: 0 dead letters, 0 error lines in shipper/writer/correlator, 0 restarts,
+all agent events delivered (150,000 and 600,000, `failed=0`). Postgres 37-75% CPU,
+correlators 12-50% each, ClickHouse 59-119%, Kafka up to 248%.
+
+**Result.** Writer and ti-matcher hold at both rates; the TI services did not cost the
+writer anything. The correlator is still the end-to-end limit (backlog T1): at 2,000/s it
+processes ~680/s (more than §13's ~550/s), and at 500/s it **did not stay flat** as in §13:
+lag plateaued at ~15.9k and p99 latency was 65 s instead of 3.3 s. ti-sync was idle during
+that step (cycles ended 09:03 and 09:18), ti-matcher has its own consumer group and wrote
+no matches for the load, so the cause is not identified yet (backlog T18). Load rows from
+this gate stay in the test tenant (tagged `g64-r500`, `g64-r2000`, `g64-ceil`) until the
+run-id purge tool (R8) exists.

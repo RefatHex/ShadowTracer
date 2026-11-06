@@ -53,7 +53,23 @@ class IncidentSummary(BaseModel):
     priority: int
 
 
+class TiSource(BaseModel):
+    name: str
+    reference_url: str | None
+    source_info: str | None
+
+
+class TiVerdict(BaseModel):
+    status: str
+    malicious: int
+    total: int
+    labels: list[str]
+    last_analysis: datetime.datetime | None
+    permalink: str
+
+
 class TiMatch(BaseModel):
+    id: int
     alert_id: str
     node: str
     rule_id: str
@@ -61,9 +77,19 @@ class TiMatch(BaseModel):
     observable_type: str
     observable: str
     ioc_id: int
+    ioc_type: str
     ioc_value: str
     sources: list[str]
+    source_details: list[TiSource] = []
     confidence: int
+    origin: str                      # matcher | virustotal | retro
+    tlp: str
+    labels: list[str]
+    mitre: list[str]
+    first_seen: datetime.datetime
+    last_seen: datetime.datetime
+    false_positive: bool
+    virustotal: TiVerdict | None = None
 
 
 class IncidentsPage(BaseModel):
@@ -262,10 +288,22 @@ def get_incident(
         finally:
             ch_client.close()
 
-    ti_matches = [TiMatch(**m) for m in db.execute(text(
-        "SELECT alert_id, node, rule_id, field, observable_type, observable, ioc_id, ioc_value, sources, confidence "
-        "FROM incident_ti WHERE incident_id = :i AND tenant_key = :t ORDER BY confidence DESC, id"),
-        {"i": incident_id, "t": current_user.tenant_key}).mappings()]
+    # Phase 6.4: every value below comes from feeds or alerts - rendered as text only.
+    rows = db.execute(text(
+        "SELECT t.id, t.alert_id, t.node, t.rule_id, t.field, t.observable_type, t.observable, t.ioc_id, i.type AS ioc_type, "
+        " t.ioc_value, t.sources, t.confidence, t.origin, i.tlp, i.labels, i.mitre, i.valid_from AS first_seen, i.last_seen, "
+        " EXISTS (SELECT 1 FROM ti_feedback f WHERE f.incident_ti_id = t.id) AS false_positive, "
+        " COALESCE((SELECT json_agg(json_build_object('name', src.name, 'reference_url', s.reference_url, "
+        "   'source_info', s.source_info) ORDER BY src.name) FROM ioc_sightings s JOIN ti_sources src ON src.id = s.source_id "
+        "   WHERE s.ioc_id = t.ioc_id AND s.revoked_at IS NULL AND (src.tenant_key IS NULL OR src.tenant_key = :t)), '[]') "
+        "   AS source_details, "
+        " (SELECT json_build_object('status', v.status, 'malicious', v.malicious, 'total', v.total, 'labels', v.labels, "
+        "   'last_analysis', v.last_analysis, 'permalink', v.permalink) FROM vt_verdicts v "
+        "   WHERE v.tenant_key = t.tenant_key AND v.sha256 = t.observable AND t.observable_type = 'sha256') AS virustotal "
+        "FROM incident_ti t JOIN iocs i ON i.id = t.ioc_id "
+        "WHERE t.incident_id = :i AND t.tenant_key = :t ORDER BY t.confidence DESC, t.id"),
+        {"i": incident_id, "t": current_user.tenant_key}).mappings().all()
+    ti_matches = [TiMatch(**r) for r in rows]
     return IncidentDetail(**row, alerts=alerts, ti_matches=ti_matches)
 
 

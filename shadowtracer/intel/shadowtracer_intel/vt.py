@@ -41,6 +41,7 @@ PUBLIC_PER_MINUTE, PUBLIC_PER_DAY = 4, 500
 TTL = {"malicious": dt.timedelta(days=30), "clean": dt.timedelta(days=7), "unknown": dt.timedelta(days=7)}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 QUOTA_COOLDOWN = dt.timedelta(seconds=65)
+QUOTA_COOLDOWN_MAX = dt.timedelta(hours=6)
 
 
 class VTError(Exception):
@@ -117,6 +118,22 @@ def budget(conn, tenant: str, fp: str, now: dt.datetime, daily_budget: int,
     return {**r, "allowed": reason is None, "reason": reason}
 
 
+def quota_cooldown_until(conn, fp: str):
+    """After HTTP 429 the key waits 65 s, doubling with every further consecutive 429, up to 6 h.
+    Derived from vt_calls, so it survives restarts (6.4: an in-memory pause was forgotten
+    when ti-sync restarted, and a refused key was retried every 65 s)."""
+    rows = conn.execute(text("SELECT called_at, http_status FROM vt_calls WHERE key_fp = :k ORDER BY called_at DESC LIMIT 20"),
+                        {"k": fp}).all()
+    n = 0
+    for _, status in rows:
+        if status != 429:
+            break
+        n += 1
+    if not n:
+        return None
+    return rows[0][0] + min(QUOTA_COOLDOWN * 2 ** (n - 1), QUOTA_COOLDOWN_MAX)
+
+
 def store_verdict(conn, tenant: str, v: dict) -> None:
     conn.execute(text(
         "INSERT INTO vt_verdicts (tenant_key, sha256, status, malicious, suspicious, total, labels, first_submission, "
@@ -163,7 +180,6 @@ class VTWorker:
         self.engine, self.keys, self.ch, self.http = engine, keys, ch, http
         self.per_minute, self.per_day = per_minute, per_day
         self.nodes = {c["tenant_key"]: [node_factory(n, ctr) for n, ctr in c["nodes"]] for c in clusters}
-        self.cooldown = {}                                   # key fp -> until (after HTTP 429)
         self.stats = Counter()
 
     def settings(self, conn, tenant):
@@ -218,7 +234,9 @@ class VTWorker:
                     if not enabled or not key:
                         continue                              # opt-in turned off since: never sent
                     fp = key_fp(key)
-                    if self.cooldown.get(fp, now) > now:
+                    until = quota_cooldown_until(conn, fp)
+                    if until and until > now:
+                        self.stats["waiting:quota cooldown"] += 1
                         break
                     b = budget(conn, tenant, fp, now, daily, self.per_minute, self.per_day)
                     if not b["allowed"]:
@@ -227,8 +245,8 @@ class VTWorker:
                 try:
                     v, status = lookup(sha, key, now, self.http)
                 except QuotaExceeded:
-                    self.cooldown[fp] = now + QUOTA_COOLDOWN
                     self._call(tenant, fp, sha, 429, "quota_exceeded")
+                    log.warning("VirusTotal quota exceeded for tenant %s (HTTP 429): backing off", tenant)
                     break
                 except (VTError, OSError, ValueError, KeyError) as exc:
                     self._call(tenant, fp, sha, None, f"error: {str(exc)[:200]}")
@@ -291,12 +309,10 @@ class VTWorker:
             row = {"tenant_key": tenant, "node": r["node"], "alert_id": r["alert_id"],
                    "alert_time": r["alert_time"] or now, "rule_id": r["rule_id"] or "", "field": "syscheck.sha256_after",
                    "observable_type": "sha256", "observable": v["sha256"], "ioc_id": ioc_id, "ioc_value": v["sha256"],
-                   "sources": ["virustotal"], "confidence": conf}
+                   "sources": ["virustotal"], "confidence": conf, "origin": "virustotal"}
             matcher.write_pg(conn, [row])                    # incident_ti + link + incident ti_confidence
         if self.ch is not None:
             rows = matcher.ch_rows([row], now)
-            for x in rows:
-                x[12] = "virustotal"                         # origin
             self.ch.insert("ti_matches", rows, column_names=matcher.CH_COLUMNS)
 
     def step(self) -> None:

@@ -146,23 +146,45 @@ def select(rows: list, allow: Allow, now: dt.datetime) -> tuple:
 _TTL_SQL = "CASE i.type " + " ".join(f"WHEN '{t}' THEN {d}" for t, d in HARD_TTL_DAYS.items()) + " END"
 
 
-def load(conn, tenant_key: str, now: dt.datetime) -> tuple:
-    """-> (live sighting rows, Allow) for one tenant: global + that tenant's private. The
-    rows are a STREAM ordered by IOC (server-side cursor, 5,000 at a time): consume it
-    inside the same transaction. 6.2: 159k sightings as a list cost ~150 MiB per tenant."""
+SCOPES = {"all": "(i.tenant_key IS NULL OR i.tenant_key = :t)", "global": "i.tenant_key IS NULL",
+          "private": "i.tenant_key = :t"}
+ALLOW_SCOPES = {"all": "(tenant_key IS NULL OR tenant_key = :t)", "global": "tenant_key IS NULL",
+                "private": "(tenant_key IS NULL OR tenant_key = :t)", "tenant": "tenant_key = :t"}
+
+
+def load(conn, tenant_key: str, now: dt.datetime, scope: str = "all", ids: list = None) -> tuple:
+    """-> (live sighting rows, Allow). scope "all" = global + the tenant's private IOCs (CDB
+    lists); "global" = global IOCs minus global allowlists only (ti-matcher's one shared set,
+    6.4/T17); "private" = the tenant's own IOCs. The rows are a STREAM ordered by IOC
+    (server-side cursor, 5,000 at a time): consume it inside the same transaction.
+    6.2: 159k sightings as a list cost ~150 MiB per tenant."""
     rows = conn.execute(text(
         "SELECT i.id AS ioc_id, i.type, i.value, i.tenant_key, s.tlp, src.trust, s.source_confidence, s.last_seen, "
         "s.valid_until, src.name AS source "
         "FROM iocs i JOIN ioc_sightings s ON s.ioc_id = i.id JOIN ti_sources src ON src.id = s.source_id "
-        "WHERE s.revoked_at IS NULL AND src.enabled AND (i.tenant_key IS NULL OR i.tenant_key = :t) "
+        f"WHERE s.revoked_at IS NULL AND src.enabled AND {SCOPES[scope]} "
+        # 6.4: global feeds the tenant switched off (ti_tenant_settings.disabled_sources)
+        + ("" if scope == "global" else "AND NOT (src.name = ANY(:disabled)) ")
+        + ("" if ids is None else "AND i.id = ANY(:ids) ") +           # retro-hunt: only these IOCs
         # Past the hard TTL by its newest sighting = expired in evaluate() anyway; filtering
         # here keeps work proportional to live intel (6.2: CIRCL brought 235k old domains).
         f"AND i.last_seen > :now - make_interval(days => {_TTL_SQL}) ORDER BY i.id").execution_options(yield_per=5000),
-        {"t": tenant_key, "now": now}).mappings()
-    allow = Allow(conn.execute(text(
-        "SELECT type, value FROM ti_allowlist WHERE (tenant_key IS NULL OR tenant_key = :t) "
+        {"t": tenant_key, "now": now, "disabled": disabled_sources(conn, tenant_key) if scope != "global" else [],
+         "ids": list(ids or [])}).mappings()
+    return rows, load_allow(conn, tenant_key, now, scope)
+
+
+def disabled_sources(conn, tenant_key) -> list:
+    if not tenant_key:
+        return []
+    r = conn.execute(text("SELECT disabled_sources FROM ti_tenant_settings WHERE tenant_key = :t"), {"t": tenant_key}).first()
+    return list(r[0]) if r else []
+
+
+def load_allow(conn, tenant_key: str, now: dt.datetime, scope: str = "all") -> Allow:
+    return Allow(conn.execute(text(
+        f"SELECT type, value FROM ti_allowlist WHERE {ALLOW_SCOPES[scope]} "
         "AND (expires_at IS NULL OR expires_at > :now)"), {"t": tenant_key, "now": now}).all())
-    return rows, allow
 
 
 def generate(conn, tenant_key: str, now: dt.datetime = None) -> tuple:

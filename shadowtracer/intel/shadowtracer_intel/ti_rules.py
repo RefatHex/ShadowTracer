@@ -74,6 +74,11 @@ def rules_xml() -> str:
                 "  </rule>",
             ]
             rule_id += 1
+    out.append("</group>")
+    # 6.4: its own wrapper so the alert's FIRST group is "ossec", like FIM 550/554: the
+    # correlator keys group-only alerts by (agent, first rule group), so "file appeared" and
+    # "VirusTotal says malicious" for the same agent land in ONE incident.
+    out.append('<group name="ossec,syscheck,shadowtracer_ti,">')
     out += [
         f'  <rule id="{VT_RULE_ID}" level="12" accuracy="0">',
         "    <if_sid>87105</if_sid>",

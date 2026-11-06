@@ -23,7 +23,7 @@ export KAFKA_SECURITY_PROTOCOL=SASL_SSL KAFKA_SASL_USERNAME=admin KAFKA_SASL_PAS
 PY=../../shadowtracer/correlate/.venv/bin/python3
 CH="docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client --query"
 PSQL="docker exec shadowtracer-lab-postgres-1 env PGPASSWORD=$POSTGRES_PASSWORD psql -U $POSTGRES_USER -d $POSTGRES_DB -tAc"
-PIPE="shadowtracer-lab-(shadowtracer-worker-test|shipper-worker-test|writer|correlate|kafka|ch-|postgres)"
+PIPE="shadowtracer-lab-(shadowtracer-worker-test|shipper-worker-test|writer|correlate|kafka|ch-|postgres|ti-sync|ti-matcher)"
 
 disk() {
   echo "alerts_dir_bytes=$(du -sb alerts-worker-test | cut -f1)" \

@@ -235,12 +235,56 @@ def deploy(engine, cluster: dict) -> dict:
             "nodes": {r.node: r.result for r in result.nodes}, "problems": result.problems[:5]}
 
 
+def record_key_status(engine, env=os.environ) -> None:
+    """6.4: whether each key is configured (yes/no, never the value) for the console."""
+    clusters = json.loads(env.get("TI_CLUSTERS", "[]"))
+    vt_keys = json.loads(env.get("TI_VT_KEYS", "{}"))
+    rows = [("otx", None, bool(env.get("OTX_API_KEY")))]
+    rows += [("virustotal", c["tenant_key"], bool(env.get(vt_keys.get(c["tenant_key"], ""), ""))) for c in clusters]
+    rows += [(f"misp-server:{s['name']}", s["tenant_key"], bool(env.get(s["key_env"], "")))
+             for s in json.loads(env.get("TI_MISP_SERVERS", "[]"))]
+    with engine.begin() as conn:
+        for name, tenant, ok in rows:
+            conn.execute(text("INSERT INTO ti_key_status (name, tenant_key, configured, updated_at) VALUES (:n, :t, :c, now()) "
+                              "ON CONFLICT (name, tenant_key) DO UPDATE SET configured = EXCLUDED.configured, updated_at = now()"),
+                         {"n": name, "t": tenant, "c": ok})
+
+
+def run_retro(engine, env=os.environ) -> list:
+    if not env.get("CLICKHOUSE_HOST"):
+        return []
+    from . import retro
+    ch = clickhouse_from_env(env)
+    days = int(env.get("TI_RETRO_DAYS", "7"))
+    interval = dt.timedelta(seconds=int(env.get("TI_RETRO_INTERVAL_SECONDS", "900")))
+    out = []
+    for c in json.loads(env.get("TI_CLUSTERS", "[]")):
+        try:
+            out.append(retro.run(engine, ch, c["tenant_key"], days=days, min_interval=interval))
+        except Exception as exc:  # noqa: BLE001 - one tenant's retro-hunt never stops the others or the sync
+            log.exception("retro-hunt failed for tenant %s", c["tenant_key"])
+            out.append({"tenant_key": c["tenant_key"], "retro_error": str(exc)[:300]})
+    return out
+
+
 def run_once(engine, env=os.environ) -> list:
     report = [refresh_warninglists(engine)]
     report += [sync_source(engine, f) for f in sources_from_env(env)]
     report += sync_misp_servers(engine, env)
     report += [deploy(engine, c) for c in json.loads(env.get("TI_CLUSTERS", "[]"))]
+    record_key_status(engine, env)
+    report += run_retro(engine, env)
     return report
+
+
+def clickhouse_from_env(env=os.environ):
+    if not env.get("CLICKHOUSE_HOST"):
+        return None
+    import clickhouse_connect
+    return clickhouse_connect.get_client(host=env["CLICKHOUSE_HOST"], port=int(env.get("CLICKHOUSE_PORT", "8123")),
+                                         username=env.get("CLICKHOUSE_USER", "default"),
+                                         password=env.get("CLICKHOUSE_PASSWORD", ""),
+                                         database=env.get("CLICKHOUSE_DATABASE", "shadowtracer"))
 
 
 def vt_worker_from_env(engine, env=os.environ):
@@ -249,15 +293,8 @@ def vt_worker_from_env(engine, env=os.environ):
     Opt-in itself is ti_tenant_settings.vt_enabled (console, admin-only, audited)."""
     from . import vt
     keys = {t: env.get(var, "") for t, var in json.loads(env.get("TI_VT_KEYS", "{}")).items()}
-    ch = None
-    if env.get("CLICKHOUSE_HOST"):
-        import clickhouse_connect
-        ch = clickhouse_connect.get_client(host=env["CLICKHOUSE_HOST"], port=int(env.get("CLICKHOUSE_PORT", "8123")),
-                                           username=env.get("CLICKHOUSE_USER", "default"),
-                                           password=env.get("CLICKHOUSE_PASSWORD", ""),
-                                           database=env.get("CLICKHOUSE_DATABASE", "shadowtracer"))
     return vt.VTWorker(engine, json.loads(env.get("TI_CLUSTERS", "[]")), {t: k for t, k in keys.items() if k},
-                       safe_reload.DockerNode, ch=ch, per_minute=int(env.get("VT_PER_MINUTE", vt.PUBLIC_PER_MINUTE)),
+                       safe_reload.DockerNode, ch=clickhouse_from_env(env), per_minute=int(env.get("VT_PER_MINUTE", vt.PUBLIC_PER_MINUTE)),
                        per_day=int(env.get("VT_PER_DAY", vt.PUBLIC_PER_DAY)))
 
 

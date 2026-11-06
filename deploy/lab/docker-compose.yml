@@ -216,6 +216,11 @@ services:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
       - ../../shadowtracer/intel/integrations:/shadowtracer-integrations:ro   # 6.3 VirusTotal spooler
+      # Agent registrations survive recreation (client.keys, global.db, per-agent dbs, rids),
+      # as in the official wazuh-docker volumes; also the TI lists/rules in etc.
+      - master-etc:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/etc
+      - master-queue:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/queue
+      - master-multigroups:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/var/multigroups
       # 6.1c follow-up: without the "ha" profile there are no workers, so the LB sends
       # the main tenant's agents to the master (its backup server) and shipper-master
       # ships this.
@@ -247,6 +252,11 @@ services:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
       - ../../shadowtracer/intel/integrations:/shadowtracer-integrations:ro   # 6.3 VirusTotal spooler
+      # Agent registrations survive recreation (client.keys, global.db, per-agent dbs, rids),
+      # as in the official wazuh-docker volumes; also the TI lists/rules in etc.
+      - worker1-etc:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/etc
+      - worker1-queue:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/queue
+      - worker1-multigroups:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/var/multigroups
       # shipper-worker1 (Phase 4 follow-up 2) mounts this same host path
       # read-only and tails it from there.
       - ./alerts-worker1:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
@@ -276,6 +286,11 @@ services:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
       - ../../shadowtracer/intel/integrations:/shadowtracer-integrations:ro   # 6.3 VirusTotal spooler
+      # Agent registrations survive recreation (client.keys, global.db, per-agent dbs, rids),
+      # as in the official wazuh-docker volumes; also the TI lists/rules in etc.
+      - worker2-etc:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/etc
+      - worker2-queue:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/queue
+      - worker2-multigroups:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/var/multigroups
       - ./alerts-worker2:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
     depends_on:
       shadowtracer-master:
@@ -324,6 +339,11 @@ services:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
       - ../../shadowtracer/intel/integrations:/shadowtracer-integrations:ro   # 6.3 VirusTotal spooler
+      # Agent registrations survive recreation (client.keys, global.db, per-agent dbs, rids),
+      # as in the official wazuh-docker volumes; also the TI lists/rules in etc.
+      - worker-test-etc:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/etc
+      - worker-test-queue:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/queue
+      - worker-test-multigroups:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/var/multigroups
       - ./alerts-worker-test:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
     networks:
       lab:
@@ -899,12 +919,11 @@ services:
     image: shadowtracer-lab/ti-matcher:local
     hostname: ti-matcher
     restart: unless-stopped
-    # 384m (6.3; 256m in 6.2, 128m in 6.1c): one ~135k-IOC set per tenant (126k CERT Polska
-    # domains) - two sets plus a reload hit 256m (OOM-killed 2026-11-06 03:53). Backlog T17
-    # (share the global part) brings it back down. Stopped while "ha" runs (ha.sh), so the
-    # ha budget is unchanged.
-    mem_limit: 384m
-    memswap_limit: 384m
+    # 256m (6.4): ONE shared global IOC set (~135k, mostly CERT Polska domains) plus small
+    # per-tenant sets (backlog T17 done): 140 MiB with two tenants, 164 MiB peak during a
+    # reload (was 218 MiB with a copy per tenant, OOM-killed at 256m in 6.3).
+    mem_limit: 256m
+    memswap_limit: 256m
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_GROUP_ID: shadowtracer-ti-matcher
@@ -1135,6 +1154,18 @@ networks:
         - subnet: 172.28.0.0/24
 
 volumes:
+  master-etc:
+  master-queue:
+  master-multigroups:
+  worker1-etc:
+  worker1-queue:
+  worker1-multigroups:
+  worker2-etc:
+  worker2-queue:
+  worker2-multigroups:
+  worker-test-etc:
+  worker-test-queue:
+  worker-test-multigroups:
   kafka-data:
   ch-keeper-data:
   ch1-data:

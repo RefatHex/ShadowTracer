@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from './AuthContext'
 import * as api from './api'
 import type { IncidentDetail, TriageAction } from './api'
+import { TiSection } from './TiSection'
 
 // Every field below - including alert.message, which is fully
 // attacker-controlled (see AlertRow.tsx/AlertRow.test.tsx) - is rendered
@@ -71,6 +72,7 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
       <p className="mb-4 text-sm text-gray-500">
         {incident.correlation_basis} · {incident.state} · {incident.triage_status} ·{' '}
         {incident.alert_count} alerts · max level {incident.max_level}
+        {incident.priority !== undefined && incident.priority !== incident.max_level && ` · priority ${incident.priority} (threat intel)`}
       </p>
       {incident.rare_pattern_flag && (
         <p className="mb-4 rounded bg-purple-50 dark:bg-purple-900/30 px-3 py-2 text-sm text-purple-800 dark:text-purple-300">
@@ -138,6 +140,8 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
         </div>
       )}
       {actionMessage && <p className="mb-4 text-sm text-gray-500">{actionMessage}</p>}
+
+      <TiSection matches={incident.ti_matches ?? []} onChanged={() => void load()} />
 
       <h2 className="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300">Alerts in this incident</h2>
       <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">

@@ -53,9 +53,9 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 | caddy | 61 / 15 | 80m (96m until 6.1c) |
 | shadowtracer-lb | 13 / 9 | 32m |
 | ti-sync (6.1b) | 74 steady; 6.2: OOM-killed at 256m importing CERT Polska's 126k domains until observations/rows were made compact, then 111 MiB for that import measured locally (lab peak below) | 256m (128m until 6.2) |
-| ti-matcher (6.1c) | 77 draining a 300,000-message backlog at ~8,500/s (librdkafka prefetch capped at 16 MiB; with the 64 MiB default it OOM-killed at 128m); 6.2: one set per tenant now holds ~135k IOCs; 6.3: two sets plus a reload were OOM-killed at 256m (anon 259 MB) | 384m (6.3; 256m in 6.2, 128m in 6.1c) |
+| ti-matcher (6.1c) | 77 draining a 300,000-message backlog at ~8,500/s (librdkafka prefetch capped at 16 MiB; with the 64 MiB default it OOM-killed at 128m); 6.2: one set per tenant now holds ~135k IOCs; 6.3: two sets plus a reload were OOM-killed at 256m (anon 259 MB) | 256m (6.4, shared global set: 140 MiB steady, 164 MiB reload peak, was 218 MiB; 384m in 6.3) |
 | load generators (`deploy/load/syslog_fleet.sh` containers) | ~30 | 128m each |
-| **total, default profile** (6.3) | | **9,600 MiB (9.4 GiB)**, 4,224 MiB under the cap |
+| **total, default profile** (6.4) | | **9,472 MiB (9.25 GiB)**, 4,352 MiB under the cap |
 | **total, `ha` profile** (6.3) | | 14,160 MiB with every service; **13,648 MiB as run by `./ha.sh up`** (ti-sync and ti-matcher stopped), under the cap. Backlog R7 closed |
 
 **Compose profiles (6.2 housekeeping).** The default profile runs one ClickHouse replica,
@@ -73,8 +73,9 @@ DDL never waits for a replica that is not deployed - `distributed_ddl_output_mod
 throw_only_active` does not cover a plain cluster, tested on 24.8) and the console's
 replica and shipper lists. `smoke-test.sh` checks whichever profile is up (`HA=1` forces
 `ha`); `recover-ch-after-crash.sh` and `repair-ch-lost-parts.sh` refuse to run without
-replica 2. Back to default: `./ha.sh down` (volumes of the ha services kept). Recreating the master drops its agent registrations: re-enroll the
-main tenant's agents with `./recreate-agent.sh agent-ubuntu-2 agent-rocky-1 agent-rocky-2`.
+replica 2. Back to default: `./ha.sh down` (volumes of the ha services kept). Managers keep agent registrations across recreation (6.4: named volumes on `etc`, `queue`,
+`var/multigroups`, as in the official wazuh-docker; `queue/vd`, the vulnerability-detection
+database, makes each `queue` volume ~12 GB).
 
 **Check `memory.events`, not only OOM kills.** A container can sit under its cap
 and still be starved: every `max` event in

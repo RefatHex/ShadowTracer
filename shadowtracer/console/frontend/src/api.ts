@@ -71,6 +71,125 @@ export interface IncidentDetail extends IncidentSummary {
   user_total: number
   closed_at: string | null
   alerts: Alert[]
+  ti_confidence?: number | null
+  priority?: number
+  ti_matches?: TiMatch[]
+}
+
+// --- Phase 6.4: threat intel ---------------------------------------------------------
+// Every string here comes from a feed or an alert: rendered as text only, links only
+// through safeHttpUrl().
+
+export interface TiSourceDetail {
+  name: string
+  reference_url: string | null
+  source_info: string | null
+}
+
+export interface TiVerdict {
+  status: string
+  malicious: number
+  total: number
+  labels: string[]
+  last_analysis: string | null
+  permalink: string
+}
+
+export interface TiMatch {
+  id: number
+  alert_id: string
+  node: string
+  rule_id: string
+  field: string
+  observable_type: string
+  observable: string
+  ioc_id: number
+  ioc_type: string
+  ioc_value: string
+  sources: string[]
+  source_details: TiSourceDetail[]
+  confidence: number
+  origin: string
+  tlp: string
+  labels: string[]
+  mitre: string[]
+  first_seen: string
+  last_seen: string
+  false_positive: boolean
+  virustotal: TiVerdict | null
+}
+
+export interface VtLookupResult {
+  status: 'cached' | 'queued' | 'budget_reached'
+  sha256?: string
+  verdict?: TiVerdict & { sha256: string }
+}
+
+export interface Ioc {
+  id: number
+  type: string
+  value: string
+  scope: 'global' | 'tenant'
+  tlp: string
+  confidence: number
+  labels: string[]
+  mitre: string[]
+  first_seen: string
+  last_seen: string
+  expires_at: string
+  revoked: boolean
+  sources: string[]
+}
+
+export interface IocQuery {
+  q?: string
+  type?: string
+  source?: string
+  scope?: 'all' | 'global' | 'tenant'
+  min_confidence?: number
+  expiry?: 'live' | 'expired' | 'all'
+  limit?: number
+  offset?: number
+}
+
+export interface TiSettings {
+  vt_enabled: boolean
+  vt_daily_budget: number
+  disabled_sources: string[]
+}
+
+export interface TiOverviewSource {
+  name: string
+  kind: string
+  private: boolean
+  enabled: boolean
+  last_success_at: string | null
+  last_error: string | null
+  iocs: number
+  hits_30d: number
+  false_positives_30d: number
+  fp_rate: number | null
+  disabled_for_tenant: boolean
+  stale: boolean
+}
+
+export interface TiOverview {
+  settings: TiSettings
+  sources: TiOverviewSource[]
+  keys: Record<string, boolean>
+  virustotal: { calls_today?: number; queued?: number; budget_reached?: boolean; cached_verdicts?: number }
+  retro: { cursor: string; last_run_at: string | null; last_counts: Record<string, number> } | null
+}
+
+/** Only http(s) URLs become links; anything else (javascript:, data:, ...) stays text. */
+export function safeHttpUrl(value: string | null | undefined): string | null {
+  if (!value) return null
+  try {
+    const u = new URL(value)
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.toString() : null
+  } catch {
+    return null
+  }
 }
 
 export type TriageAction = 'acknowledge' | 'escalate' | 'false_positive'
@@ -258,4 +377,43 @@ export async function fetchAttackCoverage(accessToken: string): Promise<AttackCo
     headers: authHeaders(accessToken), credentials: 'include',
   })
   return handle<AttackCoverage>(resp)
+}
+
+
+export async function vtLookup(accessToken: string, sha256: string): Promise<VtLookupResult> {
+  const resp = await fetch(`${API_BASE}/api/ti/virustotal/lookups`, {
+    method: 'POST', headers: { ...authHeaders(accessToken), 'Content-Type': 'application/json' },
+    credentials: 'include', body: JSON.stringify({ sha256 }),
+  })
+  return handle<VtLookupResult>(resp)
+}
+
+export async function markFalsePositive(accessToken: string, incidentTiId: number, reason: string): Promise<{ status: string }> {
+  const resp = await fetch(`${API_BASE}/api/ti/false-positives`, {
+    method: 'POST', headers: { ...authHeaders(accessToken), 'Content-Type': 'application/json' },
+    credentials: 'include', body: JSON.stringify({ incident_ti_id: incidentTiId, reason }),
+  })
+  return handle<{ status: string }>(resp)
+}
+
+export async function fetchIocs(accessToken: string, query: IocQuery): Promise<{ total: number; iocs: Ioc[] }> {
+  const params = new URLSearchParams()
+  for (const [k, v] of Object.entries(query)) {
+    if (v !== undefined && v !== '' && v !== null) params.set(k, String(v))
+  }
+  const resp = await fetch(`${API_BASE}/api/ti/iocs?${params}`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<{ total: number; iocs: Ioc[] }>(resp)
+}
+
+export async function fetchTiOverview(accessToken: string): Promise<TiOverview> {
+  const resp = await fetch(`${API_BASE}/api/ti/overview`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<TiOverview>(resp)
+}
+
+export async function updateTiSettings(accessToken: string, settings: TiSettings): Promise<TiSettings> {
+  const resp = await fetch(`${API_BASE}/api/ti/settings`, {
+    method: 'PUT', headers: { ...authHeaders(accessToken), 'Content-Type': 'application/json' },
+    credentials: 'include', body: JSON.stringify(settings),
+  })
+  return handle<TiSettings>(resp)
 }

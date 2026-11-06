@@ -36,7 +36,7 @@ URL_FIELDS = ("url",)                    # last component of a flattened field n
 DOMAIN_FIELDS = ("domain", "hostname", "queryname")
 HASH_FIELDS = {"syscheck.sha256_after": "sha256", "syscheck.sha1_after": "sha1", "syscheck.md5_after": "md5"}
 CH_COLUMNS = ["tenant_id", "cluster_node", "alert_id", "ioc_id", "alert_time", "rule_id", "field",
-              "observable_type", "observable", "ioc_value", "sources", "confidence", "origin", "matched_at"]
+              "observable_type", "observable", "ioc_value", "sources", "confidence", "origin", "matched_at", "retro"]
 LINK_WINDOW = "1 day"                    # alerts that never join an incident stop being retried
 
 
@@ -81,6 +81,26 @@ class IocSet:
             for i in range(1, len(labels) - 1):            # parents, never the bare TLD
                 hits += self.exact.get(("domain", ".".join(labels[i:])), ())
         return [h for h in hits if h.expires_at > now]
+
+
+class TenantIocs:
+    """What one tenant matches against (6.4, backlog T17): the ONE shared global set, minus
+    that tenant's own allowlist, plus the tenant's private set. The global set is no longer
+    copied per tenant."""
+
+    def __init__(self, shared: IocSet, private: IocSet, allow, version=None, disabled_sources=()):
+        self.shared, self.private, self.allow = shared, private, allow
+        self.disabled = frozenset(disabled_sources)       # global feeds this tenant switched off (6.4)
+        self.version, self.loaded_at = version, dt.datetime.now(dt.timezone.utc)
+        self.by_type = dict(shared.by_type)
+        for t, n in private.by_type.items():
+            self.by_type[t] = self.by_type.get(t, 0) + n
+        self.size = shared.size + private.size
+
+    def lookup(self, typ: str, value: str, now: dt.datetime) -> list:
+        hits = self.private.lookup(typ, value, now)
+        return hits + [h for h in self.shared.lookup(typ, value, now)
+                       if not self.allow.blocks(h.type, h.value) and not set(h.sources) <= self.disabled]
 
 
 def _add(out: dict, field: str, typ: str, raw):
@@ -141,28 +161,44 @@ def store_version(conn) -> int:
     return conn.execute(text("SELECT version FROM ti_store_version")).scalar_one()
 
 
-def load_set(conn, tenant_key: str, instance: str) -> IocSet:
+def load_global(conn) -> IocSet:
     now = dt.datetime.now(dt.timezone.utc)
     version = store_version(conn)                       # read first: a change during the load triggers another
-    rows, allow = listgen.load(conn, tenant_key, now)
-    iocs = IocSet.from_rows(rows, allow, now, version)
+    rows, allow = listgen.load(conn, None, now, scope="global")
+    return IocSet.from_rows(rows, allow, now, version)
+
+
+def load_set(conn, tenant_key: str, instance: str, shared: IocSet) -> TenantIocs:
+    now = dt.datetime.now(dt.timezone.utc)
+    version = store_version(conn)
+    rows, allow = listgen.load(conn, tenant_key, now, scope="private")
+    iocs = TenantIocs(shared, IocSet.from_rows(rows, allow, now, version),
+                      listgen.load_allow(conn, tenant_key, now, scope="tenant"), min(version, shared.version or version),
+                      listgen.disabled_sources(conn, tenant_key))
     conn.execute(text(
         "INSERT INTO ti_matcher_state (instance, tenant_key, store_version, iocs, by_type, loaded_at) "
         "VALUES (:i, :t, :v, :n, CAST(:b AS jsonb), :at) ON CONFLICT (instance, tenant_key) DO UPDATE SET "
         "store_version = EXCLUDED.store_version, iocs = EXCLUDED.iocs, by_type = EXCLUDED.by_type, "
         "loaded_at = EXCLUDED.loaded_at"),
-        {"i": instance, "t": tenant_key, "v": version, "n": iocs.size, "b": json.dumps(iocs.by_type), "at": now})
+        {"i": instance, "t": tenant_key, "v": iocs.version, "n": iocs.size, "b": json.dumps(iocs.by_type), "at": now})
     return iocs
 
 
-def write_pg(conn, rows: list) -> None:
-    if rows:
-        conn.execute(text(
-            "INSERT INTO incident_ti (tenant_key, node, alert_id, alert_time, rule_id, ioc_id, field, observable_type, "
-            "observable, ioc_value, sources, confidence) VALUES (:tenant_key, :node, :alert_id, :alert_time, :rule_id, "
-            ":ioc_id, :field, :observable_type, :observable, :ioc_value, :sources, :confidence) "
-            "ON CONFLICT (tenant_key, node, alert_id, ioc_id) DO NOTHING"), rows)
+def write_pg(conn, rows: list) -> list:
+    """Insert new matches (origin matcher | virustotal | retro), link them to incidents.
+    Returns the rows actually inserted (a row already present for that alert and IOC is
+    left as it was)."""
+    new = []
+    for r in rows:
+        if conn.execute(text(
+                "INSERT INTO incident_ti (tenant_key, node, alert_id, alert_time, rule_id, ioc_id, field, observable_type, "
+                "observable, ioc_value, sources, confidence, origin) VALUES (:tenant_key, :node, :alert_id, :alert_time, "
+                ":rule_id, :ioc_id, :field, :observable_type, :observable, :ioc_value, :sources, :confidence, :origin) "
+                "ON CONFLICT (tenant_key, node, alert_id, ioc_id) DO NOTHING RETURNING id"),
+                {**r, "origin": r.get("origin", "matcher")}).first():
+            new.append(r)
     link(conn)
+    return new
 
 
 def link(conn) -> int:
@@ -183,7 +219,8 @@ def link(conn) -> int:
 
 def ch_rows(rows: list, now: dt.datetime) -> list:
     return [[r["tenant_key"], r["node"], r["alert_id"], r["ioc_id"], r["alert_time"], r["rule_id"], r["field"],
-             r["observable_type"], r["observable"], r["ioc_value"], r["sources"], r["confidence"], "matcher", now]
+             r["observable_type"], r["observable"], r["ioc_value"], r["sources"], r["confidence"],
+             r.get("origin", "matcher"), now, r.get("origin") == "retro"]
             for r in rows]
 
 
@@ -197,7 +234,7 @@ class Matcher:
         self.consumer, self.engine, self.ch, self.instance = consumer, engine, ch, instance
         self.tenant_of, self.known, self.normalize = tenant_of, known, normalize or normalize_alert
         self.poll_s, self.max_age_s, self.batch, self.stop = poll_s, max_age_s, batch, stop
-        self.sets, self.version, self.checked = {}, None, 0.0
+        self.sets, self.shared, self.version, self.checked = {}, None, None, 0.0
         self.stats = {"alerts": 0, "matches": 0, "skipped": 0, "since": time.monotonic()}
 
     def clear_state(self) -> None:
@@ -206,10 +243,14 @@ class Matcher:
         with self.engine.begin() as conn:
             conn.execute(text("DELETE FROM ti_matcher_state WHERE instance = :i"), {"i": self.instance})
 
-    def iocs(self, tenant: str) -> IocSet:
+    def iocs(self, tenant: str) -> TenantIocs:
         if tenant not in self.sets:
             with self.engine.begin() as conn:
-                self.sets[tenant] = load_set(conn, tenant, self.instance)
+                if self.shared is None:
+                    self.shared = load_global(conn)
+                    log.info("loaded the shared global set: %d IOCs %s (store version %s)", self.shared.size,
+                             self.shared.by_type, self.shared.version)
+                self.sets[tenant] = load_set(conn, tenant, self.instance, self.shared)
             log.info("loaded tenant %s: %d IOCs %s (store version %s)", tenant, self.sets[tenant].size,
                      self.sets[tenant].by_type, self.sets[tenant].version)
         return self.sets[tenant]
@@ -222,9 +263,14 @@ class Matcher:
             version = store_version(conn)
             link(conn)                                          # matches whose incident appeared since
         now = dt.datetime.now(dt.timezone.utc)
-        for tenant, s in list(self.sets.items()):
-            if s.version != version or (now - s.loaded_at).total_seconds() >= self.max_age_s:
-                del self.sets[tenant]
+        stale = [t for t, s in self.sets.items()
+                 if s.version != version or (now - s.loaded_at).total_seconds() >= self.max_age_s]
+        if stale:
+            # drop every view first: the old shared set must be freed before the new one is
+            # built, or the reload briefly holds two (6.3: OOM-killed at 256m that way)
+            tenants = list(self.sets)
+            self.sets, self.shared = {}, None
+            for tenant in tenants:
                 self.iocs(tenant)
 
     def process(self, msgs) -> list:

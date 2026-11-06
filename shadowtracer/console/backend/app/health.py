@@ -501,7 +501,8 @@ def ti_sources(db: Session, sync_interval_seconds: int = 900) -> dict:
         # day), hourly feeds hourly; manual (analyst-entered) sources are not feeds
         limit = max(3 * sync_interval_seconds, SOURCE_REFRESH_SECONDS.get(r["kind"], 0) * 2)
         too_old = r["age_seconds"] is None or r["age_seconds"] > limit
-        is_stale = r["enabled"] and r["kind"] != "manual" and (failing or too_old)
+        # manual entries and VirusTotal verdicts are not scheduled feeds: never "stale"
+        is_stale = r["enabled"] and r["kind"] not in ("manual", "virustotal") and (failing or too_old)
         if is_stale:
             stale.append(r["name"])
         sources.append({

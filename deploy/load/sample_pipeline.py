@@ -33,9 +33,12 @@ from shadowtracer_ingest.topics import alerts_topic_for_tenant  # noqa: E402
 
 MANAGER = "shadowtracer-lab-shadowtracer-worker-test-1"
 SHIPPER = "shadowtracer-lab-shipper-worker-test-1"
-CH_NODES = ["shadowtracer-lab-ch-clickhouse-1-1", "shadowtracer-lab-ch-clickhouse-2-1"]
+# 6.4: ch-clickhouse-2 runs only in the "ha" compose profile - sample the replicas that run.
+CH_NODES = [n for n in ("shadowtracer-lab-ch-clickhouse-1-1", "shadowtracer-lab-ch-clickhouse-2-1")
+            if subprocess.run(["docker", "ps", "-q", "-f", f"name=^{n}$", "-f", "status=running"],
+                              capture_output=True, text=True).stdout.strip()]
 PG = "shadowtracer-lab-postgres-1"
-GROUPS = {"w_lag": "shadowtracer-writer", "c_lag": "shadowtracer-correlate"}
+GROUPS = {"w_lag": "shadowtracer-writer", "c_lag": "shadowtracer-correlate", "m_lag": "shadowtracer-ti-matcher"}
 
 
 def sh(*cmd) -> str:
@@ -104,7 +107,7 @@ def main():
     def snap():
         return time.time(), analysisd(), shipper_lag(), kafka(), clickhouse(), postgres()
 
-    print("time ad_recv/s ad_proc/s ad_drop/s ad_q ship_lag_b w_lag c_lag topic_in/s ch_ins_q/s ch_rows/s ch_parts pg_tx/s pg_lockwait", flush=True)
+    print("time ad_recv/s ad_proc/s ad_drop/s ad_q ship_lag_b w_lag c_lag m_lag topic_in/s ch_ins_q/s ch_rows/s ch_parts pg_tx/s pg_lockwait", flush=True)
     prev = snap()
     t_end = time.time() + args.duration if args.duration else float("inf")
     while time.time() < t_end:
@@ -115,7 +118,7 @@ def main():
         (_, ad, ship, (hw, lags), ch, pg), (_, ad0, _, (hw0, _), ch0, pg0) = cur, prev
         print(time.strftime("%H:%M:%S"),
               f"{r(ad[0], ad0[0]):.0f} {r(ad[1], ad0[1]):.0f} {r(ad[2], ad0[2]):.0f} {ad[3]:.2f}",
-              ship, lags["w_lag"], lags["c_lag"], f"{r(hw, hw0):.0f}",
+              ship, lags["w_lag"], lags["c_lag"], lags["m_lag"], f"{r(hw, hw0):.0f}",
               f"{r(ch[0], ch0[0]):.1f} {r(ch[1], ch0[1]):.0f} {ch[2]}",
               f"{r(pg[0], pg0[0]):.0f} {pg[1]}", flush=True)
         prev = cur

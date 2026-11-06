@@ -647,6 +647,76 @@ Lab checks (2026-11-06; test tenant opted in, main tenant not):
 | daily budget forced to 1 | a new distinct hash stays `pending`, no call; `/health/detail.virustotal.budget_reached` lists the test tenant (calls_today 2, queued 1); the analyst API answers `202 budget_reached` for it and `cached` for EICAR |
 | VirusTotal calls during the whole check | **2**: one read timeout (20 s), then the successful lookup |
 
+### 3.5 Built in 6.4 (2026-11-06): console, false positives, retro-hunt
+
+**Console** (React, text-only rendering of every feed and alert value; a source link is an
+`<a>` only for http/https, `api.safeHttpUrl`):
+- **Incident detail, "Threat intel" section** (`TiSection.tsx`): per match the observable
+  and field, IOC type and value, sources with their links and context (pulse/event name),
+  confidence, TLP, tags, MITRE, first seen, origin (matcher | virustotal | retro), the
+  cached VirusTotal verdict (malicious/total, labels, analysis date, report link), a
+  **Check on VirusTotal** button for hashes (analyst+, same cache and budget; shows
+  `budget_reached`) and **Mark false positive** (analyst+). The header shows the priority
+  raised by threat intel.
+- **Mark false positive** (`POST /api/ti/false-positives`, audited): the observable joins
+  the tenant's allowlist (`kind fp_marking`, `origin_ref incident_ti:<id>`), so that
+  tenant's CDB lists (next deploy) and ti-matcher (next reload, <= 60 s) stop matching it;
+  no other tenant is affected. The label goes to `ti_feedback` for the ML phase.
+- **IOC browser** (`#/iocs`, `GET /api/ti/iocs`): search and filter by value, type,
+  source, scope (global / this tenant), minimum confidence and expiry (hard TTL from the
+  newest sighting). A tenant sees global intel and its own private IOCs, never another
+  tenant's; global intel is never TLP:AMBER/RED (rejected at import, filtered again).
+- **TI settings** (`#/ti-settings`, `GET /api/ti/overview` for every role, `PUT
+  /api/ti/settings` admin only, audited): per-tenant use of each global feed
+  (`disabled_sources`: those feeds' IOCs leave that tenant's lists and matcher view),
+  VirusTotal opt-in and budget, keys configured yes/no (`ti_key_status`, written by ti-sync,
+  never a value), last sync, staleness, IOC counts, hits and false-positive rate per source
+  over 30 days, last retro-hunt.
+
+**Retro-hunt** (`retro.py`, in ti-sync after each cycle, per tenant, never on the hot
+path): IOCs created since the tenant's cursor (one-hour overlap for late commits; the
+first run only sets the cursor) are matched against that tenant's ClickHouse events of
+the last `TI_RETRO_DAYS` (7). ClickHouse narrows candidates by exact value (source or
+destination IP, any field equal to a hash, domain or URL); `matcher.match` decides, so a
+retro hit is what the live matcher would have found. New hits go to `incident_ti`
+(origin `retro`) and `ti_matches` (`retro = true`) and are linked to their (old)
+incidents; an alert already matched to that IOC is left alone. Bounds: one run per tenant
+per `TI_RETRO_INTERVAL_SECONDS` (900), at most 5,000 new IOCs per run (the cursor stops at
+the last one taken), 20,000 candidate events, 60 s ClickHouse limit. Parent-domain and
+CIDR matches are live-only (backlog D7).
+
+**ti-matcher memory (backlog T17, done):** one shared global set (global IOCs minus global
+allowlists) plus a small per-tenant view (private IOCs, the tenant's own allowlist and
+disabled feeds applied at lookup). Two tenants: 218 -> 140 MiB anonymous, 164 MiB reload
+peak; limit 384m -> 256m.
+
+**VirusTotal alert in the FIM incident:** rule 110100 sits in its own wrapper group
+`ossec,syscheck,shadowtracer_ti`, so its first rule group is `ossec`, like FIM 550/554. The
+correlator keys group-only alerts by (agent, first group), so "file appeared" and
+"VirusTotal: malicious" for the same agent within the session gap (600 s) land in one
+incident. Fingerprints: an incident's fingerprint hashes its sorted rule groups, so a FIM
+incident with a malicious verdict (`shadowtracer_ti`, `ti_high`, `ti_virustotal` added)
+fingerprints differently from a plain "file added" incident and never inherits a
+benign-FIM suppression. A verdict queued past the session gap (budget reached) starts a new
+incident under the same key; `incident_ti` still links the original FIM incident.
+
+**VirusTotal HTTP 429** (2026-11-06): after the budget reset the free key answered every
+call with 429 (5 calls, one per 65 s). The back-off is now derived from `vt_calls` (65 s,
+doubling per consecutive 429, at most 6 h), so a restarted worker does not retry a refused
+key early. VirusTotal is switched off for the test tenant until the owner confirms the key.
+
+Lab checks (2026-11-06):
+
+| check | result |
+|---|---|
+| incident with an OTX/manual IP match | #378566: 30 matches (`manual:global`, confidence 90), priority 10 -> 12; screenshot `docs/report/6.4-incident-ti-ip-match.png` |
+| EICAR incident | #394304: 2 matches, VirusTotal 62/64 (`virus.eicar/test`), report link, priority 5 -> 12; `6.4-incident-eicar-virustotal-cached.png` |
+| "Check on VirusTotal" | `cached 62/64` from the tenant's cache, no call (VirusTotal is off for the tenant: a cached verdict is still shown, only new lookups need the opt-in) |
+| false positive, tenant only | global IOC 45.33.32.181: before, CDB 110000 + matcher hit on both tenants; marked on the test tenant (allowlist `fp_marking`, `ti_feedback`), list redeployed (ipv4-high 12,644 -> 12,643): test tenant no TI alert and no matcher hit, main tenant still both |
+| retro-hunt | tenant-private IOC 203.0.113.77 (seen 2026-11-01..04): 693 retro matches on 184 closed incidents incl. #34008 (2026-11-04), `ti_matches.retro = true`; `6.4-incident-retro-hunt.png` |
+| IOC browser, settings | real data (Spamhaus DROP 1,762, CERT Polska 125,967, CIRCL 274,339, ...); viewer `PUT /api/ti/settings` -> 403, page read-only; `6.4-ioc-browser.png`, `6.4-ti-settings-admin.png`, `6.4-ti-settings-viewer-read-only.png` |
+| VirusTotal alert joins the FIM incident | 554 and 110100 (synthetic verdict through the worker's delivery path, no API call) in one incident #394323, key `001|rulegroup:ossec` |
+
 ---
 
 ## 4. Store, generation, distribution, reload

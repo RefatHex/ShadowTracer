@@ -153,7 +153,7 @@ def test_lookup_api_opt_in_cache_queue_budget_and_audit(client, db, tenant):
     viewer = _token_for(client, db, tenant_id, f"viewer-{uuid.uuid4().hex[:8]}@example.com")
     H = lambda tok: {"Authorization": f"Bearer {tok}"}  # noqa: E731
 
-    assert client.get("/api/ti/settings", headers=H(admin)).json() == {"vt_enabled": False, "vt_daily_budget": 500}
+    assert client.get("/api/ti/settings", headers=H(admin)).json() == {"vt_enabled": False, "vt_daily_budget": 500, "disabled_sources": []}
     assert client.post("/api/ti/virustotal/lookups", json={"sha256": EICAR}, headers=H(viewer)).status_code == 403
     assert client.post("/api/ti/virustotal/lookups", json={"sha256": EICAR}, headers=H(analyst)).status_code == 409
     assert client.put("/api/ti/settings", json={"vt_enabled": True, "vt_daily_budget": 2}, headers=H(analyst)).status_code == 403
@@ -189,3 +189,20 @@ def test_lookup_api_opt_in_cache_queue_budget_and_audit(client, db, tenant):
         audit_log.c.action == "virustotal_lookup", audit_log.c.target.in_([EICAR, OTHER]))).all()]
     assert actions[:1] == ["refused:disabled"] and "queued" in actions and "cached" in actions and "budget_reached" in actions
     assert db.execute(audit_log.select().where(audit_log.c.action == "ti_settings_changed")).first() is not None
+
+
+def test_quota_backoff_doubles_and_survives_a_restart(db, engine):
+    """6.4: a key refused with HTTP 429 waits 65 s, then 130 s, ... (cap 6 h), computed from
+    vt_calls - a restarted worker does not retry a refused key early."""
+    fp = vt.key_fp(f"backoff-{uuid.uuid4().hex}")
+    t0 = datetime.datetime(2026, 11, 6, 8, 31, tzinfo=datetime.timezone.utc)
+    with engine.begin() as conn:
+        assert vt.quota_cooldown_until(conn, fp) is None
+        for i in range(3):
+            conn.execute(text("INSERT INTO vt_calls (key_fp, tenant_key, sha256, called_at, http_status, outcome) "
+                              "VALUES (:k, 'x', :h, :at, 429, 'quota_exceeded')"),
+                         {"k": fp, "h": OTHER, "at": t0 + datetime.timedelta(minutes=i)})
+        assert vt.quota_cooldown_until(conn, fp) == t0 + datetime.timedelta(minutes=2, seconds=260)   # 65 s x 2^2
+        conn.execute(text("INSERT INTO vt_calls (key_fp, tenant_key, sha256, called_at, http_status, outcome) "
+                          "VALUES (:k, 'x', :h, :at, 200, 'clean')"), {"k": fp, "h": OTHER, "at": t0 + datetime.timedelta(hours=1)})
+        assert vt.quota_cooldown_until(conn, fp) is None                                             # a success resets it

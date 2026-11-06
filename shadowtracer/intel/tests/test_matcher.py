@@ -117,3 +117,18 @@ def test_process_uses_topic_tenant_and_skips_unknown_and_bad():
                       Msg("shadowtracer.t.t3.alerts", good), Msg("shadowtracer.t.t1.alerts", b"{not json")])
     assert [(r["tenant_key"], r["ioc_id"]) for r in rows] == [("t1", 1)]       # t2's set has no such IOC
     assert m.stats["alerts"] == 2 and m.stats["skipped"] == 2
+
+
+def test_tenants_share_one_global_set_minus_their_own_allowlist():
+    """T17 (6.4): one shared global IocSet object; a tenant's allowlist hides a global IOC for
+    that tenant only; private IOCs stay private."""
+    from shadowtracer_intel.listgen import Allow
+    from shadowtracer_intel.matcher import TenantIocs
+    shared = IocSet([hit(1, "ipv4", "45.33.32.157"), hit(2, "cidr4", "10.20.0.0/16")])
+    a = TenantIocs(shared, IocSet([hit(3, "ipv4", "45.33.32.170")]), Allow([("ipv4", "45.33.32.157")]))
+    b = TenantIocs(shared, IocSet([]), Allow([]))
+    assert a.shared is b.shared
+    assert a.lookup("ipv4", "45.33.32.157", NOW) == [] and [h.ioc_id for h in b.lookup("ipv4", "45.33.32.157", NOW)] == [1]
+    assert [h.ioc_id for h in a.lookup("ipv4", "45.33.32.170", NOW)] == [3] and b.lookup("ipv4", "45.33.32.170", NOW) == []
+    assert [h.ioc_id for h in a.lookup("ipv4", "10.20.1.1", NOW)] == [2]
+    assert (a.size, a.by_type) == (3, {"ipv4": 2, "cidr4": 1})
