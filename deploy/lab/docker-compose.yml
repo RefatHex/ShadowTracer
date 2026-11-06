@@ -47,7 +47,8 @@ x-console-backend-env: &console-backend-env
   # Dead-letter-ClickHouse incident (2026-10-08): /health/detail and
   # /health/ready's replica check need to query EVERY replica, not just
   # the one CLICKHOUSE_HOST above - see health.py's clickhouse_replica_health.
-  CLICKHOUSE_HOSTS: ch-clickhouse-1:8123,ch-clickhouse-2:8123
+  # Default profile: one replica. ha.env sets both.
+  CLICKHOUSE_HOSTS: ${CLICKHOUSE_HOSTS:-ch-clickhouse-1:8123}
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
   CLICKHOUSE_DATABASE: shadowtracer
@@ -64,7 +65,8 @@ x-console-backend-env: &console-backend-env
   # Phase 4 follow-up 2: shipper/writer are services on this same compose
   # network now, not host processes - reached by service name directly,
   # no host.docker.internal needed any more.
-  SHIPPER_METRICS_URLS: http://shipper-worker1:9101,http://shipper-worker2:9101
+  # Main tenant's shippers: shipper-master by default; ha.env adds the workers'.
+  SHIPPER_METRICS_URLS: ${SHIPPER_METRICS_URLS:-http://shipper-master:9101}
 
 # Phase 4 follow-up 2: one shipper container per manager node, reading
 # that node's alerts volume read-only - it has no business writing to it.
@@ -210,9 +212,13 @@ services:
       CLUSTER_KEY: ${CLUSTER_KEY:?set CLUSTER_KEY in deploy/lab/.env}
       ENROLL_PASSWORD: ${ENROLL_PASSWORD:?set ENROLL_PASSWORD in deploy/lab/.env}
       SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
-    volumes: &manager-config-mounts
+    volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
       - ./healthcheck-manager.sh:/healthcheck.sh:ro
+      # 6.1c follow-up: without the "ha" profile there are no workers, so the LB sends
+      # the main tenant's agents to the master (its backup server) and shipper-master
+      # ships this.
+      - ./alerts-master:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts
     ports:
       # Only the API goes to the host - 1514/1515 stay internal to the lab
       # network (the Windows host has had Hyper-V reserve those before).
@@ -222,6 +228,7 @@ services:
         ipv4_address: 172.28.0.10
 
   shadowtracer-worker1:
+    profiles: ["ha"]          # off by default (memory); see ha.env
     build: *manager-build
     image: shadowtracer-lab/manager:local
     hostname: shadowtracer-worker1
@@ -249,6 +256,7 @@ services:
         ipv4_address: 172.28.0.11
 
   shadowtracer-worker2:
+    profiles: ["ha"]          # off by default (memory); see ha.env
     build: *manager-build
     image: shadowtracer-lab/manager:local
     hostname: shadowtracer-worker2
@@ -328,10 +336,14 @@ services:
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
+      shadowtracer-master:
+        condition: service_healthy
       shadowtracer-worker1:
         condition: service_healthy
+        required: false          # "ha" profile only
       shadowtracer-worker2:
         condition: service_healthy
+        required: false
     # Phase 5.6 Item 9: no build/Dockerfile for this service (plain
     # haproxy:2.9-alpine image), so this goes here rather than in a
     # HEALTHCHECK instruction like every other service's. Confirms the
@@ -616,7 +628,9 @@ services:
       CLICKHOUSE_DB: shadowtracer
     volumes:
       - ./clickhouse/config.d/zookeeper.xml:/etc/clickhouse-server/config.d/zookeeper.xml:ro
-      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      # One-replica cluster by default, so ON CLUSTER DDL never waits for a replica that
+      # is not deployed; ha.env switches to cluster.xml (both replicas).
+      - ./clickhouse/config.d/${CH_CLUSTER_XML:-cluster-single.xml}:/etc/clickhouse-server/config.d/cluster.xml:ro
       - ./clickhouse/config.d/resources.xml:/etc/clickhouse-server/config.d/resources.xml:ro
       - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
       - ./clickhouse/config.d/durability.xml:/etc/clickhouse-server/config.d/durability.xml:ro
@@ -642,6 +656,7 @@ services:
         ipv4_address: 172.28.0.32
 
   ch-clickhouse-2:
+    profiles: ["ha"]          # off by default (memory); see ha.env
     image: clickhouse/clickhouse-server:24.8
     hostname: ch-clickhouse-2
     restart: unless-stopped
@@ -703,7 +718,35 @@ services:
 
   # --- Phase 4 follow-up 2: ingest pipeline as services ------------------
 
+  # Ships the master's alerts (main tenant) - the agents' manager in the default profile.
+  shipper-master:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ingest.Dockerfile
+    image: shadowtracer-lab/ingest:local
+    hostname: shipper-master
+    command: ["python3", "run_shipper.py"]
+    restart: unless-stopped
+    mem_limit: 104m
+    memswap_limit: 104m
+    environment:
+      <<: *shipper-env
+      MANAGER_NAME: shadowtracer-master
+    volumes:
+      - ./alerts-master:${SHADOWTRACER_INSTALL_DIR:-/var/ossec}/logs/alerts:ro
+      - shipper-master-offsets:/offsets
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
+    depends_on:
+      shadowtracer-master:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      lab:
+        ipv4_address: 172.28.0.47
+
   shipper-worker1:
+    profiles: ["ha"]          # off by default (memory); see ha.env
     build:
       context: ../..
       dockerfile: deploy/lab/ingest.Dockerfile
@@ -732,6 +775,7 @@ services:
         ipv4_address: 172.28.0.38
 
   shipper-worker2:
+    profiles: ["ha"]          # off by default (memory); see ha.env
     build:
       context: ../..
       dockerfile: deploy/lab/ingest.Dockerfile
@@ -795,8 +839,9 @@ services:
       dockerfile: deploy/lab/ti-sync.Dockerfile
     image: shadowtracer-lab/ti-sync:local
     restart: unless-stopped
-    mem_limit: 128m
-    memswap_limit: 128m
+    # 6.2: 256m (128m until 6.2) - CERT Polska's 126k-domain list is one sync in memory.
+    mem_limit: 256m
+    memswap_limit: 256m
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
@@ -805,6 +850,11 @@ services:
       TI_SYNC_INTERVAL_SECONDS: "900"
       # Customer-supplied in the product; ShadowTracer's own key only in the lab.
       OTX_API_KEY: ${OTX_API_KEY:-}
+      # 6.2: product defaults follow licences (FEEDS in sync.py); the lab also imports
+      # CIRCL OSINT (no licence published - customer-enabled in the product).
+      TI_FEED_CIRCL_OSINT: "1"
+      # A tenant's own MISP server: none in the lab (no MISP container, memory).
+      TI_MISP_SERVERS: ${TI_MISP_SERVERS:-[]}
       TI_CLUSTERS: >-
         [{"tenant_key": "${TENANT_KEY:?set TENANT_KEY in deploy/lab/.env}",
           "nodes": [["master", "shadowtracer-lab-shadowtracer-master-1"],
@@ -832,8 +882,9 @@ services:
     image: shadowtracer-lab/ti-matcher:local
     hostname: ti-matcher
     restart: unless-stopped
-    mem_limit: 128m
-    memswap_limit: 128m
+    # 6.2: 256m (128m until 6.2) - one IOC set per tenant incl. 126k CERT Polska domains (backlog T17).
+    mem_limit: 256m
+    memswap_limit: 256m
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_GROUP_ID: shadowtracer-ti-matcher
@@ -1069,6 +1120,7 @@ volumes:
   ch1-data:
   ch2-data:
   postgres-data:
+  shipper-master-offsets:
   shipper-worker1-offsets:
   shipper-worker2-offsets:
   shipper-worker-test-offsets:

@@ -527,6 +527,75 @@ Lab checks (2026-11-06; outputs in the 6.1c commit message):
 | matcher stopped 2 min during 300/s | writer and correlator lag 0 throughout, ingestion 9,010 events/30 s flat; matcher lag 37,151, 0 within 77 s of restart; 120/120 listed-IP alerts matched (86 sent while stopped) |
 | own ceiling | ~8,500 alerts/s, one instance, ~45% CPU, 77 MiB (backlog T9) |
 
+### 3.3 Built in 6.2 (2026-11-06): MISP feeds and free feeds
+
+**MISP feed-only mode** (`feeds.parse_misp_manifest`, `parse_misp_event`,
+`sync.sync_misp_feed`): `manifest.json`, then every event whose timestamp is past the
+cursor (first run: the last 365 days, the longest hard TTL), oldest first, **one
+transaction per event** with the cursor advanced after each, so memory stays one event
+and a failure resumes where it stopped. Imported: `to_ids` attributes of type `ip-src`,
+`ip-dst` (and their `|port` forms), `domain`, `hostname`, `url`, `md5`, `sha1`, `sha256`
+(and `filename|<hash>`), from the event and its objects; deleted attributes skipped. Kept
+per sighting: event uuid (`source_ref`), event link (`reference_url`), event info
+(`source_info`, ingest migration a3d5f0c2b8e1), event and attribute tags (`labels`;
+MITRE technique ids from galaxy tags go to `mitre`), TLP (attribute tag, else event tag,
+else the feed's default), source confidence from `threat_level_id` (high 0.9, medium
+0.75, low 0.5, undefined 0.6), and the **attribute's own timestamp** as last seen:
+CIRCL republishes old events with fresh event timestamps, and an event timestamp would
+keep 2023 indicators "fresh".
+
+**Tenant MISP server connector** (`misp_server.py`, PyMISP 2.5.34.4, BSD-2-Clause): per
+tenant URL + API key (`TI_MISP_SERVERS`; the key comes from the env var it names, never
+the database), `attributes/restSearch` with `to_ids=1`, the matchable types,
+`includeEventTags`, `timestamp >= cursor`, 1,000 per page. Everything it returns is that
+tenant's private intel whatever its TLP. **Not tested against a live MISP server**: unit
+tests drive the real PyMISP client over mocked HTTP shaped after the MISP REST API; the
+lab runs no MISP container (memory).
+
+**Withdrawals** (`to_ids` later false, attribute deleted, event removed from a feed) are
+not applied yet; such sightings age out by TTL/decay (backlog D5). Snapshot feeds
+(abuse.ch, DROP, CERT Polska, the IP lists) are revoked correctly.
+
+**Store writes are set-based** (6.2): a batched insert into a temp table (`execute_values`), then one
+upsert per table, so a 126,000-entry list is a handful of statements and one
+`ti_store_version` bump, not ~250,000. List generation streams sightings ordered by IOC
+through a server-side cursor and skips IOCs past their hard TTL in SQL (CIRCL brought
+235,000 old domains); confidence write-back is one statement. Lab: ti-sync peak 108 MiB
+for a full cycle, one tenant's list generation 120 MiB / 18 s, a tenant's matcher set
+(~136k IOCs) 142 MiB peak while loading.
+
+**Feeds and licences** (read 2026-11-06; on = enabled by default in the product, only
+where commercial use is clearly allowed; off = the customer enables it with
+`TI_FEED_<NAME>=1`). Counts are this lab's import on 2026-11-06 after normalisation;
+"listed" = in a CDB list now.
+
+| feed | licence / terms (as read) | link | default | IOCs imported |
+|---|---|---|---|---|
+| abuse.ch Feodo Tracker | CC0 | [feodotracker.abuse.ch](https://feodotracker.abuse.ch/blocklist/) | **on** | 5 ipv4 (all offline for months: expired) |
+| Spamhaus DROP v4 / v6 | "The DROP list is free for any use", "at no cost, regardless of size or business type"; downloads at most once a day; keep the © line ([terms](https://www.spamhaus.org/drop/terms/), [page](https://www.spamhaus.org/blocklists/do-not-route-or-peer/)) | `spamhaus.org/drop/drop_v4.json`, `drop_v6.json` | **on** (daily) | 1,762 cidr4 + 90 cidr6 (EDROP merged into DROP 2024-04-10) |
+| CERT Polska warning list | "may be used by any user for any purpose, including commercial purposes" ([policy](https://cert.pl/en/warning-list/)) | `hole.cert.pl/domains/v2/domains.txt` | **on** (hourly) | 126,149 domains |
+| AlienVault OTX | the customer's own OTX account and key | `otx.alienvault.com` | on when a key is set | 8,241 (first sync: domain 2,398, sha256 2,201, sha1 1,220, md5 1,189, url 826, ipv4 406, ipv6 1) |
+| CIRCL OSINT (MISP feed) | **no licence published**; events tagged TLP:CLEAR/WHITE (a sharing marking, not a licence) ([feed](https://www.circl.lu/doc/misp/feed-osint/)) | MISP feed | off (lab: on); D6 asks CIRCL | 312 events, 274,339: domain 261,076, ipv4 12,336, md5 271, sha256 241, ipv6 239, sha1 130, url 46; listed: 289 domains (rest past TTL) |
+| Botvrij.eu (MISP feed) | free, but "You cannot resell the data, neither as an individual package or as part of a larger package" ([FAQ](https://www.botvrij.eu/)) | MISP feed | off | 1 event in the last 365 days: 30 (sha256 16, url 8, ipv4 4, domain 2) |
+| blocklist.de all | no licence grant; terms page silent on commercial use ([terms](https://www.blocklist.de/en/terms.html)) | `lists.blocklist.de/lists/all.txt` | off | 26,306 (ipv4 26,015, ipv6 291) |
+| CINS Army | "use in any way you see fit", no licence ([cinsscore.com](https://cinsscore.com/)) | `cinsscore.com/list/ci-badguys.txt` | off | 15,000 ipv4 |
+| Emerging Threats compromised IPs | no terms on the page; "free to download and use via GPL 2.0" per an unofficial forum reply ([thread](https://community.emergingthreats.net/t/licensing-is-the-compromised-ips-list-also-open/676)) | `rules.emergingthreats.net/blockrules/compromised-ips.txt` | off | 511 ipv4 |
+| dataplane.org sshpwauth | "All Rights Reserved" ([dataplane.org](https://dataplane.org/)) | `dataplane.org/sshpwauth.txt` | off | 11,222 ipv4 |
+| DigitalSide Threat-Intel (MISP feed) | repo LICENSE is MIT with a website-template copyright line: scope unclear; host refused connections 2026-11-06 | MISP feed | not added | — |
+| Phishing.Database | MIT (repository) | `phish.co.za` | not added | download returned HTTP 503 on 2026-11-06 |
+| abuse.ch URLhaus / ThreatFox / MalwareBazaar | Auth-Key; commercial use via a Spamhaus subscription (§7) | — | off (not added yet) | — |
+
+Not a licence assessment by a lawyer: each "on" rests on the quoted wording.
+
+Lab checks (2026-11-06):
+
+| check | result |
+|---|---|
+| MISP feed IP -> TI alert | a local MISP-format feed (fresh timestamps, served over HTTP) through `sync_misp_feed`: 2 events, 1 accepted; `Connection closed by 45.33.32.220` -> rule 110001 (level 8) on both tenants. No real CIRCL IP could be used: CIRCL's newest IPv4 was last seen 2026-09-18, past the 30-day IP TTL |
+| TLP:RED event | as a global MISP feed event: rejected ("TLP:RED is never global"); as the test tenant's MISP server (PyMISP, mocked REST): accepted as private. 45.33.32.221 is in worker-test's ipv4 lists (1) and not the master's (0); the sshd line alerts 110001 on the test tenant only, nothing on the main tenant |
+| CIRCL OSINT import | 312 events, 274,339 IOCs (table above) |
+| real OTX | first sync 9,020 received, 8,241 unique (table above); later incremental syncs 598 updates, 0 rejected, no HTTP 429 |
+
 ---
 
 ## 4. Store, generation, distribution, reload
@@ -882,10 +951,14 @@ entries choose one), and each IOC carries the most restrictive TLP of its live s
   another tenant's lists or `ti-matcher` set, an export (STIX/TAXII later), a
   VirusTotal request, or the 7.7 LLM agent's tool results. TLP:RED is excluded from the
   agent even within its own tenant, because sending it to an external LLM is disclosure.
-- **TLP:AMBER+STRICT** stays inside the tenant whose source it came from. For a global
-  source carrying AMBER+STRICT, it is matched only for the operator's own tenant.
-- **TLP:AMBER / GREEN / CLEAR** from global sources may be matched for every tenant,
-  subject to the source's own terms (§7).
+- **Owner decision 6.2: TLP:RED, AMBER+STRICT and AMBER are never global.** An
+  observation from a global source (feed, OTX, global MISP feed) carrying any of them is
+  rejected at import (`store.prepare_rows`: "TLP:AMBER is never global"); list generation
+  and ti-matcher drop any such global row as a backstop (`listgen.NO_CROSS_TENANT_TLP`).
+  The same intel from a tenant's own source (its MISP server, its manual entries) is
+  stored with that tenant's key and stays in that tenant's lists and matcher set only.
+- **TLP:GREEN / CLEAR** from global sources may be matched for every tenant, subject to
+  the source's own terms (§3.3 feed table).
 - Enforcement: every read of IOCs goes through one store function that takes a
   `purpose` (`match`, `export`, `external_lookup`, `llm`, `display`) and the caller's
   tenant, and applies these rules in SQL. One test per purpose proves a TLP:RED IOC and

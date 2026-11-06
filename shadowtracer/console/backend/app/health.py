@@ -474,6 +474,10 @@ def ti_list_versions(db: Session) -> dict:
     return {"tenants": tenants, "alert": any(t["alert"] for t in tenants.values())}
 
 
+# Phase 6.2: the slowest a source of each kind refreshes on purpose (ti-sync FEEDS min_interval).
+SOURCE_REFRESH_SECONDS = {"warninglist": 86400, "spamhaus_drop": 86400, "misp_feed": 3600, "certpl": 3600, "ip_list": 3600}
+
+
 def ti_sources(db: Session, sync_interval_seconds: int = 900) -> dict:
     """Phase 6.1b (THREAT_INTEL.md §4.12): threat-intel feed staleness. A failed sync
     keeps the source's last good data, so the lists keep working - but the intel ages.
@@ -493,8 +497,9 @@ def ti_sources(db: Session, sync_interval_seconds: int = 900) -> dict:
     sources, stale = [], []
     for r in rows:
         failing = r["last_error"] is not None
-        # warninglists refresh daily by design; manual (analyst-entered) sources are not feeds
-        limit = 2 * 86400 if r["kind"] == "warninglist" else 3 * sync_interval_seconds
+        # warninglists and Spamhaus DROP refresh daily by design (DROP's terms: at most once a
+        # day), hourly feeds hourly; manual (analyst-entered) sources are not feeds
+        limit = max(3 * sync_interval_seconds, SOURCE_REFRESH_SECONDS.get(r["kind"], 0) * 2)
         too_old = r["age_seconds"] is None or r["age_seconds"] > limit
         is_stale = r["enabled"] and r["kind"] != "manual" and (failing or too_old)
         if is_stale:

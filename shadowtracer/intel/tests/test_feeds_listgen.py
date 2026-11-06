@@ -91,3 +91,28 @@ def test_generated_bundle_has_every_list():
     names = set(ti_rules.list_names())
     lists, _, _ = listgen.select([], listgen.Allow([]), NOW)
     assert set(lists) == names
+
+
+def test_otx_backs_off_on_429_then_fails_without_moving_the_cursor(monkeypatch):
+    import json as _json
+    import pytest as _pytest
+    from shadowtracer_intel import feeds as _f
+    page = _json.dumps({"results": [], "next": None}).encode()
+    calls, waits = [], []
+
+    def fake_fetch(url, headers=None, timeout=30):
+        calls.append(url)
+        if len(calls) <= 2:
+            raise _f.RateLimited("HTTP 429", retry_after=5 if len(calls) == 1 else None)
+        return page
+    monkeypatch.setattr(_f, "fetch", fake_fetch)
+    obs, cursor = _f.fetch_otx("k", "2026-11-01T00:00:00+00:00", sleep=waits.append)
+    assert obs == [] and cursor == "2026-11-01T00:00:00+00:00"
+    assert waits == [30, 60] and len(calls) == 3                       # Retry-After 5 < floor 30
+    assert all("subscribed" in u and "modified_since=2026-11-01" in u for u in calls)
+
+    monkeypatch.setattr(_f, "fetch", lambda *a, **k: (_ for _ in ()).throw(_f.RateLimited("HTTP 429", 900)))
+    waits.clear()
+    with _pytest.raises(_f.RateLimited):
+        _f.fetch_otx("k", None, retries=2, sleep=waits.append)
+    assert waits == [600, 600]                                           # capped at 10 min

@@ -18,7 +18,7 @@ import clickhouse_connect
 from confluent_kafka import Consumer
 from sqlalchemy import create_engine
 
-from shadowtracer_ingest.kafka_security import kafka_client_config_from_env
+from shadowtracer_ingest.kafka_security import CONSUMER_PREFETCH_BOUNDS, kafka_client_config_from_env
 from shadowtracer_ingest.tenants import TenantCache
 from shadowtracer_ingest.topics import ALERTS_TOPIC_PATTERN, tenant_from_alerts_topic
 from shadowtracer_intel.matcher import Matcher
@@ -42,11 +42,7 @@ def main() -> None:
         "enable.auto.commit": False,
         "auto.offset.reset": "earliest",           # a new tenant topic is matched from its first alert
         "topic.metadata.refresh.interval.ms": 10000,
-        # librdkafka prefetches up to 64 MiB into its one consumer queue by default: on a
-        # backlog that alone OOM-killed this 128m container in a loop (2026-11-06, 12
-        # kills, never committing). 16 MiB keeps throughput and fits.
-        "queued.max.messages.kbytes": 16384,
-        "fetch.max.bytes": 8 * 1024 * 1024,
+        **CONSUMER_PREFETCH_BOUNDS,                 # backlog T16 (64 MiB default OOM-killed it at 128m)
         **kafka_client_config_from_env(),
     })
     consumer.subscribe([ALERTS_TOPIC_PATTERN])

@@ -56,9 +56,11 @@ def _ip(s: str, scope: str):
     return ip
 
 
-def normalise(type_: str, raw: str, scope: str = "global") -> tuple:
+def normalise(type_: str, raw: str, scope: str = "global", min_prefix: dict = None) -> tuple:
     """Returns (type, canonical value). type may be refined (ipv6 that is IPv4-mapped
-    becomes ipv4; ipv4 given with a /n becomes cidr4)."""
+    becomes ipv4; ipv4 given with a /n becomes cidr4). min_prefix overrides MIN_PREFIX
+    for a source whose broad ranges are the point (Spamhaus DROP lists whole hijacked
+    netblocks)."""
     if type_ not in TYPES:
         raise Rejected(f"unknown type {type_!r}")
     if not isinstance(raw, str) or not raw or len(raw) > MAX_URL:
@@ -76,8 +78,9 @@ def normalise(type_: str, raw: str, scope: str = "global") -> tuple:
             net = ipaddress.ip_network(s, strict=False)       # host bits masked off
         except ValueError:
             raise Rejected("not a CIDR")
-        if net.prefixlen < MIN_PREFIX[net.version]:
-            raise Rejected(f"CIDR broader than /{MIN_PREFIX[net.version]}")
+        floor = (min_prefix or MIN_PREFIX)[net.version]
+        if net.prefixlen < floor:
+            raise Rejected(f"CIDR broader than /{floor}")
         if scope == "global" and not all(a.is_global and not a.is_multicast and not a.is_reserved
                                          for a in (net.network_address, net.broadcast_address)):
             raise Rejected("non-routable range in global intel")

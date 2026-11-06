@@ -1,0 +1,22 @@
+{
+ "Event": {
+  "uuid": "5f0c1a2b-0000-4000-8000-000000000002",
+  "info": "TLP:RED - incident at a member",
+  "threat_level_id": "2",
+  "timestamp": "1793400100",
+  "Tag": [
+   {
+    "name": "tlp:red"
+   }
+  ],
+  "Attribute": [
+   {
+    "type": "ip-dst",
+    "value": "45.33.32.201",
+    "to_ids": true,
+    "timestamp": "1793400100",
+    "uuid": "r1"
+   }
+  ]
+ }
+}

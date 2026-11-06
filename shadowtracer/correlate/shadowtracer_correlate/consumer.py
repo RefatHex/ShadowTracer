@@ -33,6 +33,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest"))
 from shadowtracer_ingest.dead_letter import send_batch_to_dead_letter  # noqa: E402
+from shadowtracer_ingest.kafka_security import CONSUMER_PREFETCH_BOUNDS  # noqa: E402
 from shadowtracer_ingest.normalizer import normalize_alert  # noqa: E402
 from shadowtracer_ingest.retry import consumer_heartbeat  # noqa: E402
 from shadowtracer_ingest.retry_state import mark_stuck, clear_stuck  # noqa: E402
@@ -157,6 +158,7 @@ def run(
         # PATTERN subscription's new-topic discovery otherwise depends
         # on librdkafka's default 5-minute refresh interval.
         "topic.metadata.refresh.interval.ms": 10000,
+        **CONSUMER_PREFETCH_BOUNDS,  # backlog T16: memory under a backlog bounded by config
         **kafka_client_config,
     })
     # topic_pattern only ever narrows this in tests (their own topics, never the lab's).

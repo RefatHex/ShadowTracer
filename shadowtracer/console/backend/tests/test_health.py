@@ -330,15 +330,22 @@ def test_dead_letter_counts_per_tenant_does_not_inflate_on_a_replayed_duplicate(
 
 def test_clickhouse_replica_health_all_healthy_against_real_cluster(lab_env, test_clickhouse_db):
     """Dead-letter-ClickHouse incident (2026-10-08): against the real,
-    healthy lab cluster (both replicas), every replicated table on both
-    hosts must come back is_readonly=0/is_session_expired=0."""
+    healthy lab cluster, every replicated table on every deployed replica
+    must come back is_readonly=0/is_session_expired=0. 6.2: the second
+    replica runs only in the "ha" compose profile (DEV_SETUP.md), so it is
+    checked whenever its container is running."""
+    import subprocess
     settings = _real_settings(lab_env, test_clickhouse_db)
-    object.__setattr__(settings, "clickhouse_hosts", [("127.0.0.1", 8123), ("127.0.0.1", 8124)])
+    hosts = [("127.0.0.1", 8123)]
+    if subprocess.run(["docker", "ps", "-q", "-f", "name=^shadowtracer-lab-ch-clickhouse-2-1$", "-f", "status=running"],
+                      capture_output=True, text=True).stdout.strip():
+        hosts.append(("127.0.0.1", 8124))
+    object.__setattr__(settings, "clickhouse_hosts", hosts)
 
     report = health_checks.clickhouse_replica_health(settings)
     assert report["healthy"] is True
     assert report["unhealthy"] == []
-    assert set(report["per_host"]) == {"127.0.0.1:8123", "127.0.0.1:8124"}
+    assert set(report["per_host"]) == {f"{h}:{p}" for h, p in hosts}
     for host_report in report["per_host"].values():
         assert host_report["ok"] is True
         tables = {t["table"] for t in host_report["tables"]}

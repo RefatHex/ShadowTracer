@@ -1,0 +1,30 @@
+{
+ "5f0c1a2b-0000-4000-8000-000000000001": {
+  "info": "OSINT - Example C2 infrastructure",
+  "timestamp": "1793400000",
+  "Tag": [
+   {
+    "name": "tlp:white"
+   },
+   {
+    "name": "misp-galaxy:mitre-attack-pattern=\"Application Layer Protocol - T1071\""
+   },
+   {
+    "name": "osint:source-type=\"blog-post\""
+   }
+  ]
+ },
+ "5f0c1a2b-0000-4000-8000-000000000002": {
+  "info": "TLP:RED - incident at a member",
+  "timestamp": "1793400100",
+  "Tag": [
+   {
+    "name": "tlp:red"
+   }
+  ]
+ },
+ "5f0c1a2b-0000-4000-8000-000000000003": {
+  "info": "old",
+  "timestamp": "1500000000"
+ }
+}

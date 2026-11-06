@@ -1,0 +1,57 @@
+{
+ "response": {
+  "Attribute": [
+   {
+    "id": "1001",
+    "event_id": "17",
+    "type": "ip-src",
+    "category": "Network activity",
+    "to_ids": true,
+    "uuid": "b1",
+    "timestamp": "1793500000",
+    "deleted": false,
+    "value": "45.33.32.210",
+    "Event": {
+     "org_id": "1",
+     "distribution": "0",
+     "id": "17",
+     "info": "Tenant case 42",
+     "orgc_id": "1",
+     "uuid": "6a0c1a2b-0000-4000-8000-0000000000aa"
+    },
+    "Tag": [
+     {
+      "name": "tlp:red"
+     },
+     {
+      "name": "case:42"
+     }
+    ]
+   },
+   {
+    "id": "1002",
+    "event_id": "17",
+    "type": "domain",
+    "category": "Network activity",
+    "to_ids": true,
+    "uuid": "b2",
+    "timestamp": "1793500100",
+    "deleted": false,
+    "value": "internal-c2.example",
+    "Event": {
+     "org_id": "1",
+     "distribution": "0",
+     "id": "17",
+     "info": "Tenant case 42",
+     "orgc_id": "1",
+     "uuid": "6a0c1a2b-0000-4000-8000-0000000000aa"
+    },
+    "Tag": [
+     {
+      "name": "tlp:amber"
+     }
+    ]
+   }
+  ]
+ }
+}

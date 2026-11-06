@@ -1,0 +1,113 @@
+{
+ "Event": {
+  "uuid": "5f0c1a2b-0000-4000-8000-000000000001",
+  "info": "OSINT - Example C2 infrastructure",
+  "threat_level_id": "1",
+  "timestamp": "1793400000",
+  "date": "2026-10-30",
+  "published": true,
+  "Tag": [
+   {
+    "name": "tlp:white"
+   },
+   {
+    "name": "misp-galaxy:mitre-attack-pattern=\"Application Layer Protocol - T1071\""
+   },
+   {
+    "name": "osint:source-type=\"blog-post\""
+   }
+  ],
+  "Attribute": [
+   {
+    "type": "ip-dst",
+    "category": "Network activity",
+    "value": "45.33.32.198",
+    "to_ids": true,
+    "timestamp": "1793390000",
+    "uuid": "a1"
+   },
+   {
+    "type": "ip-src",
+    "value": "203.0.113.50",
+    "to_ids": false,
+    "timestamp": "1793390000",
+    "uuid": "a2"
+   },
+   {
+    "type": "ip-dst|port",
+    "value": "45.33.32.199|443",
+    "to_ids": true,
+    "timestamp": "1793390000",
+    "uuid": "a3"
+   },
+   {
+    "type": "hostname",
+    "value": "c2.example-bad.com",
+    "to_ids": true,
+    "timestamp": "1793390000",
+    "uuid": "a4"
+   },
+   {
+    "type": "url",
+    "value": "hxxp://example-bad[.]com/gate.php",
+    "to_ids": true,
+    "timestamp": "1793390000",
+    "uuid": "a5"
+   },
+   {
+    "type": "email-src",
+    "value": "x@example.com",
+    "to_ids": true,
+    "timestamp": "1793390000",
+    "uuid": "a6"
+   },
+   {
+    "type": "domain",
+    "value": "deleted.example",
+    "to_ids": true,
+    "deleted": true,
+    "timestamp": "1793390000",
+    "uuid": "a7"
+   },
+   {
+    "type": "ip-dst",
+    "value": "192.0.2.10",
+    "to_ids": true,
+    "timestamp": "1793390000",
+    "uuid": "a8",
+    "Tag": [
+     {
+      "name": "tlp:amber"
+     }
+    ]
+   }
+  ],
+  "Object": [
+   {
+    "name": "file",
+    "Attribute": [
+     {
+      "type": "sha256",
+      "value": "9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08",
+      "to_ids": true,
+      "timestamp": "1793390000",
+      "uuid": "o1"
+     },
+     {
+      "type": "filename|md5",
+      "value": "dropper.exe|0cc175b9c0f1b6a831c399e269772661",
+      "to_ids": true,
+      "timestamp": "1793390000",
+      "uuid": "o2"
+     },
+     {
+      "type": "imphash",
+      "value": "abcd",
+      "to_ids": false,
+      "uuid": "o3"
+     }
+    ]
+   }
+  ]
+ }
+}

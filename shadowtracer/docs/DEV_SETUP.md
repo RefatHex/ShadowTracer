@@ -39,23 +39,44 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 
 | service | measured peak (MiB): docker stats / non-reclaimable* | limit |
 |---|---|---|
-| shadowtracer-master, -worker1, -worker2, -worker-test | 454 / 365 (main); 3,743 / 814 (test manager under load) | 1216m each (was 1088m: hit `memory.max` 260k-810k times reclaiming `alerts.json` cache) |
-| ch-clickhouse-1, -2 | 1,420 / 1,052 | 2048m each (ClickHouse itself is capped at 1,800 MiB, `clickhouse/config.d/resources.xml`; 90 `max` events at 2304m) |
+| shadowtracer-master, -worker-test (-worker1, -worker2: **ha only**) | 454 / 365 (main); 3,743 / 814 (test manager under load) | 1216m each (was 1088m: hit `memory.max` 260k-810k times reclaiming `alerts.json` cache) |
+| ch-clickhouse-1 (-2: **ha only**) | 1,420 / 1,052 | 2048m each (ClickHouse itself is capped at 1,800 MiB, `clickhouse/config.d/resources.xml`; 90 `max` events at 2304m) |
 | kafka | 689 / 477 during the load test; **724** non-reclaimable hours later (heap grows to `-Xmx512m`) | 1152m (was 768m: 18,693 `max` events, ~70 MB page cache left, broker timeouts in the ingest tests) |
 | postgres | 238 / 162 | 320m |
 | ch-keeper | 182 / 108 | 256m |
 | correlate-1, -2 | 219 / 165 | 288m each |
 | writer-1, -2 | 146 / 143 (reload test); **228 anon draining a 1 M-message backlog** | 320m each (192m: OOM-killed every ~55 s while draining a backlog, 2026-11-06) |
 | console-backend-1, -2 | 118 / 82 | 160m each |
-| shipper-worker-test, -worker1, -worker2 | 76 / 71 | 104m each (128m until 6.1c; cut to fund ti-matcher, still peak + 37%) |
+| shipper-master (6.2), -worker-test (-worker1, -worker2: **ha only**) | 76 / 71 | 104m each (128m until 6.1c; cut to fund ti-matcher, still peak + 37%) |
 | closer-1, -2 | 62 / 51 | 96m each |
 | agent-ubuntu-1/2, agent-rocky-1/2 | 133 / 51 | 176m each |
 | caddy | 61 / 15 | 80m (96m until 6.1c) |
 | shadowtracer-lb | 13 / 9 | 32m |
-| ti-sync (6.1b) | 74 steady (warninglist refresh not yet measured) | 128m |
-| ti-matcher (6.1c) | 77 draining a 300,000-message backlog at ~8,500/s (librdkafka prefetch capped at 16 MiB; with the 64 MiB default it OOM-killed at 128m) | 128m |
+| ti-sync (6.1b) | 74 steady; 6.2: OOM-killed at 256m importing CERT Polska's 126k domains until observations/rows were made compact, then 111 MiB for that import measured locally (lab peak below) | 256m (128m until 6.2) |
+| ti-matcher (6.1c) | 77 draining a 300,000-message backlog at ~8,500/s (librdkafka prefetch capped at 16 MiB; with the 64 MiB default it OOM-killed at 128m); 6.2: one set per tenant now holds ~135k IOCs | 256m (128m until 6.2) |
 | load generators (`deploy/load/syslog_fleet.sh` containers) | ~30 | 128m each |
-| **total of compose limits** | | **13,800 MiB (13.48 GiB)**, 24 MiB under the cap |
+| **total, default profile** (6.2) | | **9,472 MiB (9.25 GiB)**, 4,352 MiB under the cap |
+| **total, `ha` profile** (6.2) | | **14,160 MiB**: 336 MiB **over** the 13,824 MiB cap (shipper-master +104, ti-sync and ti-matcher +128 each). Only for chaos/failover runs; backlog R7 |
+
+**Compose profiles (6.2 housekeeping).** The default profile runs one ClickHouse replica,
+the master as the main tenant's only manager (the LB sends agents to it as its backup
+server, `shipper-master` ships its alerts) and the test tenant's manager. The `ha` profile
+adds `ch-clickhouse-2`, `shadowtracer-worker1/2` and `shipper-worker1/2`; chaos and failover
+scripts need it:
+
+```
+docker compose --env-file .env --env-file ha.env up -d && ./create-clickhouse-schema.sh
+```
+`ha.env` also switches ch-clickhouse-1 to the two-replica cluster definition
+(`clickhouse/config.d/cluster.xml`; the default mounts `cluster-single.xml`, so ON CLUSTER
+DDL never waits for a replica that is not deployed - `distributed_ddl_output_mode=
+throw_only_active` does not cover a plain cluster, tested on 24.8) and the console's
+replica and shipper lists. `smoke-test.sh` checks whichever profile is up (`HA=1` forces
+`ha`); `recover-ch-after-crash.sh` and `repair-ch-lost-parts.sh` refuse to run without
+replica 2. Back to default: `docker compose --profile ha rm -sf shadowtracer-worker1
+shadowtracer-worker2 shipper-worker1 shipper-worker2 ch-clickhouse-2` (volumes kept), then
+`docker compose up -d`. Recreating the master drops its agent registrations: re-enroll the
+main tenant's agents with `./recreate-agent.sh agent-ubuntu-2 agent-rocky-1 agent-rocky-2`.
 
 **Check `memory.events`, not only OOM kills.** A container can sit under its cap
 and still be starved: every `max` event in

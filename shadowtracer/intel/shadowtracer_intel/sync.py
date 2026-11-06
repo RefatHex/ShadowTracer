@@ -8,14 +8,25 @@ Config (env):
   TI_CLUSTERS                JSON: [{"tenant_key": "...", "nodes": [["master", "<container>"], ...]}]
                              first node = that cluster's master
   OTX_API_KEY                customer-supplied (lab: deploy/lab/.env); OTX is skipped without it
-  OTX_FIXTURE                path to an OTX-format JSON page, used instead of the API (tests, lab VERIFY)
-  TI_ENABLE_SSLBL            "1" to enable abuse.ch SSL Blacklist IPs (deprecated upstream 2025-01-03)
+  OTX_FIXTURE                path to an OTX-format JSON page, used instead of the API (tests, lab VERIFY);
+                             stored as source "otx-fixture", never mixed with real OTX data
+  OTX_INITIAL_DAYS           first OTX sync (no cursor yet) starts this many days back (default 30):
+                             older pulses' IOCs are mostly past their TTL, and the whole sync is
+                             one transaction held in memory
+  TI_FEED_<NAME>             "1"/"0" turns a feed of FEEDS on/off, overriding its product default
+                             (name upper-cased, "-" -> "_": TI_FEED_CIRCL_OSINT=1). Defaults follow
+                             each feed's licence: on only where commercial use is clearly allowed
+                             (THREAT_INTEL.md §6.2 feed table).
+  TI_MISP_SERVERS            JSON: [{"tenant_key", "name", "url", "key_env", "verify_tls"}] - a tenant's
+                             own MISP server; the API key is read from the env var named by key_env
+                             (lab: deploy/lab/.env), never stored in the database
 """
 import datetime as dt
 import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 
 from sqlalchemy import create_engine, text
 
@@ -23,6 +34,62 @@ from . import feeds, listgen, safe_reload, store
 
 log = logging.getLogger("ti-sync")
 WARNINGLIST_REFRESH = dt.timedelta(days=1)
+MISP_FEED_INITIAL_DAYS = 365          # longest hard TTL (hashes): older events would only expire
+H, D = dt.timedelta(hours=1), dt.timedelta(days=1)
+
+
+@dataclass
+class Feed:
+    """One global feed. kind is the store's source kind (trust default, health staleness).
+    loader(cursor) -> (observations, new cursor); misp_url instead of a loader for MISP feeds."""
+    name: str
+    kind: str
+    default_on: bool
+    licence: str
+    loader: object = None
+    snapshot: bool = True
+    trust: float = None
+    min_interval: dt.timedelta = dt.timedelta(0)
+    min_prefix: dict = None
+    misp_url: str = None
+
+
+def _list(url, typ, label, min_entries, confidence=None, sep=None, column=0):
+    return lambda cur: (feeds.parse_list(feeds.fetch(url, timeout=120), typ, label, min_entries, confidence, sep, column), None)
+
+
+FEEDS = [
+    Feed("abusech-feodo", "feodo", True, "CC0 (abuse.ch terms)",
+         lambda cur: (feeds.parse_feodo(feeds.fetch(feeds.FEODO_URL)), None)),
+    Feed("abusech-sslbl", "sslbl", False, "CC0; IP list deprecated upstream 2025-01-03",
+         lambda cur: (feeds.parse_sslbl(feeds.fetch(feeds.SSLBL_URL)), None)),
+    # "The DROP list is free for any use ... regardless of size or business type";
+    # downloads at most once a day; keep the copyright/terms with the data.
+    Feed("spamhaus-drop-v4", "spamhaus_drop", True, "Spamhaus DROP terms: free for any use, max 1 download/day",
+         lambda cur: (feeds.parse_spamhaus_drop(feeds.fetch(feeds.SPAMHAUS_DROP_URLS["ipv4"])), None),
+         trust=0.9, min_interval=D, min_prefix={4: 8, 6: 16}),
+    Feed("spamhaus-drop-v6", "spamhaus_drop", True, "Spamhaus DROP terms: free for any use, max 1 download/day",
+         lambda cur: (feeds.parse_spamhaus_drop(feeds.fetch(feeds.SPAMHAUS_DROP_URLS["ipv6"])), None),
+         trust=0.9, min_interval=D, min_prefix={4: 8, 6: 16}),
+    # "may be used by any user for any purpose, including commercial purposes"
+    Feed("certpl-domains", "certpl", True, "CERT Polska warning list: any purpose incl. commercial",
+         _list("https://hole.cert.pl/domains/v2/domains.txt", "domain", "certpl-warning-list", 1000, 0.9),
+         trust=0.8, min_interval=H),
+    Feed("circl-osint", "misp_feed", False, "none published (events TLP:CLEAR/WHITE); customer-enabled",
+         snapshot=False, trust=0.8, min_interval=H, misp_url="https://www.circl.lu/doc/misp/feed-osint"),
+    Feed("botvrij-osint", "misp_feed", False, "botvrij.eu FAQ: free, but no resale incl. as part of a package",
+         snapshot=False, trust=0.6, min_interval=H, misp_url="https://www.botvrij.eu/data/feed-osint"),
+    Feed("blocklist-de", "ip_list", False, "no licence grant; terms silent on commercial use",
+         _list("https://lists.blocklist.de/lists/all.txt", "ipv4", "blocklist-de", 1000), trust=0.6, min_interval=H),
+    Feed("cins-army", "ip_list", False, "'use in any way you see fit', no licence; ask CINS for commercial use",
+         _list("https://cinsscore.com/list/ci-badguys.txt", "ipv4", "cins-army", 1000), trust=0.6, min_interval=H),
+    Feed("et-compromised", "ip_list", False, "GPL-2.0 per an unofficial ET forum reply; unclear",
+         _list("https://rules.emergingthreats.net/blockrules/compromised-ips.txt", "ipv4", "et-compromised", 100),
+         trust=0.6, min_interval=H),
+    Feed("dataplane-sshpwauth", "ip_list", False, "dataplane.org: All Rights Reserved",
+         _list("https://dataplane.org/sshpwauth.txt", "ipv4", "dataplane-sshpwauth", 100, sep="|", column=2), trust=0.6, min_interval=H),
+]
+MIN_INTERVAL = {"otx": dt.timedelta(minutes=15)}       # per kind, on top of each feed's own
 
 
 def database_url() -> str:
@@ -32,36 +99,107 @@ def database_url() -> str:
             f"{os.environ.get('POSTGRES_DB', 'shadowtracer')}")
 
 
+def _enabled(feed: Feed, env) -> bool:
+    v = env.get("TI_FEED_" + feed.name.upper().replace("-", "_"))
+    if feed.name == "abusech-sslbl" and env.get("TI_ENABLE_SSLBL") == "1":
+        return True
+    return feed.default_on if v is None else v == "1"
+
+
 def sources_from_env(env=os.environ) -> list:
-    """(name, kind, enabled, snapshot, loader) - loader(cursor) -> (observations, new cursor)."""
-    out = [("abusech-feodo", "feodo", True, True, lambda cur: (feeds.parse_feodo(feeds.fetch(feeds.FEODO_URL)), None)),
-           ("abusech-sslbl", "sslbl", env.get("TI_ENABLE_SSLBL") == "1", True,
-            lambda cur: (feeds.parse_sslbl(feeds.fetch(feeds.SSLBL_URL)), None))]
+    out = [Feed(f.name, f.kind, _enabled(f, env), f.licence, f.loader, f.snapshot, f.trust, f.min_interval,
+                f.min_prefix, f.misp_url) for f in FEEDS]
     if env.get("OTX_FIXTURE"):
-        out.append(("otx", "otx", True, False,
-                    lambda cur: (feeds.parse_otx_page(open(env["OTX_FIXTURE"], "rb").read())[0], None)))
+        out.append(Feed("otx-fixture", "otx", True, "lab fixture",
+                        lambda cur: (feeds.parse_otx_page(open(env["OTX_FIXTURE"], "rb").read())[0], None), snapshot=False))
     elif env.get("OTX_API_KEY"):
-        out.append(("otx", "otx", True, False, lambda cur: feeds.fetch_otx(env["OTX_API_KEY"], cur)))
+        initial = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(env.get("OTX_INITIAL_DAYS", "30")))).isoformat()
+        out.append(Feed("otx", "otx", True, "customer's OTX account",
+                        lambda cur: feeds.fetch_otx(env["OTX_API_KEY"], cur or initial), snapshot=False,
+                        min_interval=MIN_INTERVAL["otx"]))
     return out
 
 
-def sync_source(engine, name, kind, enabled, snapshot, loader) -> dict:
+def _start(engine, feed: Feed, tenant_key=None):
+    """-> (source id, cursor) or (None, skip reason)."""
     with engine.begin() as conn:
-        sid = store.ensure_source(conn, name, kind, enabled=enabled)
-        cursor = conn.execute(text("SELECT sync_cursor FROM ti_sources WHERE id = :i"), {"i": sid}).scalar_one()
-    if not enabled:
-        return {"source": name, "skipped": "disabled"}
+        sid = store.ensure_source(conn, feed.name, feed.kind, tenant_key=tenant_key, trust=feed.trust, enabled=feed.default_on)
+        cursor, last_attempt = conn.execute(text("SELECT sync_cursor, last_attempt_at FROM ti_sources WHERE id = :i"),
+                                            {"i": sid}).one()
+    if not feed.default_on:
+        return None, "disabled"
+    if last_attempt and dt.datetime.now(dt.timezone.utc) - last_attempt < feed.min_interval:
+        return None, "minimum interval"
+    return sid, cursor
+
+
+def _failed(engine, sid, name, exc) -> dict:
+    with engine.begin() as conn:                                       # store unchanged: last good data stays
+        store.record_attempt(conn, sid, str(exc)[:1000])
+    log.warning("source %s failed, keeping the last good data: %s", name, exc)
+    return {"source": name, "error": str(exc)}
+
+
+def sync_source(engine, feed: Feed, tenant_key: str = None) -> dict:
+    if feed.misp_url:
+        return sync_misp_feed(engine, feed)
+    sid, cursor = _start(engine, feed, tenant_key)
+    if sid is None:
+        return {"source": feed.name, "skipped": cursor}
     try:
-        observations, new_cursor = loader(cursor)
+        observations, new_cursor = feed.loader(cursor)
         with engine.begin() as conn:                                   # all-or-nothing
-            counts = store.apply_observations(conn, sid, None, observations, snapshot)
+            counts = store.apply_observations(conn, sid, tenant_key, observations, feed.snapshot, min_prefix=feed.min_prefix)
             store.record_attempt(conn, sid, None, counts, new_cursor)
-        return {"source": name, **counts}
-    except feeds.FeedError as exc:                                     # store unchanged: last good data stays
+        return {"source": feed.name, **counts}
+    except feeds.FeedError as exc:
+        return _failed(engine, sid, feed.name, exc)
+
+
+def sync_misp_feed(engine, feed: Feed, fetch=None) -> dict:
+    """MISP feed: manifest, then every event changed since the cursor (first run: the last
+    MISP_FEED_INITIAL_DAYS), oldest first, ONE TRANSACTION PER EVENT so memory stays one
+    event. The cursor (event timestamp) advances after each committed event, so a failure
+    resumes from the first event not yet imported."""
+    fetch = fetch or feeds.fetch
+    sid, cursor = _start(engine, feed)
+    if sid is None:
+        return {"source": feed.name, "skipped": cursor}
+    since = int(cursor) if cursor else int((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=MISP_FEED_INITIAL_DAYS)).timestamp())
+    total = {"events": 0, "received": 0, "accepted": 0, "rejected": {}, "by_type": {}}
+    try:
+        manifest = feeds.parse_misp_manifest(fetch(f"{feed.misp_url}/manifest.json", timeout=120))
+        for uuid_, ts in sorted(((u, t) for u, t in manifest.items() if t > since), key=lambda x: x[1]):
+            url = f"{feed.misp_url}/{uuid_}.json"
+            obs = feeds.parse_misp_event(fetch(url, timeout=120), url)
+            with engine.begin() as conn:
+                c = store.apply_observations(conn, sid, None, obs, snapshot=False, min_prefix=feed.min_prefix)
+                conn.execute(text("UPDATE ti_sources SET sync_cursor = :c WHERE id = :i"), {"c": str(ts), "i": sid})
+            total["events"] += 1
+            for k in ("received", "accepted"):
+                total[k] += c[k]
+            for k in ("rejected", "by_type"):
+                for t, n in c[k].items():
+                    total[k][t] = total[k].get(t, 0) + n
         with engine.begin() as conn:
-            store.record_attempt(conn, sid, str(exc)[:1000])
-        log.warning("source %s failed, keeping the last good data: %s", name, exc)
-        return {"source": name, "error": str(exc)}
+            store.record_attempt(conn, sid, None, total)
+        return {"source": feed.name, **total}
+    except feeds.FeedError as exc:
+        return {**_failed(engine, sid, feed.name, exc), "events_imported": total["events"]}
+
+
+def sync_misp_servers(engine, env=os.environ) -> list:
+    """Each tenant's own MISP server (TI_MISP_SERVERS): tenant-private intel only."""
+    from . import misp_server
+    out = []
+    for srv in json.loads(env.get("TI_MISP_SERVERS", "[]")):
+        key = env.get(srv["key_env"], "")
+        feed = Feed(f"misp-server:{srv['tenant_key']}:{srv['name']}", "misp_server", bool(key), "tenant's own MISP",
+                    snapshot=False, trust=srv.get("trust", 0.8), min_interval=MIN_INTERVAL["otx"],
+                    loader=lambda cur, srv=srv, key=key: misp_server.fetch(
+                        srv["url"], key, int(cur) if cur else None, srv.get("verify_tls", True)))
+        out.append(sync_source(engine, feed, tenant_key=srv["tenant_key"]))
+    return out
 
 
 def refresh_warninglists(engine, now=None) -> dict:
@@ -87,6 +225,7 @@ def refresh_warninglists(engine, now=None) -> dict:
 
 def deploy(engine, cluster: dict) -> dict:
     nodes = [safe_reload.DockerNode(name, container) for name, container in cluster["nodes"]]
+    nodes = [nodes[0]] + [n for n in nodes[1:] if n.deployed()]      # master always; absent workers skipped
     with engine.begin() as conn:
         bundle, stats = listgen.generate(conn, cluster["tenant_key"])
     result = safe_reload.apply(nodes[0], nodes[1:], bundle)
@@ -98,7 +237,8 @@ def deploy(engine, cluster: dict) -> dict:
 
 def run_once(engine, env=os.environ) -> list:
     report = [refresh_warninglists(engine)]
-    report += [sync_source(engine, *s) for s in sources_from_env(env)]
+    report += [sync_source(engine, f) for f in sources_from_env(env)]
+    report += sync_misp_servers(engine, env)
     report += [deploy(engine, c) for c in json.loads(env.get("TI_CLUSTERS", "[]"))]
     return report
 

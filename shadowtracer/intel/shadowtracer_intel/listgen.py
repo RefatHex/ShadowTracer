@@ -10,7 +10,9 @@ combined confidence C = 100 * (1 - prod(1 - trust * c * 0.5 ** (age / half_life)
   C < 20, a source's own expiry passed, or the hard TTL passed -> expired.
 """
 import datetime as dt
+import bisect
 import ipaddress
+import itertools
 
 from sqlalchemy import text
 
@@ -20,7 +22,7 @@ HALF_LIFE_DAYS = {"ipv4": 7, "ipv6": 7, "cidr4": 7, "cidr6": 7, "url": 14, "doma
 HARD_TTL_DAYS = {"ipv4": 30, "ipv6": 30, "cidr4": 30, "cidr6": 30, "url": 30, "domain": 90, "md5": 365, "sha1": 365, "sha256": 365}
 DEFAULT_SOURCE_CONFIDENCE = 0.8
 BANDS = ((75, "high"), (50, "medium"), (20, "low"))
-NO_CROSS_TENANT_TLP = {"amber+strict", "red"}   # global intel with these TLPs is never matched for tenants
+NO_CROSS_TENANT_TLP = {"amber", "amber+strict", "red"}   # 6.2: never global; store.py rejects it, this is the backstop
 LIST_TYPE = {"ipv4": "ipv4", "cidr4": "ipv4", "ipv6": "ipv6", "domain": "domain", "url": "url",
              "md5": "md5", "sha1": "sha1", "sha256": "sha256"}           # cidr6: ti-matcher only
 
@@ -60,11 +62,17 @@ def cdb_keys(typ: str, value: str) -> list:
 class Allow:
     def __init__(self, rows):
         self.exact, self.nets = set(), []
+        ips = {4: [], 6: []}
         for typ, value in rows:
             if typ in ("cidr4", "cidr6"):
                 self.nets.append(ipaddress.ip_network(value))
             else:
                 self.exact.add((LIST_TYPE.get(typ, typ), value))
+                if typ in ("ipv4", "ipv6"):
+                    ips[4 if typ == "ipv4" else 6].append(int(ipaddress.ip_address(value)))
+        # Sorted exact IPs per family: "does this IOC range contain an allowlisted IP" is a
+        # binary search, not a scan (6.2: 1,762 DROP ranges x 62,780 warninglist IPs).
+        self.sorted_ips = {v: sorted(x) for v, x in ips.items()}
 
     def blocks(self, typ: str, value: str) -> bool:
         if (LIST_TYPE.get(typ, typ), value) in self.exact:
@@ -74,10 +82,12 @@ class Allow:
             return any(ip in n for n in self.nets if n.version == ip.version)
         if typ in ("cidr4", "cidr6"):
             net = ipaddress.ip_network(value)
+            if any(net.overlaps(n) for n in self.nets if n.version == net.version):
+                return True
             # conservative: an IOC range that contains anything allowlisted is dropped whole
-            return any(net.overlaps(n) for n in self.nets if n.version == net.version) or \
-                any(t in ("ipv4", "ipv6") and ipaddress.ip_address(v) in net
-                    for t, v in self.exact if t == LIST_TYPE[typ])
+            ips = self.sorted_ips[net.version]
+            i = bisect.bisect_left(ips, int(net.network_address))
+            return i < len(ips) and ips[i] <= int(net.broadcast_address)
         return False
 
 
@@ -87,24 +97,27 @@ def evaluate(rows: list, allow: Allow, now: dt.datetime, stats: dict = None):
     confidence, band, sightings) for every IOC that is neither expired nor allowlisted -
     the one decision both the CDB lists and ti-matcher use."""
     stats = stats if stats is not None else {}
-    by_ioc = {}
-    for r in rows:
-        if r["tenant_key"] is None and r["tlp"] in NO_CROSS_TENANT_TLP:
-            continue
-        by_ioc.setdefault(r["ioc_id"], []).append(r)
-    for ioc_id, sightings in by_ioc.items():
-        typ, value = sightings[0]["type"], sightings[0]["value"]
-        last = max(s["last_seen"] for s in sightings)
-        c = 0 if last + dt.timedelta(days=HARD_TTL_DAYS[typ]) <= now else score(sightings, typ, now)
-        b = band(c)
-        if b == "expired":
-            stats["expired"] = stats.get("expired", 0) + 1
-            continue
-        if allow.blocks(typ, value):
-            stats["allowlisted"] = stats.get("allowlisted", 0) + 1
-            continue
-        stats[b] = stats.get(b, 0) + 1
-        yield ioc_id, typ, value, c, b, sightings
+    if isinstance(rows, list):                       # tests pass lists; load() streams them ordered
+        rows = sorted(rows, key=lambda r: r["ioc_id"])
+    for ioc_id, group in itertools.groupby(rows, key=lambda r: r["ioc_id"]):
+        sightings = [r for r in group if not (r["tenant_key"] is None and r["tlp"] in NO_CROSS_TENANT_TLP)]
+        if sightings:
+            yield from _evaluate_one(ioc_id, sightings, allow, now, stats)
+
+
+def _evaluate_one(ioc_id, sightings, allow, now, stats):
+    typ, value = sightings[0]["type"], sightings[0]["value"]
+    last = max(s["last_seen"] for s in sightings)
+    c = 0 if last + dt.timedelta(days=HARD_TTL_DAYS[typ]) <= now else score(sightings, typ, now)
+    b = band(c)
+    if b == "expired":
+        stats["expired"] = stats.get("expired", 0) + 1
+        return
+    if allow.blocks(typ, value):
+        stats["allowlisted"] = stats.get("allowlisted", 0) + 1
+        return
+    stats[b] = stats.get(b, 0) + 1
+    yield ioc_id, typ, value, c, b, sightings
 
 
 def expires_at(typ: str, sightings: list) -> dt.datetime:
@@ -130,18 +143,26 @@ def select(rows: list, allow: Allow, now: dt.datetime) -> tuple:
     return lists, scores, stats
 
 
+_TTL_SQL = "CASE i.type " + " ".join(f"WHEN '{t}' THEN {d}" for t, d in HARD_TTL_DAYS.items()) + " END"
+
+
 def load(conn, tenant_key: str, now: dt.datetime) -> tuple:
-    """-> (live sighting rows, Allow) for one tenant: global + that tenant's private."""
+    """-> (live sighting rows, Allow) for one tenant: global + that tenant's private. The
+    rows are a STREAM ordered by IOC (server-side cursor, 5,000 at a time): consume it
+    inside the same transaction. 6.2: 159k sightings as a list cost ~150 MiB per tenant."""
     rows = conn.execute(text(
         "SELECT i.id AS ioc_id, i.type, i.value, i.tenant_key, s.tlp, src.trust, s.source_confidence, s.last_seen, "
         "s.valid_until, src.name AS source "
         "FROM iocs i JOIN ioc_sightings s ON s.ioc_id = i.id JOIN ti_sources src ON src.id = s.source_id "
-        "WHERE s.revoked_at IS NULL AND src.enabled AND (i.tenant_key IS NULL OR i.tenant_key = :t)"),
-        {"t": tenant_key}).mappings().all()
+        "WHERE s.revoked_at IS NULL AND src.enabled AND (i.tenant_key IS NULL OR i.tenant_key = :t) "
+        # Past the hard TTL by its newest sighting = expired in evaluate() anyway; filtering
+        # here keeps work proportional to live intel (6.2: CIRCL brought 235k old domains).
+        f"AND i.last_seen > :now - make_interval(days => {_TTL_SQL}) ORDER BY i.id").execution_options(yield_per=5000),
+        {"t": tenant_key, "now": now}).mappings()
     allow = Allow(conn.execute(text(
         "SELECT type, value FROM ti_allowlist WHERE (tenant_key IS NULL OR tenant_key = :t) "
         "AND (expires_at IS NULL OR expires_at > :now)"), {"t": tenant_key, "now": now}).all())
-    return [dict(r) for r in rows], allow
+    return rows, allow
 
 
 def generate(conn, tenant_key: str, now: dt.datetime = None) -> tuple:
@@ -149,8 +170,12 @@ def generate(conn, tenant_key: str, now: dt.datetime = None) -> tuple:
     now = now or dt.datetime.now(dt.timezone.utc)
     rows, allow = load(conn, tenant_key, now)
     lists, scores, stats = select(rows, allow, now)
-    for ioc_id, c in scores.items():
-        conn.execute(text("UPDATE iocs SET confidence = :c WHERE id = :i AND confidence <> :c"), {"c": c, "i": ioc_id})
+    if scores:                          # one statement, not one per IOC (6.2: 136k IOCs took 70 s)
+        from psycopg2.extras import execute_values
+        conn.execute(text("CREATE TEMP TABLE IF NOT EXISTS st_conf (id bigint, c smallint) ON COMMIT DROP"))
+        conn.execute(text("TRUNCATE st_conf"))
+        execute_values(conn.connection.dbapi_connection.cursor(), "INSERT INTO st_conf VALUES %s", scores.items(), page_size=5000)
+        conn.execute(text("UPDATE iocs SET confidence = t.c FROM st_conf t WHERE iocs.id = t.id AND iocs.confidence <> t.c"))
     files = {}
     for name, keys in lists.items():
         files[name] = cdb.write(keys) if keys else ti_rules.placeholder_list()

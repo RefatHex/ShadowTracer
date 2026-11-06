@@ -1,0 +1,17 @@
+<!-- Default profile (6.1c follow-up): ch-clickhouse-1 only, so ON CLUSTER DDL never waits
+     for ch-clickhouse-2, which runs only in the "ha" profile (ha.env selects cluster.xml).
+     After enabling "ha", run create-clickhouse-schema.sh so tables created meanwhile
+     also exist on ch-clickhouse-2 (they replicate from there). -->
+<clickhouse>
+    <remote_servers>
+        <lab_cluster>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>ch-clickhouse-1</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </lab_cluster>
+    </remote_servers>
+</clickhouse>

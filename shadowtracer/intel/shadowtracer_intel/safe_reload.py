@@ -51,6 +51,12 @@ class DockerNode:
     def __init__(self, name: str, container: str, install_dir: str = INSTALL_DIR):
         self.name, self.container, self.install_dir = name, container, install_dir
 
+    def deployed(self) -> bool:
+        """False when the container does not exist at all (a node of a compose profile
+        that is off, e.g. the lab's "ha" workers). A stopped container is deployed: a
+        node that is down must show up as a failed distribution, not be skipped."""
+        return subprocess.run(["docker", "inspect", self.container], capture_output=True).returncode == 0
+
     def _sh(self, script: str, stdin: bytes = None) -> bytes:
         res = subprocess.run(["docker", "exec", "-i", self.container, "sh", "-c", script],
                              input=stdin, capture_output=True)

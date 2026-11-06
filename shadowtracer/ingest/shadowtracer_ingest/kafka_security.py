@@ -30,3 +30,14 @@ def kafka_client_config_from_env() -> dict:
         elif ca_location:
             config["ssl.ca.location"] = ca_location
     return config
+
+
+# Backlog T16 (2026-11-06): librdkafka prefetches up to 64 MiB (queued.max.messages.kbytes)
+# into a consumer's queue by default, so memory under a backlog was bounded by the
+# container cap, not by config: ti-matcher at 128m was OOM-killed 12 times in a row
+# draining 300,000 messages. Every ShadowTracer consumer (writer, correlator, ti-matcher)
+# merges this into its Consumer config.
+CONSUMER_PREFETCH_BOUNDS = {
+    "queued.max.messages.kbytes": 16384,
+    "fetch.max.bytes": 8 * 1024 * 1024,
+}

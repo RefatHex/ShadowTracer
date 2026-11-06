@@ -6,6 +6,12 @@
 # replicas), re-insert, verify both replicas, then apply the queued benchmark
 # cleanup. No Keeper edits. Stops at the first failed check. Run from deploy/lab.
 set -euo pipefail
+# Needs both replicas: the "ha" compose profile (6.1c follow-up).
+if ! docker ps -q -f name=^shadowtracer-lab-ch-clickhouse-2-1$ -f status=running | grep -q .; then
+    echo "ch-clickhouse-2 is not running: start the ha profile first:"
+    echo "  docker compose --env-file .env --env-file ha.env up -d && ./create-clickhouse-schema.sh"
+    exit 2
+fi
 LOG=${LOG:-repair-ch-lost-parts.$(date +%Y%m%d-%H%M%S).log}
 exec > >(tee "$LOG") 2>&1
 

@@ -68,7 +68,18 @@ done
 # ClickHouse next, alone: the events/rollup schema must be explicitly
 # applied (create-clickhouse-schema.sh) before shipper/writer start and
 # find no events table at all on a from-scratch bring-up.
-docker compose up -d ch-keeper ch-clickhouse-1 ch-clickhouse-2
+# 6.1c follow-up: the second ClickHouse replica, worker1/worker2 and their shippers
+# run only in the "ha" compose profile. Default: the profile that is up.
+# HA=1 ./smoke-test.sh (or a running ch-clickhouse-2) checks the "ha" lab instead.
+if [ "${HA:-}" = "1" ] || docker ps -q -f name=^shadowtracer-lab-ch-clickhouse-2-1$ -f status=running | grep -q .; then
+    HA=1; set -a; . ./ha.env; set +a
+else
+    HA=0
+fi
+echo "--- profile: $([ "$HA" = 1 ] && echo ha || echo default) ---"
+CH_CONTAINERS="shadowtracer-lab-ch-clickhouse-1-1"
+[ "$HA" = 1 ] && CH_CONTAINERS="$CH_CONTAINERS shadowtracer-lab-ch-clickhouse-2-1"
+docker compose up -d ch-keeper ch-clickhouse-1 $([ "$HA" = 1 ] && echo ch-clickhouse-2)
 waited=0
 until docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
     --query "SELECT 1" >/dev/null 2>&1; do
@@ -87,9 +98,11 @@ docker compose up -d
 # known, documented glibc bug (PHASE1_FINDINGS.md Step 2) and never go
 # healthy - that's not a smoke-test regression, so --wait (which waits on
 # every service) would always time out here.
-for svc in shadowtracer-master shadowtracer-worker1 shadowtracer-worker2 shadowtracer-worker-test agent-ubuntu-1 agent-ubuntu-2 \
-    shipper-worker1 shipper-worker2 shipper-worker-test writer-1 writer-2 \
-    correlate-1 correlate-2 closer-1 closer-2; do
+HA_SERVICES=""
+[ "$HA" = 1 ] && HA_SERVICES="shadowtracer-worker1 shadowtracer-worker2 shipper-worker1 shipper-worker2"
+for svc in shadowtracer-master shadowtracer-worker-test agent-ubuntu-1 agent-ubuntu-2 \
+    shipper-master shipper-worker-test writer-1 writer-2 \
+    correlate-1 correlate-2 closer-1 closer-2 $HA_SERVICES; do
     cid="$(docker compose ps -q "$svc")"
     waited=0
     while [ "$(docker inspect -f '{{.State.Health.Status}}' "$cid")" != "healthy" ]; do
@@ -112,8 +125,10 @@ echo "--- cluster ---"
 cluster_out="$(docker exec "$MASTER" "${SHADOWTRACER_INSTALL_DIR}/bin/cluster_control" -l)"
 echo "$cluster_out"
 check "master in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^master '"
-check "worker1 in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^worker1 '"
-check "worker2 in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^worker2 '"
+if [ "$HA" = 1 ]; then
+    check "worker1 in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^worker1 '"
+    check "worker2 in cluster_control -l" "echo \"\$cluster_out\" | grep -q '^worker2 '"
+fi
 # Phase 6.1a: the test tenant's manager is its own single-node cluster
 # (TENANCY.md option A) - never a member of the main tenant's cluster, which
 # would sync the main tenant's client.keys/rules/lists onto it.
@@ -158,7 +173,7 @@ echo "--- ClickHouse replica health (dead-letter-ClickHouse incident, 2026-10-08
 # directly, every run, so a migration that leaves a replica in that
 # state fails the very next smoke-test run instead of silently
 # degrading durability until someone notices by accident.
-for ch_container in shadowtracer-lab-ch-clickhouse-1-1 shadowtracer-lab-ch-clickhouse-2-1; do
+for ch_container in $CH_CONTAINERS; do
     unhealthy="$(docker exec "$ch_container" clickhouse-client --query \
         "SELECT database, table, is_readonly, is_session_expired FROM system.replicas WHERE is_readonly OR is_session_expired" 2>&1)"
     if [ -n "$unhealthy" ]; then
@@ -258,7 +273,8 @@ hostile_agent="hostile-agent-${hostile_marker}"
 # already uses, for the same reason.
 DLT_COUNT_QUERY="SELECT uniqExact((tenant_id, component, source_location)) FROM shadowtracer.dead_letter_events"
 dl_before="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client --query "$DLT_COUNT_QUERY")"
-dl_before2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client --query "$DLT_COUNT_QUERY")"
+dl_before2=0
+[ "$HA" = 1 ] && dl_before2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client --query "$DLT_COUNT_QUERY")"
 
 dlt_watermark_sum() {
     # Phase 5.6 Item 1: this batch is injected via shipper-worker-test
@@ -283,7 +299,8 @@ print(total)
 dlt_offset_before="$(dlt_watermark_sum)"
 
 restart_counts_before=()
-pipeline_services="shipper-worker-test shipper-worker2 writer-1 writer-2 correlate-1 correlate-2"
+pipeline_services="shipper-worker-test shipper-master writer-1 writer-2 correlate-1 correlate-2"
+[ "$HA" = 1 ] && pipeline_services="$pipeline_services shipper-worker2"
 for svc in $pipeline_services; do
     cid="$(docker compose ps -q "$svc")"
     restart_counts_before+=("$(docker inspect -f '{{.RestartCount}}' "$cid")")
@@ -367,7 +384,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
         --query "SELECT count() FROM shadowtracer.events WHERE alert_id LIKE '${hostile_marker}.good.%'")"
     dl_after="$(docker exec shadowtracer-lab-ch-clickhouse-1-1 clickhouse-client \
         --query "$DLT_COUNT_QUERY")"
-    dl_after2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client \
+    dl_after2=$((dl_before2 + 12))
+    [ "$HA" = 1 ] && dl_after2="$(docker exec shadowtracer-lab-ch-clickhouse-2-1 clickhouse-client \
         --query "$DLT_COUNT_QUERY")"
     if [ "$good_count" = "2" ] && [ "$((dl_after - dl_before))" = "12" ] && [ "$((dl_after2 - dl_before2))" = "12" ]; then
         break
@@ -378,8 +396,10 @@ done
 check "both good events landed in ClickHouse" "[ \"$good_count\" = 2 ]"
 check "all 12 dead-letter writes landed on ch-clickhouse-1 (4 shipper-stage + 8 from writer+correlator each independently dead-lettering the 4 that reach Kafka)" \
     "[ \"\$((dl_after - dl_before))\" = 12 ]"
-check "all 12 dead-letter writes also landed on ch-clickhouse-2 (replica, not just the one this script used to only ever check - 2026-10-08 incident)" \
-    "[ \"\$((dl_after2 - dl_before2))\" = 12 ]"
+if [ "$HA" = 1 ]; then
+    check "all 12 dead-letter writes also landed on ch-clickhouse-2 (replica, not just the one this script used to only ever check - 2026-10-08 incident)" \
+        "[ \"\$((dl_after2 - dl_before2))\" = 12 ]"
+fi
 
 # The ClickHouse-side checks above only prove the QUERYABLE copy. Durability
 # comes from the Kafka dead-letter topic FIRST (see dead_letter.py) - this

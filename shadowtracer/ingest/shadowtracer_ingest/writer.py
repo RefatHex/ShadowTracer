@@ -42,6 +42,7 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from sqlalchemy import create_engine
 
 from .dead_letter import send_batch_to_dead_letter
+from .kafka_security import CONSUMER_PREFETCH_BOUNDS
 from .metrics import Metrics
 from .normalizer import normalize_alert
 from .retry import retry_with_backoff, consumer_heartbeat
@@ -155,6 +156,7 @@ def run(
         # promptly and consistently instead of depending on where in a
         # 5-minute window its topic happened to be created.
         "topic.metadata.refresh.interval.ms": 10000,
+        **CONSUMER_PREFETCH_BOUNDS,  # backlog T16: memory under a backlog bounded by config
         **kafka_client_config,
     })
     # topic_pattern only ever narrows this in tests (their own topics, never the lab's).
