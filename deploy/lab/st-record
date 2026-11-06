@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Records activity windows in attack_runs (shadowtracer_ml/recorder.py). Never executes anything.
+#   ./st-record start --technique T1136.001 --agent agent-ubuntu-1 --tool atomic
+#   ./st-record stop <run_id>
+#   ./st-record caldera --operation <id> --url http://127.0.0.1:8888
+set -euo pipefail
+cd "$(dirname "$0")"
+set -a; . ./.env; set +a
+export POSTGRES_HOST=127.0.0.1
+cd ../../shadowtracer/ml && exec .venv/bin/python -m shadowtracer_ml.recorder "$@"

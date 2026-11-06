@@ -40,6 +40,20 @@ if ! grep -q "$FIM_TEST_DIR" "$OSSEC_CONF"; then
     mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
 fi
 
+# Phase 7.0 (docs/ML_FOUNDATION.md): the test tenant's Linux lab agent watches, in real time,
+# the paths that persistence/credential techniques and their legitimate look-alikes touch, so
+# they are visible without auditd (no kernel audit in an unprivileged container). By agent
+# name, so a restart applies it (a recreate would re-enroll the agent).
+ML_FIM_PATHS="/etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/sudoers /etc/sudoers.d /etc/crontab /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/systemd/system /etc/init.d /etc/profile /etc/profile.d /etc/ld.so.preload /var/spool/cron /root /home"
+if [ "$AGENT_NAME" = "agent-ubuntu-1" ] && ! grep -q "shadowtracer-ml-fim" "$OSSEC_CONF"; then
+    mkdir -p /etc/sudoers.d /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/systemd/system /etc/profile.d /var/spool/cron/crontabs /root/.ssh
+    touch /etc/ld.so.preload
+    ml_dirs=$(echo $ML_FIM_PATHS | tr ' ' ',')
+    ml_block="  <syscheck><!-- shadowtracer-ml-fim --><directories check_all=\"yes\" realtime=\"yes\" report_changes=\"no\">${ml_dirs}</directories></syscheck>"
+    awk -v block="$ml_block" '/<\/ossec_config>/{print block} {print}' "$OSSEC_CONF" > "${OSSEC_CONF}.tmp"
+    mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
+fi
+
 # --- one-time runtime config: monitor the sshd auth log (not in the
 # default localfile list) so the brute-force/active-response tests fire ---
 AUTH_LOG=/var/log/auth.log

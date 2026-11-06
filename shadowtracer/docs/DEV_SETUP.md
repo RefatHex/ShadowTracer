@@ -54,16 +54,20 @@ with the shipper running, plus the backlog drain and a smoke run, sampled every 
 | shadowtracer-lb | 13 / 9 | 32m |
 | ti-sync (6.1b) | 74 steady; 6.2: OOM-killed at 256m importing CERT Polska's 126k domains until observations/rows were made compact, then 111 MiB for that import measured locally (lab peak below) | 256m (128m until 6.2) |
 | ti-matcher (6.1c) | 77 draining a 300,000-message backlog at ~8,500/s (librdkafka prefetch capped at 16 MiB; with the 64 MiB default it OOM-killed at 128m); 6.2: one set per tenant now holds ~135k IOCs; 6.3: two sets plus a reload were OOM-killed at 256m (anon 259 MB) | 256m (6.4, shared global set: 140 MiB steady, 164 MiB reload peak, was 218 MiB; 384m in 6.3) |
+| mlflow (7.0) | 386 peak (`memory.peak`), 376 steady, model registration and artifact upload included; OOM-killed at 512m until MLflow 3's job runner was turned off (`MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`) | 512m |
+| ml-enricher (7.0) | 160 peak (`memory.peak`) scoring ~23k incidents in batches of 200 plus the labeler, 0 restarts | 512m |
+| ml-activity (7.0) | 39 peak (docker CLI + Python) | 128m |
 | load generators (`deploy/load/syslog_fleet.sh` containers) | ~30 | 128m each |
-| **total, default profile** (6.4) | | **9,472 MiB (9.25 GiB)**, 4,352 MiB under the cap |
-| **total, `ha` profile** (6.3) | | 14,160 MiB with every service; **13,648 MiB as run by `./ha.sh up`** (ti-sync and ti-matcher stopped), under the cap. Backlog R7 closed |
+| **total, default profile** (7.0) | | **10,624 MiB (10.4 GiB)**, 3,200 MiB under the cap (9,472 in 6.4 + 1,152 for the ML services) |
+| **total, `ha` profile** (7.0) | | 15,312 MiB with every service; **13,648 MiB as run by `./ha.sh up`** (ti-sync, ti-matcher, mlflow, ml-enricher and ml-activity stopped), under the cap. Backlog R7 closed |
 
 **Compose profiles (6.2 housekeeping).** The default profile runs one ClickHouse replica,
 the master as the main tenant's only manager (the LB sends agents to it as its backup
 server, `shipper-master` ships its alerts) and the test tenant's manager. The `ha` profile
 adds `ch-clickhouse-2`, `shadowtracer-worker1/2` and `shipper-worker1/2`; chaos and failover
 runs need it. Switch with `./ha.sh up` / `./ha.sh down`: while "ha" runs, **ti-sync and
-ti-matcher are stopped** (owner decision 2026-11-06, backlog R7), which keeps the "ha"
+ti-matcher are stopped** (owner decision 2026-11-06, backlog R7), and since 7.0 the ML services
+(mlflow, ml-enricher, ml-activity) too, which keeps the "ha"
 limits at 13,648 MiB, under the cap. `ha.sh up` also runs `create-clickhouse-schema.sh` so
 ch-clickhouse-2 gets every table created meanwhile.
 

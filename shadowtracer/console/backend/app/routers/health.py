@@ -34,7 +34,7 @@ def health_detail(db: Session = Depends(get_db), settings=Depends(get_settings),
     (Phase 5.6 closeout item 3 - see stuck_components' own docstring), and
     the threat-intel list version on every manager node (Phase 6.1a - see
     ti_list_versions' own docstring), and ti-matcher lag and loaded
-    IOC version (Phase 6.1c) -
+    IOC version (Phase 6.1c), and the ML score distribution per model (Phase 7.0) -
     operational detail, not something every logged-in user should see."""
     return {
         "shipper_lag": health_checks.shipper_lag_per_node(settings),
@@ -48,4 +48,5 @@ def health_detail(db: Session = Depends(get_db), settings=Depends(get_settings),
         "ti_sources": health_checks.ti_sources(db),
         "ti_matcher": health_checks.ti_matcher(db, settings),
         "virustotal": health_checks.virustotal(db),
+        "ml": health_checks.ml_scores(db),
     }

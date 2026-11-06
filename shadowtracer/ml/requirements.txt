@@ -1,0 +1,10 @@
+mlflow==3.18.0
+scikit-learn==1.9.1
+pandas==3.1.1
+numpy==2.5.4
+clickhouse-connect==1.9.0
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.13
+requests>=2.32
+pytest==9.1.1
+python-evtx==0.8.1

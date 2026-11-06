@@ -1,6 +1,6 @@
 # ShadowTracer — Optimisation & Hardening Backlog
 
-Last updated: 2026-11-05
+Last updated: 2026-11-06
 
 ShadowTracer is in a **features-first** period. Anything that is not needed for a
 feature to work correctly goes here instead of blocking feature work. Nothing in
@@ -101,10 +101,16 @@ From `THREAT_MODEL.md` §11–12. Kafka TLS/SASL + per-tenant topics are DONE.
 |---|---|---|---|---|
 | D1 | Windows VM + Sysmon, Ubuntu VM + auditd | Blocked on Hyper-V access | Needed for 5C and B1 | S (setup) |
 | D2 | 5C Sigma (design approved, model b) | Lab-backed coverage is 0 until D1 | After D1 | L |
-| D3 | 5D Atomic Red Team coverage on Windows | Linux part is pulled into AI phase 7.0 | After D1 | M |
+| D3 | 5D Atomic Red Team coverage on Windows | Linux part is pulled into AI phase 7.0 (the owner runs Atomic Red Team and Caldera on the lab agents, wrapped with `st-record`; ML_FOUNDATION.md §2). Windows Atomic Red Team waits for the Windows VM | After D1 | M |
 | D5 | MISP withdrawals are not applied | 6.2: MISP feeds and tenant MISP servers are pulled incrementally with `to_ids` only, so an attribute later set to `to_ids=false` or deleted, or an event removed from a feed's manifest, keeps its sighting until it ages out (hard TTL / decay). abuse.ch, DROP and CERT Polska are snapshots and are revoked correctly. Fix: per MISP source, re-read the changed events' full attribute lists (feed) or query `to_ids=0`/`deleted=1` since the cursor (server) and revoke those sightings | NEXT-OPT | S |
 | D6 | CIRCL OSINT feed has no published licence | Imported in the lab only (`TI_FEED_CIRCL_OSINT=1`); product default off. Its events are tagged TLP:CLEAR/WHITE, a sharing marking, not a licence. Fix: ask CIRCL (info@circl.lu) for terms that allow use in a commercial service; then default it on | Now (non-code) | — |
 | D7 | Retro-hunt matches exact values only | 6.4: the ClickHouse candidate query matches source/destination IP and whole field values; new CIDR IOCs and parent domains (an IOC `evil.com` vs a logged `a.evil.com`, or a URL's host) are matched live by ti-matcher but not retro-hunted. Fix: for CIDRs, `isIPAddressInRange` over src/dst IP; for domains, `endsWith` over host-like fields, both bounded like today's query | LATER | S |
+| D8 | ML labels from replayed datasets carry host noise | 7.0: a replayed dataset's incidents all take its ATT&CK label (confidence 0.8). OTRF recordings are whole-host captures (WEC), so some incidents are unrelated background (ML_FOUNDATION.md §5) | Narrow per dataset: keep only events from the dataset's attacked host/process tree, or label per event from the dataset's own notes; measure label noise on a hand-checked sample | LATER | M |
+| D9 | Splunk Linux auditd samples are unused | 7.0: they decode as `auditd` but reach only level-0 rules (3782), because the inherited audit rules key on Wazuh's own audit keys | Map the samples' syscalls/keys to rules (or add audit rules on the lab agent) before replaying them | LATER | S |
+| D10 | MLflow registry stages are deprecated | 7.0 serves by stage "Production" (as specified); MLflow 3.18 warns that stages will be removed | Move to model aliases (`@production`) when MLflow drops stages; one place: `enrich.Models` and `evaluate._to_production` | LATER | S |
+| D11 | ml-enricher looks up alerts per incident | 7.0: one Postgres + one ClickHouse query per incident (batches of 200); 200 incidents in ~5 s in the lab | Batch the alert lookups per batch if incident close rates outgrow it | LATER | S |
+| D12 | Replay agents show in the test tenant's agent list | 7.0: one registered, never-connected agent per replayed dataset (`replay-*`, table `replay_agents`) | Hide `replay-*` agents in the console, or remove them after training snapshots are taken (owner go-ahead) | LATER | S |
+| D13 | 3.2 % of Splunk replay events were not decoded | 7.0: 3,588 of 112,912 events have a raw `"` in their text; analysisd's EventChannel decoder parses the JSON-printed Event string, where `"` becomes `\"`, so the XML fails (only the first failure is logged as a warning). Fixed for future replays (`replay.agent_quotes`); the 15 Splunk datasets were replayed before the fix | Re-replay the Splunk datasets (new runs, same dataset ids: the split groups by dataset) when a fuller corpus matters; upstream: the decoder could parse the cJSON string value instead of its printed form | LATER | S |
 | D4 | SCA scans dominate alert volume | Noise in incidents/fingerprints | Policy: exclude or down-weight from correlation | NEXT-OPT | S |
 
 ## 6. Tooling, packaging and upstream

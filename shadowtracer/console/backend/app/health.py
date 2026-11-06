@@ -568,3 +568,28 @@ def virustotal(db: Session) -> dict:
             "budget_reached": bool(r["enabled"] and r["queued"] and r["calls_today"] >= r["daily_budget"]),
         }
     return {"tenants": tenants, "budget_reached": [t for t, v in tenants.items() if v["budget_reached"]]}
+
+
+def ml_scores(db: Session, window_hours: int = 24) -> dict:
+    """Phase 7.0: per served model, the score distribution of incidents it scored in the last
+    `window_hours` (deciles 0.0-0.1 ... 0.9-1.0), the number scored and incidents closed in the last hour still
+    waiting for ml-enricher (tenants the enricher scored in the last day). Input drift is tracked per feature in ClickHouse ml_feature_stats
+    (hourly n/sum/sum_sq) - the hook ADWIN uses in 7.2. Scores are advisory: no action uses them."""
+    try:
+        rows = db.execute(text(
+            "SELECT ml_model, width_bucket(ml_score, 0, 1.0000001, 10) AS bucket, count(*) AS n, avg(ml_score) AS mean "
+            "FROM incidents WHERE ml_scored_at > now() - make_interval(hours => :h) AND ml_model IS NOT NULL "
+            "GROUP BY 1, 2 ORDER BY 1, 2"), {"h": window_hours}).mappings().all()
+        waiting = db.execute(text(
+            "SELECT count(*) FROM incidents WHERE state = 'closed' AND ml_scored_at IS NULL "
+            "AND closed_at > now() - interval '1 hour' AND closed_at < now() - interval '2 minutes' "
+            "AND tenant_key IN (SELECT DISTINCT tenant_key FROM incidents WHERE ml_scored_at > now() - interval '1 day')")).scalar()
+    except Exception as exc:  # noqa: BLE001 - missing columns (pre-migration) must not crash /health
+        db.rollback()
+        return {"error": str(exc), "models": {}}
+    models = {}
+    for r in rows:
+        m = models.setdefault(r["ml_model"], {"scored": 0, "deciles": [0] * 10})
+        m["scored"] += r["n"]
+        m["deciles"][min(max(int(r["bucket"]) - 1, 0), 9)] += r["n"]
+    return {"window_hours": window_hours, "models": models, "closed_unscored_last_hour": waiting}

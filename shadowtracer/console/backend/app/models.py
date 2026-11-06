@@ -9,7 +9,7 @@ from sqlalchemy import (
     Index, Integer, MetaData, PrimaryKeyConstraint, SmallInteger, String,
     Table, Text, UniqueConstraint, func, text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, REAL
 
 metadata = MetaData()
 
@@ -114,6 +114,11 @@ incidents = Table(
     Column("ti_confidence", SmallInteger, nullable=True),
     Column("priority", SmallInteger, Computed(
         "GREATEST(max_level, CASE WHEN ti_confidence >= 75 THEN 12 WHEN ti_confidence >= 50 THEN 8 ELSE 0 END)")),
+    # Phase 7.0: written only by ml-enricher (ingest migration d8a2e6f1c3b7); scores never trigger actions.
+    Column("ml_score", REAL, nullable=True),
+    Column("ml_reasons", JSONB, nullable=True),
+    Column("ml_model", Text, nullable=True),
+    Column("ml_scored_at", DateTime(timezone=True), nullable=True),
 )
 
 incident_alerts = Table(

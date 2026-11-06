@@ -950,6 +950,83 @@ services:
     networks:
       - lab
 
+  # --- Phase 7.0: ML foundation (docs/ML_FOUNDATION.md) ---------------------------------
+  # MLflow tracking + registry: own database and role on the lab Postgres, artifacts on a
+  # volume, internal network only (no published port). One worker (memory).
+  mlflow:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ml.Dockerfile
+    image: shadowtracer-lab/ml:local
+    hostname: mlflow
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    command: >-
+      mlflow server --host 0.0.0.0 --port 5000 --workers 1
+      --backend-store-uri postgresql+psycopg2://mlflow:${MLFLOW_DB_PASSWORD:?set MLFLOW_DB_PASSWORD in deploy/lab/.env}@postgres:5432/mlflow
+      --artifacts-destination /mlartifacts --serve-artifacts
+      --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000
+    environment:
+      # MLflow 3 also starts a job runner (huey consumer) for its GenAI features: not needed
+      # here, and with it the server was OOM-killed at 512m (2026-11-06).
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+    volumes:
+      - mlflow-artifacts:/mlartifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lab
+
+  # Scores closed incidents with the "Production" stage of each served model; writes score
+  # and reasons to the incident (never an action). Also labels incidents (ml_labels).
+  ml-enricher:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ml.Dockerfile
+    image: shadowtracer-lab/ml:local
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    command: ["python", "-m", "shadowtracer_ml.enrich"]
+    environment: &ml-env
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
+      POSTGRES_USER: shadowtracer_app
+      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
+      CLICKHOUSE_HOST: ch-clickhouse-1
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+      CLICKHOUSE_DATABASE: shadowtracer
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      TEST_TENANT_KEY: ${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env}
+      ML_SERVED_MODELS: ${ML_SERVED_MODELS:-incident-risk-dummy}
+    depends_on:
+      mlflow:
+        condition: service_started
+    networks:
+      - lab
+
+  # Scheduled benign look-alike activity on the test tenant's Linux lab agent, recorded in
+  # attack_runs (label benign). Lab transport: the host docker socket (backlog S10).
+  ml-activity:
+    image: shadowtracer-lab/ml:local
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    command: ["python", "-m", "shadowtracer_ml.normal_activity", "loop"]
+    environment:
+      <<: *ml-env
+      NORMAL_INTERVAL_SECONDS: "1200"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lab
+
   writer-1:
     build:
       context: ../..
@@ -1154,6 +1231,7 @@ networks:
         - subnet: 172.28.0.0/24
 
 volumes:
+  mlflow-artifacts:
   master-etc:
   master-queue:
   master-multigroups:
