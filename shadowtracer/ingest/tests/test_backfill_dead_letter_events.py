@@ -1,6 +1,7 @@
 """backfill_dead_letter_events.py: real lab Kafka + the isolated test
 ClickHouse database (never the lab's real one - see conftest.py)."""
 
+import datetime
 import json
 import uuid
 
@@ -23,7 +24,9 @@ def _publish_envelope(producer, topic, **overrides):
     envelope = {
         "tenant_key": "test", "component": "shipper", "source_location": f"x:{uuid.uuid4().hex[:8]}",
         "error": "boom", "raw_event_preview": "{}", "raw_event_size": 2,
-        "raw_event_sha256": "0" * 64, "failed_at": "2026-10-08T00:00:00+00:00",
+        # recent, not a hardcoded past date: dead_letter_events has TTL failed_at + 30 days, so a
+        # fixed old date time-bombs this test (it broke the day 2026-10-08 + 30d came round).
+        "raw_event_sha256": "0" * 64, "failed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     envelope.update(overrides)
     producer.produce(topic, value=json.dumps(envelope).encode())

@@ -62,6 +62,7 @@ add_scram_user writer "${KAFKA_WRITER_PASSWORD:?set KAFKA_WRITER_PASSWORD in dep
 add_scram_user correlator "${KAFKA_CORRELATOR_PASSWORD:?set KAFKA_CORRELATOR_PASSWORD in deploy/lab/.env}"
 add_scram_user console-backend "${KAFKA_CONSOLE_BACKEND_PASSWORD:?set KAFKA_CONSOLE_BACKEND_PASSWORD in deploy/lab/.env}"
 add_scram_user ti-matcher "${KAFKA_TI_MATCHER_PASSWORD:?set KAFKA_TI_MATCHER_PASSWORD in deploy/lab/.env}"
+add_scram_user ml-scorer "${KAFKA_ML_SCORER_PASSWORD:?set KAFKA_ML_SCORER_PASSWORD in deploy/lab/.env}"
 
 echo "--- ACLs ---"
 # Shipper: producer only, on its OWN tenant's two topics - never
@@ -103,6 +104,13 @@ acl --add --allow-principal "User:ti-matcher" --operation Read --operation Descr
     --topic "shadowtracer.t." --resource-pattern-type PREFIXED
 acl --add --allow-principal "User:ti-matcher" --operation Read \
     --group "shadowtracer-ti-matcher"
+
+# ml-scorer (Phase 7.1): reads every tenant's alerts topic in its own group to score anomalies,
+# never writes to Kafka (output goes to ClickHouse). Same shape as ti-matcher.
+acl --add --allow-principal "User:ml-scorer" --operation Read --operation Describe \
+    --topic "shadowtracer.t." --resource-pattern-type PREFIXED
+acl --add --allow-principal "User:ml-scorer" --operation Read \
+    --group "shadowtracer-ml-scorer"
 
 # Console-backend: Describe + Read + DescribeConfigs, never Write -
 # /health/detail's lag reporting needs group offsets and topic

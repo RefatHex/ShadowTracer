@@ -72,3 +72,47 @@ def test_cross_source_holds_out_each_family():
     xs = ev.cross_source(items())
     assert set(xs) == {"replay", "normal_activity"}
     assert xs["replay"]["sizes"]["test"] == 30
+
+
+def _mc_items(tactics, per=4, sources_per=2):
+    import datetime as dt
+    from conftest import T0, make_alerts, make_incident
+    from shadowtracer_ml import features
+    out, k = [], 0
+    for ti, tac in enumerate(tactics):
+        for sidx in range(sources_per):
+            for j in range(per):
+                f = features.compute(make_incident(max_level=10 + ti), make_alerts())
+                out.append({"incident_id": k, "y": 1, "tactic": tac, "os": "windows",
+                            "source": f"replay:{tac}-{sidx}", "group": f"{tac}-src{sidx}", "cls": tac,
+                            "closed_at": T0 + dt.timedelta(hours=ti, minutes=sidx * 10 + j), "features": f})
+                k += 1
+    return out
+
+
+def test_class_counts_measures_distinct_sources_not_incidents():
+    items = _mc_items(["persistence", "execution"], per=5, sources_per=2)
+    c = ev.class_counts(items)
+    assert c["by_tactic"]["persistence"]["sources"] == 2 and c["by_tactic"]["persistence"]["incidents"] == 10
+
+
+def test_multiclass_drops_classes_with_too_few_sources():
+    items = _mc_items(["persistence", "execution"], per=4, sources_per=2)
+    items += _mc_items(["rare"], per=4, sources_per=1)       # only 1 source -> dropped
+    for n, it in enumerate(items):
+        it["incident_id"] = n
+    res = ev.multiclass_eval(items, min_sources=2)
+    assert "rare" in res["dropped_classes"] and set(res["kept_classes"]) == {"persistence", "execution"}
+
+
+def test_os_shortcut_detected_when_attack_and_benign_differ_by_os():
+    items = [{"y": 1, "os": "windows", "source": "replay:x", "group": "g", "tactic": "execution"},
+             {"y": 0, "os": "linux", "source": "normal_activity", "group": "n", "tactic": "unknown"}]
+    r = ev.os_shortcut(items)
+    assert r["shortcut_present"] and r["attack_os"] == ["windows"] and r["benign_os"] == ["linux"]
+
+
+def test_promotion_blocked_by_os_shortcut():
+    mc = {"macro_recall": 0.9, "micro_accuracy": 0.9, "majority_baseline_accuracy": 0.5, "cross_source": {}}
+    assert not ev._promote_tactic(mc, {"shortcut_present": True})[0]
+    assert ev._promote_tactic(mc, {"shortcut_present": False})[0]

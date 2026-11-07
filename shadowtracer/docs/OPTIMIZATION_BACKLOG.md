@@ -1,6 +1,6 @@
 # ShadowTracer — Optimisation & Hardening Backlog
 
-Last updated: 2026-11-06
+Last updated: 2026-11-07
 
 ShadowTracer is in a **features-first** period. Anything that is not needed for a
 feature to work correctly goes here instead of blocking feature work. Nothing in
@@ -111,6 +111,10 @@ From `THREAT_MODEL.md` §11–12. Kafka TLS/SASL + per-tenant topics are DONE.
 | D11 | ml-enricher looks up alerts per incident | 7.0: one Postgres + one ClickHouse query per incident (batches of 200); 200 incidents in ~5 s in the lab | Batch the alert lookups per batch if incident close rates outgrow it | LATER | S |
 | D12 | Replay agents show in the test tenant's agent list | 7.0: one registered, never-connected agent per replayed dataset (`replay-*`, table `replay_agents`) | Hide `replay-*` agents in the console, or remove them after training snapshots are taken (owner go-ahead) | LATER | S |
 | D13 | 3.2 % of Splunk replay events were not decoded | 7.0: 3,588 of 112,912 events have a raw `"` in their text; analysisd's EventChannel decoder parses the JSON-printed Event string, where `"` becomes `\"`, so the XML fails (only the first failure is logged as a warning). Fixed for future replays (`replay.agent_quotes`); the 15 Splunk datasets were replayed before the fix | Re-replay the Splunk datasets (new runs, same dataset ids: the split groups by dataset) when a fuller corpus matters; upstream: the decoder could parse the cJSON string value instead of its printed form | LATER | S |
+| D14 | BOTSv3 is pre-indexed Splunk + slow to fetch | 7.1: the cross-OS plan needs BOTSv3, but it ships as a 320 MB pre-indexed Splunk app (not raw logs) and downloads at ~0.5 MB/s. Extracting raw events needs Splunk or a bucket parser (ML_FOUNDATION.md §14) | Owner decision: throwaway Splunk container to export raw events, or an alternative raw-log dataset (Linux auth brute-force + Windows baseline) | **DONE 2026-11-07**: downloaded (CC0, md5 verified); Sysmon XML read straight from the pre-indexed journals (no Splunk), replayed as Windows benign | DONE | M |
+| D15 | attack_data Linux samples do not alert | 7.1: Splunk attack_data auditd → rule 3782 (level 0), Sysmon-for-Linux → rule 1002, so no attack incidents in our ruleset. Blocks Linux attack labels from that source | Add Wazuh Linux-audit / Sysmon-for-Linux decoder+rule coverage (also helps real Linux agents), then replay. Related: D9 | NEXT-OPT | M |
+| D16 | OS shortcut in the incident classifier | 7.0/7.1: every attack label is Windows, every benign is Linux, so a supervised model separates them on OS, not on the attack (`evaluate.py classify` os_shortcut report confirms). Tactic classifier and binary model stay un-promoted until cross-OS data exists (D14/D15/D1) | Fix via D14/D15 (Linux attacks, Windows benign); re-run classify and confirm the shortcut is gone | Now (blocked on data) | M |
+| D17 | BOTSv3 benign label is coarse | 7.1: BOTSv3 is a CTF capture, so ~1 % of its "benign" Sysmon (≈23 level-15 of 2,091 alerts) is real attack activity, labelled benign at low confidence (0.6). Precise per-host/per-window labelling needs the BOTSv3 answer key | Map the documented attack windows/hosts and relabel those incidents attack (tactic level); raise benign confidence for the rest | LATER | S |
 | D4 | SCA scans dominate alert volume | Noise in incidents/fingerprints | Policy: exclude or down-weight from correlation | NEXT-OPT | S |
 
 ## 6. Tooling, packaging and upstream

@@ -8,3 +8,5 @@ psycopg2-binary==2.9.13
 requests>=2.32
 pytest==9.1.1
 python-evtx==0.8.1
+river==0.26.1
+confluent-kafka==2.15.1

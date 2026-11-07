@@ -10,7 +10,7 @@
 # 13,824 MiB cap (stopping ti-sync alone leaves 13,904). Both are off the hot path:
 # ti-matcher resumes from its committed offsets with no missed matches (6.1c), ti-sync
 # simply syncs later and VirusTotal lookups wait in their queue.
-# Phase 7.0: the ML services (mlflow 512, ml-enricher 512, ml-activity 128 = 1,152 MiB) are
+# Phase 7.0: the ML services (mlflow 512, ml-enricher 512, ml-activity 128, ml-scorer 320 = 1,472 MiB) are
 # stopped too: "ha" with ML would total 15,312 MiB; without ti-* and ML it is 13,648. The
 # enricher resumes from incidents left unscored; the normal-activity schedule just pauses.
 set -euo pipefail
@@ -18,7 +18,7 @@ cd "$(dirname "$0")"
 HA=(--env-file .env --env-file ha.env)
 case "${1:-}" in
     up)
-        PAUSED=(ti-sync ti-matcher mlflow ml-enricher ml-activity)
+        PAUSED=(ti-sync ti-matcher mlflow ml-enricher ml-activity ml-scorer)
         docker compose stop "${PAUSED[@]}"
         # every service except the paused ones, so the cap is never crossed even briefly
         mapfile -t svcs < <(docker compose "${HA[@]}" config --services | grep -vx "${PAUSED[@]/#/-e}")

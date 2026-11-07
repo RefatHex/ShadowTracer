@@ -95,7 +95,11 @@ def label_runs(engine, ch, tenant: str) -> dict:
                 "SELECT id, alert_count FROM incidents WHERE tenant_key=:t AND agent_id = ANY(:a) AND state='closed' "
                 "AND first_seen <= :w1 AND last_seen >= :w0"), {"t": tenant, "a": ids, "w0": w0, "w1": w1}).all()
             if run.tool == "replay":
-                origin, label, conf = "dataset_label", "attack", lambda *_: 0.8
+                # a replay carries the dataset's own label: "attack" for a recorded-attack dataset
+                # (0.8), "benign" for a benign-background corpus like BOTSv3 Windows Sysmon (0.6 -
+                # background may contain a little un-excluded attack activity; see backlog D17).
+                origin, label = "dataset_label", run.label
+                conf = (lambda *_: 0.6) if run.label == "benign" else (lambda *_: 0.8)
             else:
                 origin, label = ("normal_window", "benign") if run.tool == "normal" else ("attack_window", "attack")
                 techniques = {run.technique} | {s[0] for s in conn.execute(text(

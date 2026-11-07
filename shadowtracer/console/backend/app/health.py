@@ -592,4 +592,14 @@ def ml_scores(db: Session, window_hours: int = 24) -> dict:
         m = models.setdefault(r["ml_model"], {"scored": 0, "deciles": [0] * 10})
         m["scored"] += r["n"]
         m["deciles"][min(max(int(r["bucket"]) - 1, 0), 9)] += r["n"]
-    return {"window_hours": window_hours, "models": models, "closed_unscored_last_hour": waiting}
+    anomaly = {}
+    try:
+        for r in db.execute(text(
+                "SELECT ml_anomaly_model, count(*) scored, avg(ml_anomaly_score) mean, max(ml_anomaly_score) max "
+                "FROM incidents WHERE ml_anomaly_model IS NOT NULL AND ml_anomaly_score IS NOT NULL "
+                "AND closed_at > now() - make_interval(hours => :h) GROUP BY 1"), {"h": window_hours}).mappings():
+            anomaly[r["ml_anomaly_model"]] = {"scored": r["scored"], "mean": round(float(r["mean"]), 4),
+                                              "max": round(float(r["max"]), 4)}
+    except Exception:  # noqa: BLE001 - pre-migration column missing must not crash /health
+        db.rollback()
+    return {"window_hours": window_hours, "models": models, "closed_unscored_last_hour": waiting, "anomaly": anomaly}

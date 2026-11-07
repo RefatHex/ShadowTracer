@@ -61,6 +61,10 @@ incidents = Table(
     Column("ml_reasons", JSONB, nullable=True),
     Column("ml_model", Text, nullable=True),
     Column("ml_scored_at", DateTime(timezone=True), nullable=True),
+    # Phase 7.1: incident anomaly from the HalfSpaceTrees stream scorer (max of its alerts' scores).
+    Column("ml_anomaly_score", REAL, nullable=True),
+    Column("ml_anomaly_reasons", JSONB, nullable=True),
+    Column("ml_anomaly_model", Text, nullable=True),
     CheckConstraint("state IN ('open', 'closed')", name="incidents_state_check"),
     CheckConstraint(
         "triage_status IN ('new', 'acknowledged', 'escalated', 'false_positive', 'closed')",

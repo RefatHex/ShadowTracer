@@ -297,3 +297,126 @@ agents took 002-005. The labeler therefore maps an agent name to the ids it had 
 (±1 h), never a wider span. Verified: all run-window labels are on agent 001, and no incident has
 conflicting labels. A temporary agent `st-xmltest` (058) was used to find the quoting issue and
 removed again; its 3 test alerts are unlabelled.
+
+---
+
+# Phase 7.1
+
+## 12. Task reframe: multi-class tactic classifier (`evaluate.py classify`)
+
+The 7.0 binary "attack vs benign" incident model had an OS confound (every attack label was a
+Windows replay, every benign label was Linux activity), so it could separate the classes on
+OS-specific rule groups instead of on the attack. The task is reframed:
+
+- **Primary (`evaluate.py classify`).** Multi-class: given an incident already judged an attack,
+  predict its **ATT&CK tactic** (the tactic its alerts carry, from ClickHouse `events.mitre_tactics`).
+  Trained on labelled attack incidents across OSes.
+- **Secondary (`evaluate.py run`).** The binary attack-vs-benign logistic model is kept as a
+  secondary experiment only. In production, attack-vs-benign stays with rules + HalfSpaceTrees
+  (section 13) + rarity (5B), not a supervised binary model.
+- **Sample size is distinct sources.** Class counts are counted by **distinct source windows /
+  datasets**, never alerts or incidents (one dataset replayed once can emit thousands of alerts
+  but is a single sample). A tactic with fewer than `MIN_SOURCES` (2) distinct sources is dropped.
+- **OS-shortcut report** (`os_shortcut`): the OS × label contingency, with a verdict on whether a
+  model could shortcut on OS. The 7.0 incident source-leak test is unchanged and still passes.
+- **Promotion** of the tactic model requires ≥ 2 surviving classes, beating the majority-class
+  baseline, no held-out source collapsing to chance, **and** the OS shortcut being absent.
+
+## 13. Live anomaly scorer: `ml-scorer` (River HalfSpaceTrees)
+
+A side consumer in its own group (`shadowtracer-ml-scorer`) on every tenant's alerts topic
+(`ALERTS_TOPIC_PATTERN`) - **never the hot path**: read-only on alerts (its own Kafka credential,
+mirroring ti-matcher), writes only its own ClickHouse table. One HalfSpaceTrees model per tenant,
+warmed online.
+
+- **Features** (`alert_features.py`, version `a1`, shared by scorer and offline eval). All in
+  [0, 1], no source-revealing field (no agent id/name, tenant, node, manager, location, decoder,
+  dataset, raw IP): rule level, rule groups feature-hashed to 12 buckets, time-of-day and
+  day-of-week as cyclical sin/cos (a live stream's clock is real behaviour - the 7.0 ban on
+  absolute time is about re-timed replays, a different module), the host's recent alert rate
+  (EWMA), source-IP class (none/private/public), and first-seen flags for the (agent, user) and
+  (agent, source-IP) pairs. State is **bounded**: per-agent LRU seen-sets (cap 512 each) and an
+  LRU of at most 4096 agents, so memory has a hard ceiling. `local_rate` is the host's rate, not
+  its identity.
+- **Scoring.** Score (0-1, higher = more anomalous) then learn, so a point is judged against the
+  stream so far. Below the per-tenant warm-up (`WARMUP` = 300 alerts) the score is withheld
+  (`warm = 0`). Rows go to ClickHouse `ml_scores`, a ReplacingMergeTree on
+  (tenant, cluster_node, alert_id, model_version): replaying the group after a restart overwrites,
+  never duplicates. Offsets commit only after the batch is written (at-least-once + dedup).
+- **Reasons.** Top features by deviation from the running per-feature mean - an approximation of
+  "what was unusual", **not** an exact HST attribution (stated on the model card).
+- **Checkpoint.** `hst.AnomalyModel.save_bytes` writes a versioned, validated envelope (a JSON
+  header - format, River version, feature version, model version, n_seen - then the payload); it
+  is **not a bare pickle**. On restart each tenant's model is restored; a header that disagrees
+  (feature/algorithm/River-version change) is discarded and the model warms up again. Written
+  atomically to the `ml-scorer-state` volume every 5 min.
+- **Incident anomaly.** At incident close the enricher sets `incidents.ml_anomaly_score` = the MAX
+  of the incident's alerts' warm scores, with that alert's reasons (`ml_anomaly_reasons`,
+  `ml_anomaly_model`). Separate from the 7.0 `ml_score`. Both are advisory; **no model triggers an
+  action.**
+- **MLflow.** The model is registered once per start (`incident-anomaly-hst`) with its params and
+  card. It runs live, not served by stage.
+- `/health/detail` → `ml` → `anomaly`: scored count, mean and max per model over 24 h.
+
+## 14. Data to break the OS shortcut (part B) - RESOLVED
+
+Status 2026-11-07: the owner's Atomic Red Team runs landed (59 `done` atomic runs → 18
+`atomic_linux` attack-window labels), so **attack data now spans both OSes** (Windows replays +
+Linux ART). The remaining single-OS class is **benign, which is still Linux-only** (scheduled
+normal activity on the one Linux agent). So the gap to fully close the shortcut is **Windows
+benign** - exactly what BOTSv3's Windows Sysmon/WinEventLog provides. Breaking it needs benign
+data on Windows. The two sources the plan named for cross-OS data both hit a wall:
+
+- **Splunk attack_data Linux** (auditd, Sysmon-for-Linux). These decode but reach only generic
+  rules in our ruleset - auditd → rule 3782 (level 0), `sysmon_linux` → rule 1002 - so they
+  produce **no meaningful attack incidents** without extra decoders/audit-key rules (backlog D9,
+  D15). Not usable as-is for Linux attack labels.
+- **Splunk BOTSv3 Windows benign (done).** BOTSv3 (CC0, 320 MB, md5 `d7ccca99...`) ships as a
+  pre-indexed Splunk app, but its Sysmon events are `XmlWinEventLog` stored as `<Event>` XML inside
+  the buckets' `rawdata/journal.gz` - so **no Splunk was needed** (Option 1 simplified):
+  `replay.iter_botsv3_sysmon` gunzips each journal and extracts the XML directly. 9,212 Sysmon
+  events replayed on a dedicated agent (`replay-botsv3-sysmon`, OS Windows), 2,091 alerted
+  (`windows_eventchannel`; rules 92032/92200/92213/...), labelled **benign background**
+  (`dataset_label`, confidence 0.6). This gives the missing **Windows benign** class, so benign now
+  spans Linux + Windows and the OS shortcut is broken on both sides (attack: Windows replays + Linux
+  ART; benign: Linux normal activity + Windows BOTSv3). The classic `WinEventLog:*` text streams are
+  not decodable by Wazuh and are skipped; `linux_secure` (sshd) is available for more Linux benign
+  (not yet replayed).
+- **Label ceiling (backlog D17).** BOTSv3 is a CTF capture, so a little real attack activity sits in
+  the "benign" Sysmon (≈23 level-15 events of 2,091). They are labelled benign at low confidence
+  (0.6); precise attack-window exclusion using the BOTSv3 answer key is deferred.
+- **Splunk attack_data Linux / Sysmon-for-Linux decoder coverage** stays as backlog D15 (would let
+  attack_data's Linux samples alert; also helps real Linux agents).
+
+A model is still promoted only through its gate (section 7/12): more data lowers the confound but
+the gates (beat the baseline, generalise across sources, no OS shortcut) are what decide promotion.
+
+## 15. Future work
+
+- **DARPA OpTC** (github.com/FiveDirections/OpTC-data): large (~1 TB), richly labelled Windows+Linux
+  host telemetry (eCAR). Attractive for cross-OS attack labels, but the licence is unclear and the
+  size is impractical for the lab. **Not downloaded.** Revisit only with a licence check and a
+  selective-window extraction plan.
+- Re-replay the 15 Splunk Windows datasets with the D13 quoting fix (3.2 % of their events were
+  dropped before it); pending, low value until the corpus matters.
+
+## 16. Phase 7.1 results (2026-11-07)
+
+Data after the owner's Atomic Red Team runs (Linux attacks), the Windows replays, scheduled Linux
+normal activity, and the BOTSv3 Windows-Sysmon benign replay:
+
+- **OS shortcut: gone.** `evaluate classify` os_shortcut contingency - windows {attack 81,
+  benign 1}, linux {attack 14, benign 12}, unknown {benign 1}: attack and benign now share both
+  OSes, so a model can no longer separate them on OS. (ART supplied Linux attacks; BOTSv3 supplied
+  Windows benign.) The 7.0 incident source-leak test still passes.
+- **Tactic classifier (primary): not promoted.** 7 tactic classes kept (>= 2 distinct sources
+  each); macro-recall 0.485, micro-accuracy 0.429. The gate blocks promotion because the held-out
+  `atomic_linux` source scores 0 - it does not yet generalise across sources (too few distinct
+  sources per class). Honest "thin data" outcome; the model card and class counts are logged.
+- **Anomaly scorer (HalfSpaceTrees):** on the warm-scored labelled incidents, incident anomaly
+  (max of alert scores) separates attack from benign about as well as, and on Windows better than,
+  the 5B rarity and rule-level baselines - PR-AUC overall 0.817 vs 0.814 (rarity) / 0.804 (rule
+  level); Windows subset 0.915 vs 0.794 / 0.771. Small sample (n=13 warm-scored labelled; most
+  attack incidents predate per-tenant warm-up), reported as-is.
+- **Scorer health:** 1 model (test tenant) warm (>300 alerts), ~14k scores, 0 restarts; dedup
+  verified (rows == distinct identities after a restart); checkpoint restore confirmed.

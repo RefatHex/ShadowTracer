@@ -127,6 +127,43 @@ def enrich_batch(engine, ch, models: Models, tenant_list: list, limit: int = BAT
     return {"incidents": len(incs), "models": list(outputs), "first_id": incs[0]["id"]}
 
 
+def anomaly_batch(engine, ch, tenant_list: list, limit: int = BATCH) -> dict:
+    """7.1: set each newly closed incident's anomaly = MAX of its alerts' warm HST scores
+    (ClickHouse ml_scores), with that alert's reasons. Independent of the supervised model, so it
+    runs even when no model is served. An incident whose alerts were never warm-scored (warm-up or
+    scorer down at the time) is marked done with a NULL score - late scores are not backfilled."""
+    from .hst import MODEL_VERSION
+    with engine.begin() as conn:
+        incs = conn.execute(text(
+            "SELECT id, tenant_key FROM incidents WHERE state = 'closed' AND ml_anomaly_model IS NULL "
+            "AND tenant_key = ANY(:t) AND closed_at >= CAST(:since AS timestamptz) "
+            "ORDER BY closed_at LIMIT :n FOR UPDATE SKIP LOCKED"), {"t": tenant_list, "n": limit, "since": SINCE}).all()
+        if not incs:
+            return {"incidents": 0}
+        scored = 0
+        for inc in incs:
+            pairs = [(r[0], r[1]) for r in conn.execute(text(
+                "SELECT node, alert_id FROM incident_alerts WHERE incident_id = :i"), {"i": inc.id})]
+            best = (None, None)
+            # chunk the identity list: a big replay incident has tens of thousands of alerts, more
+            # than one ClickHouse HTTP query (its IN list) can carry. Max over chunks is exact.
+            for i in range(0, len(pairs), 2000):
+                # count() gates the aggregate: ClickHouse max() over an EMPTY match returns 0.0 (score
+                # is non-nullable), not NULL - so an incident with no warm-scored alert must be told
+                # apart from one that genuinely scored 0, or every un-scored incident looks like 0.
+                n, mx, rsn = ch.query(
+                    "SELECT count(), max(score), argMax(reasons, score) FROM ml_scores WHERE tenant_id = {t:String} "
+                    "AND model_version = {v:String} AND warm = 1 AND (cluster_node, alert_id) IN {p:Array(Tuple(String,String))}",
+                    parameters={"t": inc.tenant_key, "v": MODEL_VERSION, "p": pairs[i:i + 2000]}).result_rows[0]
+                if n and (best[0] is None or float(mx) > best[0]):
+                    best = (round(float(mx), 4), rsn or "[]")
+            conn.execute(text("UPDATE incidents SET ml_anomaly_score = :s, ml_anomaly_reasons = CAST(:r AS jsonb), "
+                              "ml_anomaly_model = :m WHERE id = :i"),
+                         {"s": best[0], "r": best[1], "m": MODEL_VERSION, "i": inc.id})
+            scored += best[0] is not None
+    return {"incidents": len(incs), "with_score": scored}
+
+
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     argv = argv if argv is not None else sys.argv[1:]
@@ -134,7 +171,8 @@ def main(argv=None) -> int:
     models = Models([m for m in os.environ.get("ML_SERVED_MODELS", "incident-risk-dummy").split(",") if m])
     tl = tenants()
     if argv[:1] == ["once"]:
-        print(json.dumps(enrich_batch(engine, ch, models, tl), default=str))
+        print(json.dumps({"supervised": enrich_batch(engine, ch, models, tl),
+                          "anomaly": anomaly_batch(engine, ch, tl)}, default=str))
         return 0
     poll = float(os.environ.get("ML_POLL_SECONDS", "15"))
     label_every = float(os.environ.get("LABEL_INTERVAL_SECONDS", "300"))
@@ -144,11 +182,14 @@ def main(argv=None) -> int:
             r = enrich_batch(engine, ch, models, tl)
             if r["incidents"]:
                 log.info("enriched %s", r)
+            a = anomaly_batch(engine, ch, tl)
+            if a["incidents"]:
+                log.info("anomaly %s", a)
             if time.monotonic() - last_label > label_every:
                 for t in tl:
                     log.info("labels %s", json.dumps(labels.run_all(engine, ch, t), default=str))
                 last_label = time.monotonic()
-            if r["incidents"] >= BATCH:
+            if r["incidents"] >= BATCH or a["incidents"] >= BATCH:
                 continue
         except Exception:  # noqa: BLE001 - keep the worker alive; the batch is retried
             log.exception("enrich batch failed")

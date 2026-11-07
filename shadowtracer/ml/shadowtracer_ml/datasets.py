@@ -34,6 +34,14 @@ INVENTORY = [
     {"dataset": "AIT Log Data Set V2.0", "url": "https://zenodo.org/records/5789064", "os": "Linux",
      "logs": "auth, syslog, apache, audit, suricata, dns, vpn, ...", "attack_labels": "attack-step labels per line (not ATT&CK ids)",
      "size": "130.6 GB", "licence": "CC BY-NC-SA 4.0", "usable": "no (non-commercial)"},
+    {"dataset": "Splunk BOTSv3", "url": "https://botsdataset.s3.amazonaws.com/botsv3/botsv3_data_set.tgz", "os": "Windows, Linux",
+     "logs": "Windows Sysmon/WinEventLog, Linux linux_secure/linux_audit, AWS/stream (real benign background + attack)",
+     "attack_labels": "scenario attack windows/hosts at tactic level (no per-event labels); off-window on affected hosts = benign background",
+     "size": "320 MB (pre-indexed Splunk app)", "licence": "CC0", "usable": "pending: raw events must be exported from the "
+     "pre-indexed buckets (throwaway Splunk, owner decision 2026-11-07); Windows benign fills the OS-shortcut gap (docs/ML_FOUNDATION.md B)"},
+    {"dataset": "DARPA OpTC", "url": "https://github.com/FiveDirections/OpTC-data", "os": "Windows, Linux",
+     "logs": "eCAR host telemetry, labelled", "attack_labels": "red-team activity labelled", "size": "~1 TB",
+     "licence": "unclear", "usable": "no (future work: licence unclear, size impractical; not downloaded)"},
 ]
 # Windows techniques whose Splunk atomic_red_team folders hold XmlWinEventLog recordings.
 SPLUNK_TECHNIQUES = ["T1136.001", "T1059.001", "T1003.001", "T1053.005", "T1547.001", "T1218.011", "T1112", "T1070.001",
@@ -74,6 +82,21 @@ def download_splunk(techniques=SPLUNK_TECHNIQUES) -> list:
             ok = _get(f"https://media.githubusercontent.com/media/splunk/attack_data/master/{p}", dest)
             out.append({"technique": parts[2], "file": dest, "downloaded": ok})
     return out
+
+
+def download_botsv3() -> dict:
+    """BOTSv3 (CC0): a 320 MB pre-indexed Splunk app. The Windows Sysmon events are XmlWinEventLog
+    stored as <Event> XML inside the buckets' rawdata/journal.gz, so no Splunk is needed to export
+    them - replay.iter_botsv3_sysmon reads them directly. Downloads + extracts once."""
+    import tarfile
+    base = os.path.join(ST_DATA, "botsv3")
+    tgz = os.path.join(base, "botsv3_data_set.tgz")
+    _get("https://botsdataset.s3.amazonaws.com/botsv3/botsv3_data_set.tgz", tgz, 512 * 1024 * 1024)
+    extract = os.path.join(base, "extracted")
+    if not os.path.isdir(extract):
+        with tarfile.open(tgz) as t:
+            t.extractall(extract)   # noqa: S202 - trusted CC0 dataset; extracted into its own dir
+    return {"tgz": tgz, "extracted": extract, "md5_expected": "d7ccca99a01cff070dff3c139cdc10eb"}
 
 
 def download_evtx() -> str:
@@ -125,6 +148,8 @@ def main(argv=None) -> int:
         r = download_splunk(tech)
     elif what == "evtx":
         r = download_evtx()
+    elif what == "botsv3":
+        r = download_botsv3()
     else:
         r = download_otrf()
     print(json.dumps(r, indent=1))

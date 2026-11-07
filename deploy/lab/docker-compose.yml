@@ -1008,6 +1008,38 @@ services:
     networks:
       - lab
 
+  # ml-scorer (Phase 7.1): live per-alert anomaly score (River HalfSpaceTrees), one model per
+  # tenant. Side consumer in its own group on every tenant's alerts topic - never the hot path
+  # (read-only on alerts, writes only its own ClickHouse table). Scores are advisory.
+  ml-scorer:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ml.Dockerfile
+    image: shadowtracer-lab/ml:local
+    restart: unless-stopped
+    mem_limit: 320m
+    memswap_limit: 320m
+    command: ["python", "-m", "shadowtracer_ml.scorer"]
+    environment:
+      <<: *ml-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_SECURITY_PROTOCOL: SASL_SSL
+      KAFKA_SASL_USERNAME: ml-scorer
+      KAFKA_SASL_PASSWORD: ${KAFKA_ML_SCORER_PASSWORD:?set KAFKA_ML_SCORER_PASSWORD in deploy/lab/.env}
+      KAFKA_SSL_CA_LOCATION: /etc/kafka-certs/ca.crt
+      KAFKA_GROUP_ID: shadowtracer-ml-scorer
+      ML_SCORER_STATE_DIR: /state
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
+      - ml-scorer-state:/state
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    networks:
+      - lab
+
   # Scheduled benign look-alike activity on the test tenant's Linux lab agent, recorded in
   # attack_runs (label benign). Lab transport: the host docker socket (backlog S10).
   ml-activity:
@@ -1232,6 +1264,7 @@ networks:
 
 volumes:
   mlflow-artifacts:
+  ml-scorer-state:
   master-etc:
   master-queue:
   master-multigroups:

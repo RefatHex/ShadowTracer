@@ -174,7 +174,25 @@ def iter_splunk(path: str):
             yield agent_quotes(xml)
 
 
-READERS = {"splunk": iter_splunk, "otrf": iter_otrf, "evtx": iter_evtx}
+_BOTSV3_EVENT = re.compile(r"<Event xmlns=.*?</Event>", re.S)
+
+
+def iter_botsv3_sysmon(path: str):
+    """BOTSv3 (CC0) Windows Sysmon: XmlWinEventLog events live inside the pre-indexed Splunk
+    rawdata journals (no Splunk needed). `path` is the extracted dataset root; each bucket's
+    journal.gz is gunzipped and its <Event>...</Event> blobs (Sysmon XML only - the classic
+    WinEventLog text has no such tags) are replayed as EventChannel. Benign Windows background."""
+    import glob
+    import gzip
+    import os
+    for journal in sorted(glob.glob(os.path.join(path, "**", "journal.gz"), recursive=True)):
+        with gzip.open(journal, "rb") as f:
+            text_ = f.read().decode("latin-1", "replace")
+        for xml in _BOTSV3_EVENT.findall(text_):
+            yield agent_quotes(xml)
+
+
+READERS = {"splunk": iter_splunk, "otrf": iter_otrf, "evtx": iter_evtx, "botsv3_sysmon": iter_botsv3_sysmon}
 
 
 def mem_available_mb() -> int:
@@ -205,13 +223,16 @@ def replay_agent(conn, tenant: str, dataset_id: str, manager: str = MANAGER) -> 
 
 
 def replay(engine, ch, dataset_id: str, technique: str, files: list, rate: float = MAX_RATE,
-           manager: str = MANAGER, mem_floor_mb: int = MIN_MEM_AVAILABLE_MB, fmt: str = "splunk", test_name: str = None) -> dict:
+           manager: str = MANAGER, mem_floor_mb: int = MIN_MEM_AVAILABLE_MB, fmt: str = "splunk", test_name: str = None,
+           label: str = "attack") -> dict:
+    """label: "attack" for a recorded-attack dataset (the default), "benign" for a benign-background
+    corpus such as BOTSv3's Windows Sysmon telemetry."""
     rate = min(rate, MAX_RATE)
     tenant = db.test_tenant()
     with engine.begin() as conn:
         agent_id, agent_name = replay_agent(conn, tenant, dataset_id, manager)
         run_id = recorder.start(conn, tenant, "replay", agent_name, technique=technique, test_name=test_name or dataset_id,
-                                source=f"replay:{dataset_id}", dataset_id=dataset_id, recorded_by="replay",
+                                source=f"replay:{dataset_id}", dataset_id=dataset_id, recorded_by="replay", label=label,
                                 details={"files": [f.rsplit("/", 1)[-1] for f in files], "agent_id": agent_id})
     proc = subprocess.Popen(["docker", "exec", "-i", manager, "/var/ossec/framework/python/bin/python3", "-c", _SENDER],
                             stdin=subprocess.PIPE)

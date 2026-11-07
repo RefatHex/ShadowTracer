@@ -8,4 +8,6 @@ WORKDIR /app
 COPY shadowtracer/ml/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY shadowtracer/ml/shadowtracer_ml ./shadowtracer_ml
+# ml-scorer (7.1) reuses ingest's alert normaliser, topic helpers and Kafka security config.
+COPY shadowtracer/ingest/shadowtracer_ingest /ingest/shadowtracer_ingest
 ENV MLFLOW_DISABLE_AGENT_HINT=1 PYTHONUNBUFFERED=1
