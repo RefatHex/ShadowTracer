@@ -128,6 +128,7 @@ def run(stop_flag=None):
     consumer.subscribe([ALERTS_TOPIC_PATTERN])
     register_model()
     rows, last_flush, last_ckpt = [], time.monotonic(), time.monotonic()
+    skipped = [0]          # malformed alerts the writer dead-letters anyway; counted, not spewed
     log.info("ml-scorer up: group=%s model=%s", GROUP_ID, hst.MODEL_VERSION)
     try:
         while not stop_flag.is_set():
@@ -142,15 +143,18 @@ def run(stop_flag=None):
                         models.dirty.add(tenant)
                         rows.append(score_row(event, tenant, score, reasons))
                     except Exception:  # noqa: BLE001 - one unparseable alert never stops the stream
-                        log.exception("scoring failed for a %s alert", tenant)
+                        skipped[0] += 1
+                        # malformed alerts (bad/absent timestamp etc.) are expected and dead-lettered
+                        # upstream; log the first with a trace, then just count (no per-alert spew).
+                        (log.exception if skipped[0] == 1 else log.debug)("skipping an unparseable %s alert", tenant)
             if rows and (len(rows) >= FLUSH_ROWS or now - last_flush >= FLUSH_SECONDS):
                 flush(ch, rows)
                 consumer.commit(asynchronous=False)     # at-least-once; ReplacingMergeTree dedups on replay
                 last_flush = now
             if now - last_ckpt >= CHECKPOINT_SECONDS:
                 saved = models.checkpoint()
-                if saved:
-                    log.info("checkpointed %d models", saved)
+                if saved or skipped[0]:
+                    log.info("checkpointed %d models; skipped %d unparseable alerts since start", saved, skipped[0])
                 last_ckpt = now
     finally:
         flush(ch, rows)
