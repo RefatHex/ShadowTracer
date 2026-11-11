@@ -1551,10 +1551,15 @@ raw kernel `inotify` delivers `IN_CREATE` for every monitored dir (verified by a
 directly in top-level, unshadowed dirs (`/root`,`/home`,`/var/ossec/lab-fim-test`). It does **not**
 emit for the `/tmp` family, for `/etc/*` subdirs shadowed by the non-realtime `/etc` in the base
 `<syscheck>`, or for subdirs (`/root/downloads`) — exactly the high-risk paths 110200 targets.
-This is a lab-environment quirk (kernel inotify works; a normal host delivers these), not a pipeline
-defect: each link is verified above. Closing it needs a clean agent recreate on the current image +
-a settled baseline (no restarts), or a run on a non-WSL host. Burst test and `image-cache.sh save`
-are tracked with it in OPTIMIZATION_BACKLOG.
+Config is ruled out: Wazuh resolves a file to its **longest-matching** directory
+(`src/syscheckd/src/create_db.c:1198` `fim_configuration_directory`), so the non-realtime base
+`/etc` does not shadow the realtime `/etc/cron.d`; and a **clean agent recreate** (fresh volume,
+dirs pre-existing, baseline settled, no restarts) reproduced it exactly — `/root` → 554, `/tmp` and
+`/etc/cron.d` → nothing. It is a container-platform quirk (kernel inotify works; a normal host
+delivers these), not a pipeline defect: each link is verified above. The shipped `etc/ossec-agent.conf`
+now carries these high-risk paths as realtime entries (UPSTREAM.md) so a real host gets the live
+chain. Running it live needs a non-WSL host; burst test and `image-cache.sh save` are tracked with
+it in OPTIMIZATION_BACKLOG (D18, D19).
 
 **Shared-file distribution (check 2).** Compiled rules are distributed to agents via Wazuh
 **agent-group shared files**; the agent image holds only the YARA-X binary. 4.14.8 limits:
