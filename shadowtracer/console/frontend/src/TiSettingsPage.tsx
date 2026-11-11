@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from './AuthContext'
 import * as api from './api'
 import type { TiOverview, TiSettings } from './api'
+import { PaidSourcesSection } from './PaidSourcesSection'
 
 // Phase 6.4: per-tenant threat-intel settings. Everyone can read; only an admin can change
 // (the API answers 403 otherwise and audits every change). Keys show configured yes/no -
@@ -78,6 +79,8 @@ export function TiSettingsPage() {
           </p>
         )}
       </section>
+
+      <PaidSourcesSection />
 
       <h2 className="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300">Feeds</h2>
       <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">

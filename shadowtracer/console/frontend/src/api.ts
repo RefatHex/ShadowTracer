@@ -422,3 +422,51 @@ export async function updateTiSettings(accessToken: string, settings: TiSettings
   })
   return handle<TiSettings>(resp)
 }
+
+// Phase 6.5 B: tenant-managed paid-source keys. The key is write-only - the API returns only a
+// fingerprint/last4 for display, never the key itself.
+export interface PaidSource {
+  source: string
+  display_name: string
+  enabled: boolean
+  has_key: boolean
+  key_fingerprint: string | null
+  key_last4: string | null
+  key_version: number
+  daily_budget: number
+  cache_ttl_hours: number
+  daily_budget_default: number
+  cache_ttl_hours_default: number
+  cooldown_until: string | null
+  rotated_at: string | null
+  updated_at: string | null
+}
+
+export interface PaidSourceUpdate {
+  key?: string | null
+  enabled: boolean
+  daily_budget: number | null
+  cache_ttl_hours: number | null
+}
+
+export async function fetchPaidSources(accessToken: string): Promise<PaidSource[]> {
+  const resp = await fetch(`${API_BASE}/api/ti/paid-sources`, {
+    headers: authHeaders(accessToken), credentials: 'include',
+  })
+  return handle<PaidSource[]>(resp)
+}
+
+export async function putPaidSource(accessToken: string, source: string, body: PaidSourceUpdate): Promise<PaidSource> {
+  const resp = await fetch(`${API_BASE}/api/ti/paid-sources/${encodeURIComponent(source)}`, {
+    method: 'PUT', headers: { ...authHeaders(accessToken), 'Content-Type': 'application/json' },
+    credentials: 'include', body: JSON.stringify(body),
+  })
+  return handle<PaidSource>(resp)
+}
+
+export async function removePaidSourceKey(accessToken: string, source: string): Promise<PaidSource> {
+  const resp = await fetch(`${API_BASE}/api/ti/paid-sources/${encodeURIComponent(source)}/remove`, {
+    method: 'POST', headers: authHeaders(accessToken), credentials: 'include',
+  })
+  return handle<PaidSource>(resp)
+}
