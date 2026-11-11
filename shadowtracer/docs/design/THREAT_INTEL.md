@@ -1475,8 +1475,62 @@ revision 2 (see the 6.1a notes).
 
 ## 10. Phase 6.5 — free default layer, tenant-managed paid sources, selective VirusTotal
 
-Source terms were verified 2026-11-11 and recorded in `LICENSE_INVENTORY.md` §3. Nothing in 6.5
+Source terms were verified 2026-11-11/12 and recorded in `LICENSE_INVENTORY.md` §3. Nothing in 6.5
 runs on the shipper/writer/correlator hot path; the file-hash work is in ti-sync's worker loop.
+
+### 10.0 Summary
+
+**Sources and licences** (full table + links in `LICENSE_INVENTORY.md` §3; paid sources are
+tenant-managed - the tenant brings its own key and its own commercial licence, ShadowTracer ships
+none):
+
+| Source | Role | Default | Terms |
+|---|---|---|---|
+| CIRCL hashlookup | known-good FIM hashes | free, on | CC-BY |
+| YARA-X + signature-base / Yara-Rules | local file scan (A2) | free, on | Apache-2.0/MIT engine; DRL 1.1 / GPL-2 rules |
+| CISA KEV | CVE actively-exploited (A3) | free, on | CC0 |
+| FIRST EPSS | CVE exploit probability (A3) | free, on | free (courtesy attribution) |
+| Tor exit list | context tag (A4) | free, on | CC0 |
+| VirusTotal | hash verdict (funnel) | tenant key, off | VT commercial licence |
+| MalwareBazaar | hash → malware (funnel, before VT) | tenant key, off | free Auth-Key / Spamhaus commercial |
+| AbuseIPDB · GreyNoise | on-demand analyst IP lookup | tenant key, off | paid plan / EULA |
+
+**The selective funnel** (per FIM file-hash; only a small fraction reaches a paid source):
+
+```
+ FIM file change (rule 550/554, sha256)
+        │
+        ▼
+   [ cache ]──hit──▶ served from cache (free)
+        │ miss
+        ▼
+   [ CIRCL known-good ]──known-good──▶ stop · mark incident "known file" (free)
+        │ not-known-good
+        ▼
+   [ MalwareBazaar ]──hit──▶ malicious verdict + annotate incident  (tenant key, no VT call)
+        │ miss (mbz_unknown)
+        ▼
+   [ prevalence ]──seen on >5 hosts/7d──▶ skipped_common (free)
+        │ rare
+        ▼
+   [ signal gate ]──no signal──▶ skipped_no_signal (free)
+        │ has a signal  (YARA match ≫ TI match · priority≥12 · anomaly · high-risk path · rare)
+        ▼
+   [ VirusTotal ]  priority queue, strongest signal first   (tenant key, budget, cache, 429)
+
+ on-demand, analyst click only:  incident IP ──▶ AbuseIPDB / GreyNoise  (tenant key, budget, cache, audit)
+```
+
+**Real numbers** (256 real FIM file changes on the lab agents through FIM→spool→ti-sync, VirusTotal
+enabled; `THROUGHPUT_BASELINE.md` §18): of **256 file changes, 41 (16%) reached VirusTotal**; the
+free layer + gate filtered **215 (84%)** — 14 known-good, 200 no-signal, 1 cached. Funnel decision
+**0.43 ms/hash**. CVE enrichment over the lab's history: **1,779 KEV loaded, 3,126 incidents tagged
+with a CVE, 1 in KEV** (priority floored). At 500/s end to end with all of 6.5 running, writer and
+correlator stay within the §17 baseline (0 dead letters) — 6.5 adds no hot-path cost.
+
+**Console views** (live): TI settings → *Paid sources* (write-only keys: only `••••last4` + version
+shown); an incident shows its known-good / MalwareBazaar / VirusTotal verdicts and a CVE/KEV
+(actively-exploited)/EPSS badge; each source IP carries AbuseIPDB/GreyNoise lookup buttons.
 
 ### A1 — CIRCL hashlookup free layer (DONE)
 
