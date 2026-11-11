@@ -27,7 +27,7 @@ ARG INSTALL_DIR=/var/ossec
 
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
-        procps iproute2 ca-certificates gawk curl \
+        procps iproute2 ca-certificates gawk curl python3 \
         openssh-server rsyslog sudo passwd auditd audispd-plugins iptables ulogd2 && \
     rm -rf /var/lib/apt/lists/*
 
@@ -67,12 +67,26 @@ RUN curl -fsSL -o /tmp/osquery.deb \
         https://github.com/osquery/osquery/releases/download/5.23.1/osquery_5.23.1-1.linux_amd64.deb && \
     dpkg -i /tmp/osquery.deb && rm /tmp/osquery.deb
 
+# Phase 6.5 A2: YARA-X CLI (Apache-2.0/MIT, VirusTotal/yara-x), pinned. The image holds only the
+# binary; the compiled YARA rules are distributed from the manager via Wazuh agent-group shared
+# files (docs/design/THREAT_INTEL.md §10), so rules update without rebuilding the agent image.
+ARG YARAX_VERSION=1.23.0
+RUN curl -fsSL -o /tmp/yarax.tar.gz \
+        "https://github.com/VirusTotal/yara-x/releases/download/v${YARAX_VERSION}/yara-x-v${YARAX_VERSION}-x86_64-unknown-linux-gnu.tar.gz" && \
+    tar -xzf /tmp/yarax.tar.gz -C /usr/local/bin yr && rm /tmp/yarax.tar.gz && \
+    /usr/local/bin/yr --version
+
 WORKDIR /wazuh
 COPY --from=builder /wazuh /wazuh
 COPY deploy/lab/preloaded-vars-agent.conf /wazuh/etc/preloaded-vars.conf
 RUN sed -i "s|^USER_DIR=.*|USER_DIR=\"${INSTALL_DIR}\"|" /wazuh/etc/preloaded-vars.conf
 
 RUN cd /wazuh && ./install.sh
+
+# Phase 6.5 A2: the YARA-X active-response scan script (stdlib python3). The compiled YARA
+# rules it loads are NOT in the image - they arrive via Wazuh agent-group shared files.
+COPY shadowtracer/intel/active_response/shadowtracer-yara-scan "${INSTALL_DIR}/active-response/bin/shadowtracer-yara-scan"
+RUN chmod 750 "${INSTALL_DIR}/active-response/bin/shadowtracer-yara-scan"
 
 # Throwaway sshd, for step 3.5 (brute force) and step 3.10 (active response
 # disable-account test uses a throwaway user "sttest")

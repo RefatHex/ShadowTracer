@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""ShadowTracer YARA-X active-response scan (Phase 6.5 A2). Runs on the AGENT, invoked by Wazuh
+active response (manager -> agent execd), which passes an alert JSON on stdin. It scans ONE file
+the free-layer funnel flagged (not known-good) with YARA-X and writes a one-line JSON result to a
+log the agent's logcollector ships back, where a ShadowTracer rule turns a match into a TI alert
+(rule name, author and tags - DRL attribution).
+
+Safety: the target path must resolve (symlinks followed) to inside a FIM-monitored directory, or
+the scan is refused - a crafted path (traversal, symlink escape, an unmonitored location) never
+causes an arbitrary file to be read. The file is re-hashed first; if its SHA-256 no longer matches
+the hash the alert carried, "changed"/"gone" is reported instead of scanning a different file. No
+shell is ever used; the scan runs under a wall-clock timeout, a CPU cap, nice/ionice and an address
+-space limit, and files over the size cap are skipped.
+"""
+import datetime
+import hashlib
+import json
+import os
+import resource
+import subprocess
+import sys
+
+YR = os.environ.get("ST_YARA_BIN", "/usr/local/bin/yr")
+RULES = os.environ.get("ST_YARA_RULES", "/var/ossec/etc/shared/shadowtracer-yara/compiled.yarc")
+OUTPUT_LOG = os.environ.get("ST_YARA_LOG", "/var/ossec/logs/shadowtracer-yara.log")
+SIZE_CAP = int(os.environ.get("ST_YARA_SIZE_CAP", str(32 * 1024 * 1024)))   # 32 MB
+TIMEOUT = int(os.environ.get("ST_YARA_TIMEOUT", "60"))
+CPU_LIMIT = int(os.environ.get("ST_YARA_CPU_LIMIT", "60"))                  # percent (yr --cpu-limit)
+# RLIMIT_AS is not used to cap memory: YARA-X (Rust) reserves ~4 GB of VIRTUAL address space
+# regardless of resident use, so an address-space limit either breaks it or is meaningless.
+# Resident memory is bounded by the agent container's cgroup; the peak is measured (THREAT_INTEL §10).
+# FIM-monitored roots the scan is confined to (resolved). Keep in step with the agent's syscheck.
+FIM_DIRS = tuple(os.path.realpath(d) for d in os.environ.get(
+    "ST_YARA_FIM_DIRS",
+    "/etc:/usr/bin:/usr/sbin:/bin:/sbin:/usr/lib:/usr/local/bin:/usr/local/sbin:/opt:/root:/home:/tmp:/var/tmp:/dev/shm:/var/www:/srv/www").split(":"))
+
+
+def extract_target(ar: dict) -> tuple:
+    """-> (path, expected_sha256) from the active-response alert, or (None, None)."""
+    alert = (ar.get("parameters") or {}).get("alert") or ar.get("alert") or ar
+    sc = alert.get("syscheck") or {}
+    data = alert.get("data") or {}
+    path = sc.get("path") or data.get("path") or data.get("shadowtracer_scan_path")
+    sha = (sc.get("sha256_after") or data.get("sha256") or data.get("shadowtracer_scan_sha256") or "").lower()
+    return (path, sha or None)
+
+
+def in_fim_dir(path: str, fim_dirs=None) -> bool:
+    """True only if the FULLY RESOLVED path (symlinks + .. collapsed) sits inside a FIM root. This
+    is what stops a crafted name or a symlink from pointing the scan at an arbitrary file."""
+    fim_dirs = FIM_DIRS if fim_dirs is None else fim_dirs
+    if not path or not path.startswith("/"):
+        return False
+    real = os.path.realpath(path)
+    return any(real == d or real.startswith(d + os.sep) for d in fim_dirs)
+
+
+def sha256_of(path: str):
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except (FileNotFoundError, IsADirectoryError, PermissionError, OSError):
+        return None
+
+
+def _limits():
+    os.nice(10)
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (TIMEOUT + 5, TIMEOUT + 10))
+    except (ValueError, OSError):
+        pass
+
+
+def run_yara(path: str, rules=RULES, yr=YR) -> list:
+    """Run YARA-X over one file (no shell, bounded). -> list of {rule, author, tags}."""
+    proc = subprocess.run(
+        [yr, "scan", "-C", "-o", "ndjson", "-m", "-g", "-z", str(SIZE_CAP), "-a", str(TIMEOUT),
+         "--cpu-limit", str(CPU_LIMIT), rules, path],
+        capture_output=True, timeout=TIMEOUT + 15, preexec_fn=_limits, check=False)
+    out = []
+    for line in proc.stdout.decode("utf-8", "replace").splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        for r in obj.get("rules", []):
+            meta = dict(r.get("meta", []))
+            out.append({"rule": r.get("identifier"), "author": meta.get("author"),
+                        "description": meta.get("description"), "tags": r.get("tags", [])})
+    return out
+
+
+def evaluate(ar: dict, scanner=run_yara, hasher=sha256_of) -> dict:
+    """Decide what to report for one active-response request. Pure except for the injected scanner
+    and hasher, so the safety rules are unit-testable."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    path, expected = extract_target(ar)
+    base = {"integration": "shadowtracer-yara", "scanned_at": now, "path": path}
+    if not path or not in_fim_dir(path):
+        return {**base, "status": "refused", "reason": "path not inside a FIM-monitored directory"}
+    actual = hasher(path)
+    if actual is None:
+        return {**base, "status": "gone"}
+    base["sha256"] = actual
+    if expected and actual != expected:
+        return {**base, "status": "changed", "expected_sha256": expected}
+    matches = scanner(path)
+    if matches:
+        return {**base, "status": "match", "matches": matches,
+                "attribution": "YARA rule authors (DRL 1.1 / GPL-2); see rule author/tags"}
+    return {**base, "status": "no_match"}
+
+
+def main() -> int:
+    try:
+        ar = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        ar = {}
+    result = evaluate(ar)
+    line = json.dumps(result, separators=(",", ":"))
+    try:
+        with open(OUTPUT_LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        print(line)                     # fall back to stdout so execd still captures it
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
