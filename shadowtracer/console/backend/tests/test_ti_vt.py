@@ -100,9 +100,9 @@ def test_worker_lookup_once_cache_budget_opt_out_and_incident_link(db, engine):
     db.commit()
 
     # Two FIM alerts with the same new hash, plus one from a tenant that has not opted in.
-    n_on.fim("a1", EICAR)
-    n_on.fim("a2", EICAR)
-    n_off.fim("z1", EICAR)
+    n_on.fim("a1", EICAR, path="/tmp/a1")
+    n_on.fim("a2", EICAR, path="/tmp/a2")
+    n_off.fim("z1", EICAR, path="/tmp/z1")
     worker.step()
     assert len(calls) == 1 and calls[0].endswith(EICAR)                 # ONE lookup for the hash
     assert n_off.spool == {} and worker.stats["discarded_opt_in_off"] == 1
@@ -121,14 +121,14 @@ def test_worker_lookup_once_cache_budget_opt_out_and_incident_link(db, engine):
     assert ioc["tlp"] == "amber"                                         # tenant-private, never global
 
     # The same hash again: answered from the cache, no call.
-    n_on.fim("a3", EICAR)
+    n_on.fim("a3", EICAR, path="/tmp/a3")
     worker.step()
     assert len(calls) == 1 and len(n_on.sent) == 3
     assert db.execute(text("SELECT served_from FROM vt_requests WHERE tenant_key = :t AND alert_id = 'a3'"), {"t": on}).scalar_one() == "cache"
 
     # Budget forced to 1 (already spent): a second distinct hash waits, health shows it.
     _settings(db, on, True, budget=1)
-    n_on.fim("a4", OTHER)
+    n_on.fim("a4", OTHER, path="/tmp/a4")
     worker.step()
     assert len(calls) == 1
     assert db.execute(text("SELECT state FROM vt_requests WHERE tenant_key = :t AND alert_id = 'a4'"), {"t": on}).scalar_one() == "pending"
@@ -151,7 +151,7 @@ def test_budget_reasons_and_quota_cooldown(db, engine):
         assert vt.budget(conn, t, fp, now + datetime.timedelta(seconds=70), 4)["reason"] == "tenant daily budget"
     _settings(db, t, True)
     node = FakeNode("n")
-    node.fim("q1", OTHER)
+    node.fim("q1", OTHER, path="/tmp/q1")
     w = vt.VTWorker(engine, [{"tenant_key": t, "nodes": [["n", "c"]]}], {t: "k2"}, lambda n, c: node,
                     hashlookup_http=hl_http(),
                     http=lambda url, headers, timeout=20: (429, b"{}"))
@@ -336,3 +336,88 @@ def test_virustotal_queue_prioritises_by_incident_severity(db, engine):
     lo = db.execute(text("SELECT state FROM vt_requests WHERE tenant_key=:t AND alert_id='lo'"), {"t": t}).mappings().one()
     assert hi["state"] == "resolved" and hi["served_from"] == "api"   # high severity won the single call
     assert lo["state"] == "pending"                                   # low severity still queued
+
+
+class _FakeCH:
+    """Answers the funnel's two bounded ClickHouse reads: prevalence (host counts) and YARA matches."""
+    def __init__(self, prevalence=None, yara=None):
+        self.prevalence, self.yara = prevalence or {}, set(yara or [])
+    def query(self, sql, parameters=None, settings=None):
+        import types
+        shas = (parameters or {}).get("shas", [])
+        if "110201" in sql:
+            rows = [(s,) for s in shas if s in self.yara]
+        else:
+            rows = [(s, self.prevalence[s]) for s in shas if s in self.prevalence]
+        return types.SimpleNamespace(result_rows=rows)
+    def insert(self, *a, **k):
+        pass
+
+
+def test_funnel_stats_from_a_fim_burst(db, engine):
+    """6.5 C: a FIM burst is filtered to a small fraction reaching VirusTotal. Known-good stop at the
+    free layer; common hashes are skipped by prevalence; no-signal hashes are gated out; only hashes
+    with a signal (here a high-risk path or a YARA match) are sent to VirusTotal."""
+    _, t = _new_tenant(db)
+    _settings(db, t, True, budget=100)
+    node = FakeNode("n")
+    h = lambda p, i: f"{p}{i:063x}"          # distinct 64-hex sha256
+    s1 = lambda i: f"{i:040x}"               # distinct 40-hex sha1
+    good = [h(1, i) for i in range(5)]       # known-good via CIRCL (their sha1s are "known")
+    common = [h(2, i) for i in range(3)]     # seen on many hosts -> skipped_common
+    nosig = [h(3, i) for i in range(7)]      # no signal -> skipped_no_signal
+    sig = [h(4, i) for i in range(5)]        # high-risk path -> sent to VirusTotal
+    known_sha1, idx = set(), 0
+    good_alerts = []
+    for sha in good:
+        aid = f"g{idx}"
+        node.fim(aid, sha, sha1=s1(idx), path=f"/usr/bin/g{idx}"); known_sha1.add(s1(idx).upper())
+        good_alerts.append(aid); idx += 1
+    # a known-good hash is only closed once its FIM alert is correlated into an incident
+    for aid in good_alerts:
+        iid = _make_incident(db, t, agent_id="002")
+        db.execute(incident_alerts.insert().values(incident_id=iid, tenant_key=t, node="n", alert_id=aid,
+                                                   alert_time=datetime.datetime.now(datetime.timezone.utc)))
+    db.commit()
+    for sha in common:
+        node.fim(f"c{idx}", sha, sha1=s1(idx), path=f"/var/lib/c{idx}"); idx += 1
+    for sha in nosig:
+        node.fim(f"n{idx}", sha, sha1=s1(idx), path=f"/fim/n{idx}"); idx += 1     # not a high-risk path
+    for sha in sig:
+        node.fim(f"s{idx}", sha, sha1=s1(idx), path=f"/tmp/s{idx}"); idx += 1     # high-risk path signal
+
+    ch = _FakeCH(prevalence={c: 10 for c in common})
+    worker = vt.VTWorker(engine, [{"tenant_key": t, "nodes": [["n", "c"]]}], {t: "vtkey"}, lambda n, c: node,
+                         http=lambda url, headers, timeout=20: (200, json.dumps({"data": {"attributes": {
+                             "last_analysis_stats": {"malicious": 0, "undetected": 70}, "last_analysis_results": {}}}}).encode()),
+                         hashlookup_http=hl_http(known=known_sha1), ch=ch)
+    worker.step()
+
+    stats = worker.funnel_stats(t)
+    assert stats["seen"] == 20
+    assert stats["known_good"] == 5
+    assert stats["skipped_common"] == 3
+    assert stats["skipped_no_signal"] == 7
+    assert stats["sent_to_vt"] == 5
+    assert stats["sent_to_vt"] < stats["seen"] / 2          # a small fraction reaches VirusTotal
+
+
+def test_yara_match_is_a_signal_from_clickhouse(db, engine):
+    """6.5 C / D20: a YARA match (rule 110201 in ClickHouse events) is the strongest signal - a hash
+    on a non-high-risk path with no other signal still reaches VirusTotal, scored highest."""
+    _, t = _new_tenant(db)
+    _settings(db, t, True, budget=100)
+    node = FakeNode("n")
+    yara_sha, plain_sha = "a" * 64, "b" * 64
+    node.fim("y", yara_sha, sha1="1" * 40, path="/fim/y")      # not high-risk, no incident
+    node.fim("p", plain_sha, sha1="2" * 40, path="/fim/p")     # not high-risk, no signal
+    ch = _FakeCH(yara=[yara_sha])
+    worker = vt.VTWorker(engine, [{"tenant_key": t, "nodes": [["n", "c"]]}], {t: "vtkey"}, lambda n, c: node,
+                         http=lambda url, headers, timeout=20: (200, json.dumps({"data": {"attributes": {
+                             "last_analysis_stats": {"malicious": 0, "undetected": 70}, "last_analysis_results": {}}}}).encode()),
+                         hashlookup_http=hl_http(known=set()), ch=ch)
+    worker.collect(); worker.free_layer(); worker.prioritise()   # stop before resolve so the scored hash stays queued
+    y = db.execute(text("SELECT signals, priority_score, state FROM vt_requests WHERE tenant_key=:t AND alert_id='y'"), {"t": t}).mappings().one()
+    p = db.execute(text("SELECT funnel_reason, state FROM vt_requests WHERE tenant_key=:t AND alert_id='p'"), {"t": t}).mappings().one()
+    assert "yara_match" in y["signals"] and y["priority_score"] >= 100 and y["state"] == "pending"
+    assert p["funnel_reason"] == "skipped_no_signal" and p["state"] == "resolved"

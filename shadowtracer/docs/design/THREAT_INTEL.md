@@ -1603,10 +1603,11 @@ GreyNoise). Keys are **envelope-encrypted** and stored **write-only**:
 MalwareBazaar/AbuseIPDB/GreyNoise key storage + opt-in are in place; their lookup workers and the
 per-source cache/budget wiring are the next B steps.
 
-### C — selective funnel (in progress)
+### C — selective funnel
 
 The funnel decides, per FIM hash, how far to spend before VirusTotal, recording a reason code on
-`vt_requests.funnel_reason`:
+`vt_requests.funnel_reason`. The point is that only a small fraction of a FIM burst ever reaches
+VirusTotal:
 
 1. **cache** - a live `vt_verdicts`/`source_verdicts` row answers for free.
 2. **known-good** (CIRCL hashlookup, free layer, A1) - a known-good file stops the funnel
@@ -1614,12 +1615,23 @@ The funnel decides, per FIM hash, how far to spend before VirusTotal, recording 
 3. **MalwareBazaar** (`malwarebazaar_layer`, before VirusTotal) - for a not-known-good hash with an
    enabled MalwareBazaar key: a hit is a malicious verdict delivered without a VirusTotal call
    (`served_from=malwarebazaar`, `funnel_reason=mbz_malicious`) that annotates the incident; a miss
-   sets `mbz_checked`/`mbz_unknown` so VirusTotal takes over. Per-tenant budget, cache TTL and 429
-   cooldown via `tenant_source_keys` + `source_calls` + `source_verdicts`.
-4. **VirusTotal** (`resolve`) - the remaining hashes, under the tenant's VT key/opt-in/budget,
-   taken off a **priority queue**: ordered by the linked incident's severity (signal) and how many
-   incidents the hash touches (prevalence), then FIFO, so a limited budget is spent on the most
-   suspicious first.
+   sets `mbz_checked`/`mbz_unknown`. Per-tenant budget, cache TTL and 429 cooldown via
+   `tenant_source_keys` + `source_calls` + `source_verdicts`.
+4. **prevalence skip** (`prioritise`) - a hash seen on more than `TI_PREVALENCE_HOSTS` (default 5)
+   hosts in the tenant in the last 7 days is common and `skipped_common` (host count from one
+   bounded ClickHouse query over `events`, cached in `hash_prevalence` for 1h).
+5. **signal gate** (`prioritise`) - a remaining hash is sent to VirusTotal **only if it has a
+   signal**; otherwise `skipped_no_signal`. Signals: a **YARA match** (strongest - rule 110201 in
+   ClickHouse `events` for the same sha256, D20, no new table), a TI match, incident priority ≥ 12,
+   incident anomaly ≥ `TI_ANOMALY_THRESHOLD`, a high-risk path (the same list as rule 110200), a
+   rare/novel pattern. The signals set a `priority_score`.
+6. **VirusTotal** (`resolve`) - the gated hashes, off a **priority queue** ordered by
+   `priority_score` (strongest signal first), under the tenant's VT key/opt-in/budget. An analyst's
+   explicit API lookup (`origin='api'`) skips the gate and always goes to VirusTotal.
+
+`VTWorker.funnel_stats(tenant)` reports the distribution (seen, known_good, cached, skipped_common,
+skipped_no_signal, mbz_malicious, sent_to_vt); a 20-hash burst test asserts `sent_to_vt` is a small
+fraction (5/20).
 
 **On-demand IP lookups** (`/api/ti/ip-lookups`, analyst+): AbuseIPDB and GreyNoise are **not**
 background workers. A button on a source IP in the incident view makes the backend open that
@@ -1627,6 +1639,4 @@ tenant's own sealed key (it holds the KEK), call the source once, cache the verd
 (`source_verdicts`) and audit it - same per-tenant key/opt-in/budget/cache/429 as the hash sources,
 but spent only on a deliberate click.
 
-Still to come in C: using an A2 YARA match as an additional priority signal - this needs the YARA
-scan result's sha256 persisted where the funnel can read it (today a match only becomes a Wazuh
-alert, rule 110201), tracked in OPTIMIZATION_BACKLOG. D (throughput gate) remains planned.
+D (throughput gate) remains planned.

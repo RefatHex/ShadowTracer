@@ -20,6 +20,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import os
 import re
 import urllib.error
 import urllib.request
@@ -46,6 +47,16 @@ QUOTA_COOLDOWN_MAX = dt.timedelta(hours=6)
 MBZ_DEFAULT_BUDGET = 1000
 MBZ_DEFAULT_TTL_HOURS = 24
 MBZ_CONFIDENCE = 88                 # a confirmed malware sample is a high-confidence hit
+# 6.5 C prevalence skip + signal gate (before the VirusTotal queue)
+PREVALENCE_HOSTS = int(os.environ.get("TI_PREVALENCE_HOSTS", "5"))   # seen on > this many hosts -> common
+PREVALENCE_WINDOW = dt.timedelta(days=7)
+PREVALENCE_CACHE = dt.timedelta(hours=1)
+ANOMALY_THRESHOLD = float(os.environ.get("TI_ANOMALY_THRESHOLD", "0.7"))
+INCIDENT_PRIORITY_SIGNAL = 12
+# a YARA match is the strongest signal; weights set the VirusTotal queue order
+SIGNAL_WEIGHTS = {"yara_match": 100, "ti_match": 45, "incident_priority": 35,
+                  "anomaly": 30, "high_risk_path": 20, "rare_pattern": 15}
+_HIGH_RISK_RE = re.compile(paths.high_risk_pcre2())
 
 
 class VTError(Exception):
@@ -305,20 +316,13 @@ class VTWorker:
                 # VirusTotal only sees hashes CIRCL did not vouch for; if the free layer is off for
                 # this tenant, CIRCL never ran (known_good NULL) so every pending hash is eligible.
                 eligible = "known_good = false" if self.hashlookup_enabled(conn, tenant) else "known_good IS NOT TRUE"
-                # 6.5 C priority queue: a limited VirusTotal budget is spent on the most suspicious
-                # hashes first - ordered by the signal (the linked incident's severity) and prevalence
-                # (how many incidents the hash touches, so a spreading threat is resolved sooner),
-                # then FIFO. The CIRCL known-good layer already removed the common-benign files, so
-                # what reaches here is the not-vouched-for set this ordering ranks within.
+                # 6.5 C priority queue: prioritise() has already skipped the common/no-signal hashes
+                # and scored the rest (strongest signal first), so a limited VirusTotal budget is
+                # spent on the highest priority_score first, then FIFO.
                 pending = [r[0] for r in conn.execute(text(
-                    "SELECT r.sha256 FROM vt_requests r "
-                    "LEFT JOIN incident_alerts ia ON ia.tenant_key = r.tenant_key AND ia.node = r.node "
-                    "  AND ia.alert_id = r.alert_id "
-                    "LEFT JOIN incidents i ON i.id = ia.incident_id "
-                    f"WHERE r.tenant_key = :t AND r.state = 'pending' AND r.{eligible} "
-                    "GROUP BY r.sha256 "
-                    "ORDER BY max(COALESCE(i.max_level, 0)) DESC, count(DISTINCT ia.incident_id) DESC, "
-                    "min(r.requested_at) ASC"), {"t": tenant})]
+                    "SELECT sha256 FROM vt_requests WHERE tenant_key = :t AND state = 'pending' "
+                    f"AND {eligible} GROUP BY sha256 "
+                    "ORDER BY max(COALESCE(priority_score, 0)) DESC, min(requested_at) ASC"), {"t": tenant})]
             key = self._key(tenant)
             for sha in pending:
                 with self.engine.begin() as conn:
@@ -539,9 +543,137 @@ class VTWorker:
             with self.engine.begin() as conn:
                 conn.execute(text("UPDATE vt_requests SET delivered_at = :now WHERE id = :i"), {"now": now, "i": r["id"]})
 
+    # --- 6.5 C: prevalence skip + signal gate, between MalwareBazaar and the VirusTotal queue -----
+    def _prevalence_counts(self, tenant, shas, now):
+        """{sha: host_count} over the last 7 days, cached in hash_prevalence for 1h (one bounded
+        ClickHouse query for the stale ones). ch=None -> 0 (never 'common'), so tests stay offline."""
+        counts, stale = {}, []
+        with self.engine.begin() as conn:
+            cached = {r["sha256"].strip(): r for r in conn.execute(text(
+                "SELECT sha256, host_count, computed_at FROM hash_prevalence WHERE tenant_key = :t "
+                "AND sha256 = ANY(:shas)"), {"t": tenant, "shas": shas}).mappings()}
+        for sha in shas:
+            c = cached.get(sha)
+            if c and c["computed_at"] > now - PREVALENCE_CACHE:
+                counts[sha] = c["host_count"]
+            else:
+                stale.append(sha)
+        if stale and self.ch is not None:
+            rows = self.ch.query(
+                "SELECT extra_fields['syscheck.sha256_after'] AS sha, uniqExact(agent_id) AS hosts FROM events "
+                "WHERE tenant_id = {t:String} AND time >= {since:DateTime64(3)} "
+                "AND has({shas:Array(String)}, extra_fields['syscheck.sha256_after']) GROUP BY sha",
+                parameters={"t": tenant, "since": now - PREVALENCE_WINDOW, "shas": stale}).result_rows
+            queried = {sha: int(h) for sha, h in rows}
+            with self.engine.begin() as conn:
+                for sha in stale:
+                    counts[sha] = queried.get(sha, 0)
+                    conn.execute(text("INSERT INTO hash_prevalence (tenant_key, sha256, host_count, computed_at) "
+                                      "VALUES (:t,:s,:h,:now) ON CONFLICT (tenant_key, sha256) DO UPDATE SET "
+                                      "host_count = EXCLUDED.host_count, computed_at = EXCLUDED.computed_at"),
+                                 {"t": tenant, "s": sha, "h": counts[sha], "now": now})
+        else:
+            for sha in stale:
+                counts[sha] = 0
+        return counts
+
+    def _yara_matched(self, tenant, shas, now):
+        """Set of the shas that have a YARA match (rule 110201, A2) in ClickHouse events in the
+        last 7 days - read directly from events, no new table (D20). ch=None -> empty."""
+        if self.ch is None or not shas:
+            return set()
+        rows = self.ch.query(
+            "SELECT DISTINCT extra_fields['sha256'] AS sha FROM events WHERE tenant_id = {t:String} "
+            "AND rule_id = '110201' AND time >= {since:DateTime64(3)} "
+            "AND has({shas:Array(String)}, extra_fields['sha256'])",
+            parameters={"t": tenant, "since": now - PREVALENCE_WINDOW, "shas": list(shas)}).result_rows
+        return {r[0] for r in rows if r[0]}
+
+    def prioritise(self, now=None) -> None:
+        """Prevalence skip then signal gate for each not-known-good pending hash MalwareBazaar left.
+        A hash seen on > PREVALENCE_HOSTS hosts is skipped_common; one with no suspicious signal is
+        skipped_no_signal; the rest get a priority_score (strongest signal first) and go to the VT
+        queue. Signals: YARA match (strongest), TI match, incident priority >= 12, anomaly, high-risk
+        path (same list as rule 110200), rare/novel pattern."""
+        now = now or dt.datetime.now(dt.timezone.utc)
+        for tenant in self.nodes:
+            with self.engine.begin() as conn:
+                # only FIM-origin hashes are gated; an analyst's explicit API lookup always goes to VT
+                shas = [r[0].strip() for r in conn.execute(text(
+                    "SELECT DISTINCT sha256 FROM vt_requests WHERE tenant_key = :t AND state = 'pending' "
+                    "AND origin = 'fim' AND known_good = false AND prioritised = false"), {"t": tenant})]
+            if not shas:
+                continue
+            prevalence = self._prevalence_counts(tenant, shas, now)
+            common = [s for s in shas if prevalence.get(s, 0) > PREVALENCE_HOSTS]
+            if common:
+                with self.engine.begin() as conn:
+                    conn.execute(text("UPDATE vt_requests SET state='resolved', resolved_at=:now, served_from='skipped', "
+                                      "funnel_reason='skipped_common', prioritised=true "
+                                      "WHERE tenant_key=:t AND sha256 = ANY(:shas) AND state='pending' AND origin='fim'"),
+                                 {"now": now, "t": tenant, "shas": common})
+                self.stats["funnel:skipped_common"] += len(common)
+            rest = [s for s in shas if prevalence.get(s, 0) <= PREVALENCE_HOSTS]
+            if not rest:
+                continue
+            yara = self._yara_matched(tenant, rest, now)
+            with self.engine.begin() as conn:
+                sigrows = conn.execute(text(
+                    "SELECT r.sha256, max(COALESCE(i.priority,0)) AS pri, max(COALESCE(i.ti_confidence,0)) AS tic, "
+                    "max(COALESCE(i.ml_anomaly_score,0)) AS anom, bool_or(COALESCE(i.rare_pattern_flag,false)) AS rare, "
+                    "max(COALESCE(i.max_level,0)) AS sev, array_agg(DISTINCT r.path) AS paths "
+                    "FROM vt_requests r LEFT JOIN incident_alerts ia ON ia.tenant_key=r.tenant_key AND ia.node=r.node "
+                    "AND ia.alert_id=r.alert_id LEFT JOIN incidents i ON i.id=ia.incident_id "
+                    "WHERE r.tenant_key=:t AND r.sha256 = ANY(:shas) AND r.state='pending' AND r.origin='fim' GROUP BY r.sha256"),
+                    {"t": tenant, "shas": rest}).mappings().all()
+            for row in sigrows:
+                sha = row["sha256"].strip()
+                signals = []
+                if sha in yara:
+                    signals.append("yara_match")
+                if row["tic"] and float(row["tic"]) > 0:
+                    signals.append("ti_match")
+                if row["pri"] and int(row["pri"]) >= INCIDENT_PRIORITY_SIGNAL:
+                    signals.append("incident_priority")
+                if row["anom"] and float(row["anom"]) >= ANOMALY_THRESHOLD:
+                    signals.append("anomaly")
+                if row["rare"]:
+                    signals.append("rare_pattern")
+                if any(p and _HIGH_RISK_RE.match(p) for p in (row["paths"] or [])):
+                    signals.append("high_risk_path")
+                with self.engine.begin() as conn:
+                    if not signals:
+                        conn.execute(text("UPDATE vt_requests SET state='resolved', resolved_at=:now, served_from='skipped', "
+                                          "funnel_reason='skipped_no_signal', prioritised=true "
+                                          "WHERE tenant_key=:t AND sha256=:s AND state='pending' AND origin='fim'"),
+                                     {"now": now, "t": tenant, "s": sha})
+                        self.stats["funnel:skipped_no_signal"] += 1
+                    else:
+                        score = int(row["sev"] or 0) + sum(SIGNAL_WEIGHTS[s] for s in signals)
+                        conn.execute(text("UPDATE vt_requests SET priority_score=:sc, signals=:sig, prioritised=true "
+                                          "WHERE tenant_key=:t AND sha256=:s AND state='pending' AND origin='fim'"),
+                                     {"sc": score, "sig": signals, "t": tenant, "s": sha})
+                        self.stats["funnel:sent_to_vt"] += 1
+
+    def funnel_stats(self, tenant) -> dict:
+        """The funnel's per-tenant distribution (THREAT_INTEL.md §10 C): sent_to_vt should be a
+        small fraction of seen once the free layers and gates have run."""
+        with self.engine.begin() as conn:
+            r = conn.execute(text(
+                "SELECT count(*) AS seen, "
+                " count(*) FILTER (WHERE served_from='hashlookup') AS known_good, "
+                " count(*) FILTER (WHERE served_from='cache') AS cached, "
+                " count(*) FILTER (WHERE funnel_reason='skipped_common') AS skipped_common, "
+                " count(*) FILTER (WHERE funnel_reason='skipped_no_signal') AS skipped_no_signal, "
+                " count(*) FILTER (WHERE served_from='malwarebazaar') AS mbz_malicious, "
+                " count(*) FILTER (WHERE prioritised AND priority_score IS NOT NULL) AS sent_to_vt "
+                "FROM vt_requests WHERE tenant_key=:t"), {"t": tenant}).mappings().one()
+        return dict(r)
+
     def step(self) -> None:
         self.collect()
         self.free_layer()            # CIRCL known-good: free, default-on, before the paid sources
         self.malwarebazaar_layer()   # 6.5 C: MalwareBazaar, checked before VirusTotal
+        self.prioritise()            # 6.5 C: prevalence skip + signal gate -> priority_score
         self.resolve()
         self.deliver()
