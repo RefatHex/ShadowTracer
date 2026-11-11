@@ -66,8 +66,10 @@ def test_generated_rules_shape():
     assert rules and all(110000 <= r["id"] <= 110999 for r in rules)
     assert all(lookup not in rule_order.BANNED_LOOKUPS for r in rules for _, lookup, _ in r["lists"])
     assert "address_match_key_value" not in ti_rules.rules_xml()
-    # every rule runs after its native siblings (§1.4)
-    assert len(re.findall(r'accuracy="0"', ti_rules.rules_xml())) == len(rules)
+    # every CHILD rule (if_sid) runs after its native siblings (§1.4); the YARA-match rule is a
+    # decoded_as-json entry rule, not a child, so it legitimately has neither if_sid nor accuracy.
+    xml = ti_rules.rules_xml()
+    assert len(re.findall(r'accuracy="0"', xml)) == len(re.findall(r"<if_sid>", xml))
     # every list a rule names is in the bundle
     named = {name for r in rules for _, _, name in r["lists"]}
     assert named <= set(ti_rules.list_paths())

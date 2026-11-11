@@ -12,6 +12,8 @@ Both are distributed together by safe_reload.py.
 """
 from xml.sax.saxutils import escape
 
+from . import paths
+
 LIST_DIR = "etc/lists/shadowtracer-ti"
 RULES_FILE = "etc/rules/1000-shadowtracer_ti_rules.xml"
 FIRST_RULE_ID = 110000          # ShadowTracer TI range 110000-110999
@@ -44,6 +46,8 @@ ATTACHMENTS = (
 # decoded by 0490's 87100 and matched by 87105) becomes ONE ShadowTracer TI alert: this
 # child replaces 87105's alert for the same event. 87105 has no frequency dependants.
 VT_RULE_ID = 110100
+YARA_TRIGGER_ID = 110200   # FIM high-risk-path -> local YARA-X scan (active response)
+YARA_MATCH_ID = 110201     # a YARA-X match -> TI alert
 
 
 def list_names() -> list:
@@ -85,6 +89,32 @@ def rules_xml() -> str:
         "    <field name=\"virustotal.origin\">^shadowtracer$</field>",
         "    <description>Threat intel (VirusTotal): $(virustotal.source.file) is malicious - $(virustotal.positives)/$(virustotal.total) engines ($(virustotal.labels))</description>",
         "    <group>ti_high,ti_virustotal,</group>",
+        "    <options>no_full_log</options>",
+        "  </rule>",
+    ]
+    out.append("</group>")
+    # Phase 6.5 A2: (1) a child of the FIM rules that fires only for a HIGH-RISK path (same list as
+    # the funnel, paths.high_risk_pcre2) - it triggers the local YARA-X scan via <active-response>
+    # (ossec.conf) and is level 0 so it adds no incident noise; (2) a YARA-X match -> TI alert.
+    out.append('<group name="shadowtracer_ti,">')
+    out += [
+        f'  <rule id="{YARA_TRIGGER_ID}" level="0" accuracy="0">',
+        "    <if_sid>550,554</if_sid>",
+        f'    <field name="file" type="pcre2">{escape(paths.high_risk_pcre2())}</field>',
+        "    <description>File changed in a high-risk location - queued for local YARA-X scan</description>",
+        "    <group>shadowtracer_yara_scan,</group>",
+        "    <options>no_full_log</options>",
+        "  </rule>",
+    ]
+    out.append("</group>")
+    out.append('<group name="ossec,syscheck,shadowtracer_ti,">')
+    out += [
+        f'  <rule id="{YARA_MATCH_ID}" level="12">',
+        "    <decoded_as>json</decoded_as>",
+        '    <field name="integration">^shadowtracer-yara$</field>',
+        '    <field name="yara_rule">\\.+</field>',
+        "    <description>Threat intel (YARA-X): rule $(yara_rule) by $(yara_author) matched $(file) [$(yara_tags)]</description>",
+        "    <group>ti_high,ti_yara,</group>",
         "    <options>no_full_log</options>",
         "  </rule>",
     ]

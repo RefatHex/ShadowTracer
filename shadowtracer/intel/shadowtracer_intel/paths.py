@@ -62,3 +62,12 @@ def known_good_outcome(path: str) -> tuple:
     if c == "high_risk":
         return False, "known file in unusual location"
     return False, "known file (location not whitelisted)"
+
+
+def high_risk_pcre2() -> str:
+    """The HIGH_RISK_PATHS as a case-insensitive pcre2 anchored prefix match, for the FIM child rule
+    that triggers the YARA scan - the same list the funnel uses, so they never drift."""
+    import re
+    parts = [re.escape(p) for p in HIGH_RISK_PATHS]
+    parts.append(r"/home/[^/]+/downloads/")          # /home/<user>/Downloads (case-insensitive below)
+    return "(?i)^(" + "|".join(parts) + ")"

@@ -114,18 +114,32 @@ def evaluate(ar: dict, scanner=run_yara, hasher=sha256_of) -> dict:
     return {**base, "status": "no_match"}
 
 
+def emit_lines(result: dict) -> list:
+    """Flatten evaluate()'s result into log lines: ONE line per YARA match (flat fields a
+    ShadowTracer rule matches directly), or one status line otherwise."""
+    base = {"integration": "shadowtracer-yara", "file": result.get("path"), "sha256": result.get("sha256"),
+            "status": result["status"], "scanned_at": result["scanned_at"]}
+    if result["status"] != "match":
+        return [json.dumps(base, separators=(",", ":"))]
+    lines = []
+    for m in result["matches"]:
+        lines.append(json.dumps({**base, "yara_rule": m.get("rule"), "yara_author": m.get("author") or "unknown",
+                                 "yara_tags": ",".join(m.get("tags") or []), "yara_description": m.get("description") or "",
+                                 "attribution": result.get("attribution")}, separators=(",", ":")))
+    return lines
+
+
 def main() -> int:
     try:
         ar = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         ar = {}
-    result = evaluate(ar)
-    line = json.dumps(result, separators=(",", ":"))
+    lines = emit_lines(evaluate(ar))
     try:
         with open(OUTPUT_LOG, "a") as f:
-            f.write(line + "\n")
+            f.write("\n".join(lines) + "\n")
     except OSError:
-        print(line)                     # fall back to stdout so execd still captures it
+        print("\n".join(lines))         # fall back to stdout so execd still captures it
     return 0
 
 

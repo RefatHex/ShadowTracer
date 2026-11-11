@@ -71,3 +71,20 @@ def test_path_outside_fim_is_refused_before_hashing():
     r = ys.evaluate({"alert": {"data": {"shadowtracer_scan_path": "/root/secret"}}},
                     scanner=lambda p: called.append(p) or [], hasher=lambda p: called.append(p) or "x")
     assert r["status"] == "refused" and called == []    # neither hashed nor scanned
+
+
+def test_emit_lines_one_flat_line_per_match():
+    import json
+    r = {"status": "match", "path": "/tmp/x", "sha256": "ab", "scanned_at": "T", "attribution": "DRL 1.1 / GPL-2",
+         "matches": [{"rule": "r1", "author": "A", "tags": ["malware", "apt"], "description": "d"},
+                     {"rule": "r2", "author": None, "tags": [], "description": ""}]}
+    objs = [json.loads(x) for x in ys.emit_lines(r)]
+    assert len(objs) == 2 and objs[0]["yara_rule"] == "r1" and objs[0]["yara_author"] == "A"
+    assert objs[0]["yara_tags"] == "malware,apt" and objs[1]["yara_author"] == "unknown"
+    assert all(o["integration"] == "shadowtracer-yara" and o["status"] == "match" for o in objs)
+
+
+def test_emit_lines_status_only_when_no_match():
+    import json
+    o = json.loads(ys.emit_lines({"status": "no_match", "path": "/usr/bin/ls", "sha256": "ab", "scanned_at": "T"})[0])
+    assert o["status"] == "no_match" and "yara_rule" not in o
