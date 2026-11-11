@@ -1513,7 +1513,33 @@ This is **context only**: shown as "Tor exit node: <ip>", low severity, **never 
 and it does not change priority**. Default on; disable with `TI_TOR_EXIT=0`. Lab: 1252 exit nodes
 loaded; an incident with a Tor exit source IP tagged, priority unchanged.
 
-### A2 Local YARA-X scan · A3 CISA KEV + EPSS vuln prioritisation — planned
+### A2 — local YARA-X scanning (in progress)
+
+**Trigger (check 1).** The scan is requested through the **Wazuh manager API** active-response
+endpoint, the way a customer deployment would - never the Docker socket. ti-sync, for a file the
+free CIRCL layer did NOT vouch for, authenticates as its own least-privilege API user (RBAC action
+`active-response:command` only, scoped to agents - provisioned via the RBAC ORM like
+`create-kafka-acls.sh` provisions Kafka) and calls:
+`PUT https://<manager>:55000/active-response?agents_list=<agent_id>` with body
+`{"command":"shadowtracer-yara-scan","arguments":[],"alert":{"data":{"shadowtracer_scan_path":"<path>","shadowtracer_scan_sha256":"<sha>"}}}`.
+The manager relays it to the agent's `execd`, which runs the scan script (endpoint/RBAC/body
+verified in 4.14.8: `api/controllers/active_response_controller.py`, `spec.yaml` action
+`active-response:command`, `models/active_response_model.py`). The script is hardened (stdin JSON,
+FIM-path confinement with symlink resolution, re-hash-before-report, no shell, limits).
+
+**Shared-file distribution (check 2).** Compiled rules are distributed to agents via Wazuh
+**agent-group shared files**; the agent image holds only the YARA-X binary. 4.14.8 limits:
+`MAX_SHARED_PATH = 200` (path length, `src/remoted/remoted.h:28`); **no per-file byte cap** (the
+merged file is chunked over the secure channel). Sync: the manager re-merges group files every
+`remoted.shared_reload = 10 s` (`etc/internal_options.conf:185`, `src/remoted/config.c:88`) and
+pushes the changed merged file on the agent's keepalive, `NOTIFY_TIME = 20 s`
+(`src/headers/defs.h:95`) - so a rule update reaches an agent in **≤ ~30 s**. Measured: the FULL
+signature-base compiles to a **6.5 MB `.yarc`** (externals `filename/filepath/filetype/extension/
+owner` defined at compile, `--ignore-invalid-rules`); a scan is **~0.31 s** with **74 MB peak RSS**;
+the agent's own processes use ~58 MB, so a scan peaks ~132 MB, **within the 176 MB agent limit - the
+full set fits, no curated subset needed**.
+
+### A3 CISA KEV + EPSS vuln prioritisation — planned
 
 A3 depends on a Wazuh vulnerability-detector finding stream, which ShadowTracer does not yet ingest
 (no CVE field in `events`); that ingestion is a prerequisite and is tracked for A3.
