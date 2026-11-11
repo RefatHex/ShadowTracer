@@ -112,9 +112,12 @@ incidents = Table(
     # Phase 6.1c: written only by ti-matcher; priority is generated from it in Postgres
     # (ingest migration 7c1e9b2f4a60), so the correlator never writes either.
     Column("ti_confidence", SmallInteger, nullable=True),
+    # Phase 6.5 A3: wrapped in a KEV floor (13) - an incident with an actively-exploited (KEV) CVE
+    # is at least priority 13. kev_cve_ids is set by the CVE enrichment pass.
     Column("priority", SmallInteger, Computed(
-        "CASE WHEN known_good_safe AND COALESCE(ti_confidence, 0) < 50 THEN LEAST(max_level, 2) "
-        "ELSE GREATEST(max_level, CASE WHEN ti_confidence >= 75 THEN 12 WHEN ti_confidence >= 50 THEN 8 ELSE 0 END) END")),
+        "GREATEST(CASE WHEN known_good_safe AND COALESCE(ti_confidence, 0) < 50 THEN LEAST(max_level, 2) "
+        "ELSE GREATEST(max_level, CASE WHEN ti_confidence >= 75 THEN 12 WHEN ti_confidence >= 50 THEN 8 ELSE 0 END) END, "
+        "CASE WHEN cardinality(kev_cve_ids) > 0 THEN 13 ELSE 0 END)")),
     # Phase 6.5 A1: a known-good file (CIRCL hashlookup) lowers priority and shows context; no TI alert.
     Column("known_good", Boolean, nullable=False, server_default=text("false")),
     Column("known_good_source", Text, nullable=True),
@@ -124,6 +127,12 @@ incidents = Table(
     Column("known_good_note", Text, nullable=True),
     # Phase 6.5 A4: source IPs that are Tor exit nodes - context only, never an alert, no priority change.
     Column("tor_exit_ips", ARRAY(String), nullable=False, server_default="{}"),
+    # Phase 6.5 A3: CVE ids seen in this incident's alerts, which are KEV (actively exploited -> raises
+    # priority), and the max EPSS (exploit probability). Set by the CVE enrichment pass.
+    Column("cve_ids", ARRAY(String), nullable=False, server_default="{}"),
+    Column("kev_cve_ids", ARRAY(String), nullable=False, server_default="{}"),
+    Column("max_epss", REAL, nullable=True),
+    Column("cve_enriched_at", DateTime(timezone=True), nullable=True),
     # Phase 7.0: written only by ml-enricher (ingest migration d8a2e6f1c3b7); scores never trigger actions.
     Column("ml_score", REAL, nullable=True),
     Column("ml_reasons", JSONB, nullable=True),

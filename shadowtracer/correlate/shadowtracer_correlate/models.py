@@ -54,9 +54,11 @@ incidents = Table(
     # Phase 6.1c: written only by ti-matcher; priority is generated from it in Postgres
     # (ingest migration 7c1e9b2f4a60), so the correlator never writes either.
     Column("ti_confidence", SmallInteger, nullable=True),
+    # Phase 6.5 A3: KEV floor (13) folded in - an actively-exploited (KEV) CVE raises priority.
     Column("priority", SmallInteger, Computed(
-        "CASE WHEN known_good_safe AND COALESCE(ti_confidence, 0) < 50 THEN LEAST(max_level, 2) "
-        "ELSE GREATEST(max_level, CASE WHEN ti_confidence >= 75 THEN 12 WHEN ti_confidence >= 50 THEN 8 ELSE 0 END) END")),
+        "GREATEST(CASE WHEN known_good_safe AND COALESCE(ti_confidence, 0) < 50 THEN LEAST(max_level, 2) "
+        "ELSE GREATEST(max_level, CASE WHEN ti_confidence >= 75 THEN 12 WHEN ti_confidence >= 50 THEN 8 ELSE 0 END) END, "
+        "CASE WHEN cardinality(kev_cve_ids) > 0 THEN 13 ELSE 0 END)")),
     # Phase 6.5 A1: a known-good file (CIRCL hashlookup) lowers priority and shows context; no TI alert.
     Column("known_good", Boolean, nullable=False, server_default=text("false")),
     Column("known_good_source", Text, nullable=True),

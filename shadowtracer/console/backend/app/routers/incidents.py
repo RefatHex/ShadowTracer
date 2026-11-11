@@ -58,6 +58,10 @@ class IncidentSummary(BaseModel):
     known_good_safe: bool = False
     known_good_note: str | None = None
     tor_exit_ips: list[str] = []
+    # Phase 6.5 A3: CVE enrichment (KEV = actively exploited -> priority floored; EPSS = exploit prob)
+    cve_ids: list[str] = []
+    kev_cve_ids: list[str] = []
+    max_epss: float | None = None
 
 
 class TiSource(BaseModel):

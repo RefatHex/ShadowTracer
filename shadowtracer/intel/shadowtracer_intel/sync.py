@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import create_engine, text
 
-from . import feeds, listgen, safe_reload, store, tor_exit
+from . import cve_enrich, feeds, listgen, safe_reload, store, tor_exit
 
 log = logging.getLogger("ti-sync")
 WARNINGLIST_REFRESH = dt.timedelta(days=1)
@@ -298,8 +298,43 @@ def refresh_tor_exits(engine, env=os.environ, now=None) -> dict:
     return out
 
 
+def _tenant_keys(engine) -> list:
+    with engine.connect() as conn:
+        return [r[0] for r in conn.execute(text("SELECT tenant_key FROM tenants"))]
+
+
+def refresh_cve_enrichment(engine, env=os.environ, now=None) -> dict:
+    """Phase 6.5 A3: refresh CISA KEV (daily) and enrich incidents whose alerts mention a CVE with
+    KEV/EPSS context. Does NOT ingest vulnerability-detector findings (they never reach the pipeline
+    in 4.14.8). Default on; disable with TI_CVE_ENRICH=0."""
+    if env.get("TI_CVE_ENRICH", "1") == "0":
+        return {"source": "kev-epss", "skipped": "disabled"}
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out = {"source": "kev-epss"}
+    with engine.connect() as conn:
+        last = conn.execute(text("SELECT max(refreshed_at) FROM kev_vulnerabilities")).scalar()
+    if not (last and now - last < dt.timedelta(hours=24)):
+        try:
+            with engine.begin() as conn:
+                out["kev_rows"] = cve_enrich.refresh_kev(conn)
+        except (OSError, ValueError) as exc:
+            out["kev_error"] = str(exc)[:300]
+    ch = clickhouse_from_env(env)
+    days = int(env.get("TI_CVE_WINDOW_DAYS", "7"))
+    tagged = {"incidents": 0, "cves": 0, "kev": 0}
+    for tenant in _tenant_keys(engine):
+        try:
+            r = cve_enrich.tag_incidents(engine, ch, tenant, now=now, days=days)
+            for k in tagged:
+                tagged[k] += r.get(k, 0)
+        except Exception as exc:  # noqa: BLE001 - one tenant's ClickHouse/enrich trouble never stops the rest
+            log.warning("CVE enrichment failed for tenant %s: %s", tenant, exc)
+    out["tagged"] = tagged
+    return out
+
+
 def run_once(engine, env=os.environ) -> list:
-    report = [refresh_warninglists(engine), refresh_tor_exits(engine, env)]
+    report = [refresh_warninglists(engine), refresh_tor_exits(engine, env), refresh_cve_enrichment(engine, env)]
     report += [sync_source(engine, f) for f in sources_from_env(env)]
     report += sync_misp_servers(engine, env)
     report += [deploy(engine, c) for c in json.loads(env.get("TI_CLUSTERS", "[]"))]

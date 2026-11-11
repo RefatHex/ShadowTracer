@@ -48,6 +48,9 @@ export interface IncidentSummary {
   known_good_safe?: boolean
   known_good_note?: string | null
   tor_exit_ips?: string[]
+  cve_ids?: string[]
+  kev_cve_ids?: string[]
+  max_epss?: number | null
 }
 
 export interface WarmupStatus {
