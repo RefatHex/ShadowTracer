@@ -305,9 +305,20 @@ class VTWorker:
                 # VirusTotal only sees hashes CIRCL did not vouch for; if the free layer is off for
                 # this tenant, CIRCL never ran (known_good NULL) so every pending hash is eligible.
                 eligible = "known_good = false" if self.hashlookup_enabled(conn, tenant) else "known_good IS NOT TRUE"
+                # 6.5 C priority queue: a limited VirusTotal budget is spent on the most suspicious
+                # hashes first - ordered by the signal (the linked incident's severity) and prevalence
+                # (how many incidents the hash touches, so a spreading threat is resolved sooner),
+                # then FIFO. The CIRCL known-good layer already removed the common-benign files, so
+                # what reaches here is the not-vouched-for set this ordering ranks within.
                 pending = [r[0] for r in conn.execute(text(
-                    "SELECT sha256 FROM vt_requests WHERE tenant_key = :t AND state = 'pending' "
-                    f"AND {eligible} GROUP BY sha256 ORDER BY min(requested_at)"), {"t": tenant})]
+                    "SELECT r.sha256 FROM vt_requests r "
+                    "LEFT JOIN incident_alerts ia ON ia.tenant_key = r.tenant_key AND ia.node = r.node "
+                    "  AND ia.alert_id = r.alert_id "
+                    "LEFT JOIN incidents i ON i.id = ia.incident_id "
+                    f"WHERE r.tenant_key = :t AND r.state = 'pending' AND r.{eligible} "
+                    "GROUP BY r.sha256 "
+                    "ORDER BY max(COALESCE(i.max_level, 0)) DESC, count(DISTINCT ia.incident_id) DESC, "
+                    "min(r.requested_at) ASC"), {"t": tenant})]
             key = self._key(tenant)
             for sha in pending:
                 with self.engine.begin() as conn:

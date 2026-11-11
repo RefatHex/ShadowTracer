@@ -1616,7 +1616,10 @@ The funnel decides, per FIM hash, how far to spend before VirusTotal, recording 
    (`served_from=malwarebazaar`, `funnel_reason=mbz_malicious`) that annotates the incident; a miss
    sets `mbz_checked`/`mbz_unknown` so VirusTotal takes over. Per-tenant budget, cache TTL and 429
    cooldown via `tenant_source_keys` + `source_calls` + `source_verdicts`.
-4. **VirusTotal** (`resolve`) - the remaining hashes, under the tenant's VT key/opt-in/budget.
+4. **VirusTotal** (`resolve`) - the remaining hashes, under the tenant's VT key/opt-in/budget,
+   taken off a **priority queue**: ordered by the linked incident's severity (signal) and how many
+   incidents the hash touches (prevalence), then FIFO, so a limited budget is spent on the most
+   suspicious first.
 
 **On-demand IP lookups** (`/api/ti/ip-lookups`, analyst+): AbuseIPDB and GreyNoise are **not**
 background workers. A button on a source IP in the incident view makes the backend open that
@@ -1624,5 +1627,6 @@ tenant's own sealed key (it holds the KEK), call the source once, cache the verd
 (`source_verdicts`) and audit it - same per-tenant key/opt-in/budget/cache/429 as the hash sources,
 but spent only on a deliberate click.
 
-Still to come in C: prevalence/signal-based priority ordering of the VirusTotal queue (a YARA match
-from A2 as a signal). D (throughput gate) remains planned.
+Still to come in C: using an A2 YARA match as an additional priority signal - this needs the YARA
+scan result's sha256 persisted where the funnel can read it (today a match only becomes a Wazuh
+alert, rule 110201), tracked in OPTIMIZATION_BACKLOG. D (throughput gate) remains planned.

@@ -305,3 +305,34 @@ def test_malwarebazaar_checked_before_virustotal(db, engine):
     before = db.execute(text("SELECT count(*) FROM source_calls WHERE tenant_key=:t"), {"t": t}).scalar_one()
     worker.step()
     assert db.execute(text("SELECT count(*) FROM source_calls WHERE tenant_key=:t"), {"t": t}).scalar_one() == before
+
+
+def test_virustotal_queue_prioritises_by_incident_severity(db, engine):
+    """6.5 C priority queue: with budget for only one VirusTotal call, the hash on the
+    higher-severity incident is resolved first; the lower-severity one stays queued."""
+    _, t = _new_tenant(db)
+    _settings(db, t, True, budget=1)                 # one VirusTotal call per day
+    node = FakeNode("n")
+    hi_sha, lo_sha = "a" * 64, "b" * 64
+    node.fim("hi", hi_sha, path="/tmp/hi")
+    node.fim("lo", lo_sha, path="/tmp/lo")
+    inc_hi, inc_lo = _make_incident(db, t, agent_id="002"), _make_incident(db, t, agent_id="002")
+    db.execute(text("UPDATE incidents SET max_level = 13 WHERE id = :i"), {"i": inc_hi})
+    db.execute(text("UPDATE incidents SET max_level = 3 WHERE id = :i"), {"i": inc_lo})
+    for iid, aid in ((inc_hi, "hi"), (inc_lo, "lo")):
+        db.execute(incident_alerts.insert().values(incident_id=iid, tenant_key=t, node="n", alert_id=aid,
+                                                   alert_time=datetime.datetime.now(datetime.timezone.utc)))
+    db.commit()
+
+    def vt_http(url, headers, timeout=20):
+        return 200, json.dumps({"data": {"attributes": {"last_analysis_stats": {"malicious": 0, "undetected": 70},
+                                "last_analysis_results": {}}}}).encode()
+
+    worker = vt.VTWorker(engine, [{"tenant_key": t, "nodes": [["n", "c"]]}], {t: "vtkey"}, lambda n, c: node,
+                         http=vt_http, hashlookup_http=hl_http(known=set()))
+    worker.step()
+
+    hi = db.execute(text("SELECT state, served_from FROM vt_requests WHERE tenant_key=:t AND alert_id='hi'"), {"t": t}).mappings().one()
+    lo = db.execute(text("SELECT state FROM vt_requests WHERE tenant_key=:t AND alert_id='lo'"), {"t": t}).mappings().one()
+    assert hi["state"] == "resolved" and hi["served_from"] == "api"   # high severity won the single call
+    assert lo["state"] == "pending"                                   # low severity still queued
