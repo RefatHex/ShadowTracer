@@ -1603,7 +1603,26 @@ GreyNoise). Keys are **envelope-encrypted** and stored **write-only**:
 MalwareBazaar/AbuseIPDB/GreyNoise key storage + opt-in are in place; their lookup workers and the
 per-source cache/budget wiring are the next B steps.
 
-### C selective VirusTotal funnel · D throughput gate — planned
+### C — selective funnel (in progress)
 
-The funnel queue (`vt_requests.known_good` / `funnel_reason`) and the free stage are the first two
-stages of the selective-VirusTotal funnel (C).
+The funnel decides, per FIM hash, how far to spend before VirusTotal, recording a reason code on
+`vt_requests.funnel_reason`:
+
+1. **cache** - a live `vt_verdicts`/`source_verdicts` row answers for free.
+2. **known-good** (CIRCL hashlookup, free layer, A1) - a known-good file stops the funnel
+   (`funnel_reason=known_good`), never reaching a paid source.
+3. **MalwareBazaar** (`malwarebazaar_layer`, before VirusTotal) - for a not-known-good hash with an
+   enabled MalwareBazaar key: a hit is a malicious verdict delivered without a VirusTotal call
+   (`served_from=malwarebazaar`, `funnel_reason=mbz_malicious`) that annotates the incident; a miss
+   sets `mbz_checked`/`mbz_unknown` so VirusTotal takes over. Per-tenant budget, cache TTL and 429
+   cooldown via `tenant_source_keys` + `source_calls` + `source_verdicts`.
+4. **VirusTotal** (`resolve`) - the remaining hashes, under the tenant's VT key/opt-in/budget.
+
+**On-demand IP lookups** (`/api/ti/ip-lookups`, analyst+): AbuseIPDB and GreyNoise are **not**
+background workers. A button on a source IP in the incident view makes the backend open that
+tenant's own sealed key (it holds the KEK), call the source once, cache the verdict
+(`source_verdicts`) and audit it - same per-tenant key/opt-in/budget/cache/429 as the hash sources,
+but spent only on a deliberate click.
+
+Still to come in C: prevalence/signal-based priority ordering of the VirusTotal queue (a YARA match
+from A2 as a signal). D (throughput gate) remains planned.

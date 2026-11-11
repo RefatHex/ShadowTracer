@@ -470,3 +470,21 @@ export async function removePaidSourceKey(accessToken: string, source: string): 
   })
   return handle<PaidSource>(resp)
 }
+
+// Phase 6.5 C: analyst-initiated IP reputation lookup (AbuseIPDB / GreyNoise).
+export interface IpVerdict {
+  source: string
+  ip: string
+  status: string                       // malicious | suspicious | clean | unknown
+  data: Record<string, unknown>
+  fetched_at: string
+  served_from: string                  // live | cache
+}
+
+export async function lookupIp(accessToken: string, ip: string, source: 'abuseipdb' | 'greynoise'): Promise<IpVerdict> {
+  const resp = await fetch(`${API_BASE}/api/ti/ip-lookups`, {
+    method: 'POST', headers: { ...authHeaders(accessToken), 'Content-Type': 'application/json' },
+    credentials: 'include', body: JSON.stringify({ ip, source }),
+  })
+  return handle<IpVerdict>(resp)
+}

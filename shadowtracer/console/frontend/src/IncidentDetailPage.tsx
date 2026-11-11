@@ -3,6 +3,7 @@ import { useAuth } from './AuthContext'
 import * as api from './api'
 import type { IncidentDetail, TriageAction } from './api'
 import { TiSection } from './TiSection'
+import { IpReputation } from './IpReputation'
 
 // Every field below - including alert.message, which is fully
 // attacker-controlled (see AlertRow.tsx/AlertRow.test.tsx) - is rendered
@@ -112,9 +113,12 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
         </div>
         <div>
           <div className="font-medium text-gray-700 dark:text-gray-300">Source IPs</div>
-          <div className="text-gray-500">
-            {incident.source_ips.join(', ') || '—'}
-            {incident.source_ip_total > incident.source_ips.length && ` (+${incident.source_ip_total - incident.source_ips.length} more)`}
+          <div className="text-gray-500 space-y-1">
+            {incident.source_ips.length === 0 && '—'}
+            {incident.source_ips.map((ip) => <IpReputation key={ip} ip={ip} />)}
+            {incident.source_ip_total > incident.source_ips.length && (
+              <div className="text-xs text-gray-400">+{incident.source_ip_total - incident.source_ips.length} more</div>
+            )}
           </div>
         </div>
         <div>
