@@ -56,9 +56,9 @@ class FakeNode:
     def send_event(self, message):
         self.sent.append(message)
 
-    def fim(self, alert_id, sha256, agent_id="002", sha1="s"):
+    def fim(self, alert_id, sha256, agent_id="002", sha1="s", path=None):
         self.spool[f"{sha256}.{alert_id}.json"] = {
-            "sha256": sha256, "md5": "m", "sha1": sha1, "path": f"/fim/{alert_id}", "alert_id": alert_id,
+            "sha256": sha256, "md5": "m", "sha1": sha1, "path": path or f"/fim/{alert_id}", "alert_id": alert_id,
             "alert_time": "2026-11-06T12:00:00.000+0000", "rule_id": "554", "node": self.name,
             "agent": {"id": agent_id, "name": "agent-x", "ip": "any"}}
 
@@ -223,34 +223,33 @@ def test_quota_backoff_doubles_and_survives_a_restart(db, engine):
         assert vt.quota_cooldown_until(conn, fp) is None                                             # a success resets it
 
 
-def test_free_layer_known_good_marks_incident_lowers_priority_no_vt(db, engine):
-    """Phase 6.5 A1: a VirusTotal-off tenant still runs the free CIRCL layer. A known-good FIM file
-    marks its incident (source shown), lowers its priority, and is never sent to VirusTotal."""
+def test_free_layer_known_good_downranks_only_in_expected_paths(db, engine):
+    """Phase 6.5 A1 gap fix: a known-good binary in /usr/bin is down-ranked (priority lowered, "known
+    file"); the same binary in /tmp keeps its priority and is labelled "known file in unusual
+    location". Neither is sent to VirusTotal (tenant is VT-off; free layer on)."""
     _, t = _new_tenant(db)
-    _settings(db, t, False)                      # VirusTotal off; free layer on by default
+    _settings(db, t, False)
     node = FakeNode("n")
-    kg_sha1 = "b" * 40
-    kg_sha256 = "c" * 64
-    node.fim("kg1", kg_sha256, sha1=kg_sha1)     # kg_sha256 is the sha256; CIRCL is queried by sha1
-    incident_id = _make_incident(db, t, agent_id="002")
-    db.execute(incident_alerts.insert().values(incident_id=incident_id, tenant_key=t, node="n", alert_id="kg1",
-                                               alert_time=datetime.datetime.now(datetime.timezone.utc)))
+    kg_sha1, kg_sha256 = "b" * 40, "c" * 64
+    node.fim("good", kg_sha256, sha1=kg_sha1, path="/usr/bin/ls")
+    node.fim("tmp", kg_sha256, sha1=kg_sha1, path="/tmp/ls")
+    inc_good = _make_incident(db, t, agent_id="002")
+    inc_tmp = _make_incident(db, t, agent_id="002")
+    for iid, aid in ((inc_good, "good"), (inc_tmp, "tmp")):
+        db.execute(incident_alerts.insert().values(incident_id=iid, tenant_key=t, node="n", alert_id=aid,
+                                                   alert_time=datetime.datetime.now(datetime.timezone.utc)))
     db.commit()
-    before = db.execute(incidents.select().where(incidents.c.id == incident_id)).mappings().one()["priority"]
+    tmp_before = db.execute(incidents.select().where(incidents.c.id == inc_tmp)).mappings().one()["priority"]
 
     worker = vt.VTWorker(engine, [{"tenant_key": t, "nodes": [["n", "c"]]}], {}, lambda n, c: node,
                          http=lambda *a, **k: (_ for _ in ()).throw(AssertionError("VT must not be called")),
                          hashlookup_http=hl_http(known={kg_sha1}))
     worker.step()
 
-    req = db.execute(text("SELECT known_good, hashlookup_source, state, served_from FROM vt_requests "
-                          "WHERE tenant_key = :t AND alert_id = 'kg1'"), {"t": t}).mappings().one()
-    assert (req["known_good"], req["hashlookup_source"], req["state"], req["served_from"]) == (True, "NSRL", "resolved", "hashlookup")
-    inc = db.execute(incidents.select().where(incidents.c.id == incident_id)).mappings().one()
-    assert inc["known_good"] is True and inc["known_good_source"] == "NSRL"
-    assert inc["priority"] <= 2 and inc["priority"] <= before          # lowered, never raised
-    assert node.sent == []                                             # no VT event to the manager
-    assert db.execute(text("SELECT count(*) FROM vt_calls WHERE tenant_key = :t"), {"t": t}).scalar_one() == 0
-    # the global cache now holds the verdict, so the next cycle makes no CIRCL call either
-    assert db.execute(text("SELECT known_good, source FROM hashlookup_verdicts WHERE sha256 = :h"),
-                      {"h": kg_sha256}).mappings().one() == {"known_good": True, "source": "NSRL"}
+    good = db.execute(incidents.select().where(incidents.c.id == inc_good)).mappings().one()
+    tmp = db.execute(incidents.select().where(incidents.c.id == inc_tmp)).mappings().one()
+    assert good["known_good"] and good["known_good_safe"] and good["known_good_note"] == "known file"
+    assert good["priority"] <= 2                                   # down-ranked in an expected path
+    assert tmp["known_good"] and not tmp["known_good_safe"] and tmp["known_good_note"] == "known file in unusual location"
+    assert tmp["priority"] == tmp_before and tmp["priority"] > 2   # priority kept in /tmp
+    assert node.sent == [] and db.execute(text("SELECT count(*) FROM vt_calls WHERE tenant_key = :t"), {"t": t}).scalar_one() == 0

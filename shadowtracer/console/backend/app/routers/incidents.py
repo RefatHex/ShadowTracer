@@ -55,6 +55,8 @@ class IncidentSummary(BaseModel):
     # lowered and no TI alert fires. The source is shown as "known file (source: NSRL/…)".
     known_good: bool = False
     known_good_source: str | None = None
+    known_good_safe: bool = False
+    known_good_note: str | None = None
 
 
 class TiSource(BaseModel):

@@ -27,7 +27,7 @@ from collections import Counter
 
 from sqlalchemy import text
 
-from . import hashlookup, matcher, store
+from . import hashlookup, matcher, paths, store
 from .feeds import Observation
 
 log = logging.getLogger("ti-sync.vt")
@@ -254,17 +254,23 @@ class VTWorker:
         with self.engine.begin() as conn:
             enabled, _ = self.settings(conn, tenant)
             for r in conn.execute(text(
-                    "SELECT id, node, alert_id, sha256, hashlookup_source FROM vt_requests WHERE tenant_key = :t "
+                    "SELECT id, node, alert_id, sha256, hashlookup_source, path FROM vt_requests WHERE tenant_key = :t "
                     "AND origin = 'fim' AND state = 'pending' AND known_good IS TRUE"), {"t": tenant}).mappings():
                 inc = conn.execute(text("SELECT incident_id FROM incident_alerts WHERE tenant_key = :t AND node = :n "
                                         "AND alert_id = :a"), {"t": tenant, "n": r["node"], "a": r["alert_id"]}).scalar()
                 if inc is None:
                     continue                                  # incident not correlated yet; retry next cycle
-                conn.execute(text("UPDATE incidents SET known_good = true, known_good_source = :s "
-                                  "WHERE id = :i AND NOT known_good"), {"s": r["hashlookup_source"] or "hashlookup", "i": inc})
-                conn.execute(text("UPDATE vt_requests SET state = 'resolved', resolved_at = :now, served_from = 'hashlookup' "
-                                  "WHERE id = :i"), {"now": now, "i": r["id"]})
-                self.stats["known_good_annotated"] += 1
+                # location decides whether a known-good verdict may lower priority (A1 gap fix): an
+                # expected install path with a non-dual-use name is down-ranked; /tmp, web roots,
+                # cron/systemd/startup, home downloads and dual-use tools keep their priority.
+                downrank, note = paths.known_good_outcome(r["path"])
+                conn.execute(text("UPDATE incidents SET known_good = true, known_good_source = :s, "
+                                  "known_good_safe = :safe, known_good_note = :note WHERE id = :i AND NOT known_good"),
+                             {"s": r["hashlookup_source"] or "hashlookup", "safe": downrank, "note": note, "i": inc})
+                conn.execute(text("UPDATE vt_requests SET state = 'resolved', resolved_at = :now, served_from = 'hashlookup', "
+                                  "funnel_reason = :rsn WHERE id = :i"),
+                             {"now": now, "rsn": "known_good_safe" if downrank else "known_good_unusual", "i": r["id"]})
+                self.stats["known_good_annotated" if downrank else "known_good_unusual"] += 1
             if not enabled:
                 conn.execute(text("UPDATE vt_requests SET state = 'resolved', resolved_at = :now, served_from = 'free_only' "
                                   "WHERE tenant_key = :t AND origin = 'fim' AND state = 'pending' AND known_good IS FALSE"),

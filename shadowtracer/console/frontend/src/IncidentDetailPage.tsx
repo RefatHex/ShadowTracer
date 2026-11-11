@@ -75,8 +75,13 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
         {incident.priority !== undefined && incident.priority !== incident.max_level && ` · priority ${incident.priority} (threat intel)`}
       </p>
       {incident.known_good && (
-        <p className="mb-4 rounded bg-green-50 dark:bg-green-900/30 px-3 py-2 text-sm text-green-800 dark:text-green-300">
-          Known file (source: {incident.known_good_source ?? 'hashlookup'}) — priority lowered, no threat-intel alert.
+        <p className={`mb-4 rounded px-3 py-2 text-sm ${incident.known_good_safe
+          ? 'bg-green-50 dark:bg-green-900/30 text-green-800 dark:text-green-300'
+          : 'bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300'}`}>
+          {incident.known_good_note ?? 'Known file'} (source: {incident.known_good_source ?? 'hashlookup'})
+          {incident.known_good_safe
+            ? ' — priority lowered, no threat-intel alert.'
+            : ' — priority kept: a known file here is still worth a look.'}
         </p>
       )}
       {incident.rare_pattern_flag && (

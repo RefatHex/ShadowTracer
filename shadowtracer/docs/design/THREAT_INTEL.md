@@ -1489,9 +1489,16 @@ VirusTotal** (`vt.VTWorker.free_layer`, `shadowtracer_intel/hashlookup.py`):
 - Each new hash is bulk-checked against `hashlookup.circl.lu` (`POST /bulk/sha1`, CC-BY). Verdicts
   are cached globally in Postgres `hashlookup_verdicts` (~30-day TTL), so a hash is looked up once.
 - A **known-good** file (present, not malicious/low-trust) marks its incident
-  (`incidents.known_good` + `known_good_source`, e.g. NSRL), which **lowers priority** (the generated
-  `priority` column caps a known-good FIM incident with no TI hit at 2) and the console shows
-  "Known file (source: …)". **No TI alert fires and the hash is never sent to VirusTotal.**
+  (`incidents.known_good` + `known_good_source`, e.g. NSRL). **No TI alert fires and the hash is
+  never sent to VirusTotal.** Whether priority is **lowered** depends on the file's location
+  (`shadowtracer_intel/paths.py`, shared with the funnel in C): only an **expected install path**
+  (`/usr/bin`, `/usr/lib`, `/opt`, … - configurable) with a **non-dual-use name** is down-ranked
+  (`known_good_safe`, priority capped at 2). A known-good file in a **high-risk path** (temp, web
+  roots, cron/systemd/startup, home downloads) keeps its priority and is labelled "known file in
+  unusual location"; a **dual-use tool** (`nc`, `nmap`, `socat`, … - configurable) is never
+  down-ranked. `known_good_note` carries the label; the console colours it green (down-ranked) or
+  amber (kept). Lab: a known-good file in `/etc/cron.d` kept priority 5 and the unusual-location
+  label; the integration test shows the same binary down-ranked in `/usr/bin` and kept in `/tmp`.
 - Only hashes CIRCL does not vouch for continue to VirusTotal (opt-in), so known-good OS/software
   files stop dominating the queue and burning VT budget. Attribution (CC-BY) travels with the
   verdict. Lab check: a known-good file → `known_good`, priority 5→2, 0 TI alerts, 0 VT calls.

@@ -55,11 +55,15 @@ incidents = Table(
     # (ingest migration 7c1e9b2f4a60), so the correlator never writes either.
     Column("ti_confidence", SmallInteger, nullable=True),
     Column("priority", SmallInteger, Computed(
-        "CASE WHEN known_good AND COALESCE(ti_confidence, 0) < 50 THEN LEAST(max_level, 2) "
+        "CASE WHEN known_good_safe AND COALESCE(ti_confidence, 0) < 50 THEN LEAST(max_level, 2) "
         "ELSE GREATEST(max_level, CASE WHEN ti_confidence >= 75 THEN 12 WHEN ti_confidence >= 50 THEN 8 ELSE 0 END) END")),
     # Phase 6.5 A1: a known-good file (CIRCL hashlookup) lowers priority and shows context; no TI alert.
     Column("known_good", Boolean, nullable=False, server_default=text("false")),
     Column("known_good_source", Text, nullable=True),
+    # Phase 6.5 A1 fix: priority is lowered (known_good_safe) only for an expected install path with a
+    # non-dual-use name; known_good_note is the label shown ("known file" / "... in unusual location").
+    Column("known_good_safe", Boolean, nullable=False, server_default=text("false")),
+    Column("known_good_note", Text, nullable=True),
     # Phase 7.0: written only by ml-enricher (ingest migration d8a2e6f1c3b7); scores never trigger actions.
     Column("ml_score", REAL, nullable=True),
     Column("ml_reasons", JSONB, nullable=True),

@@ -45,6 +45,8 @@ export interface IncidentSummary {
   rare_pattern_reason: string | null
   known_good?: boolean
   known_good_source?: string | null
+  known_good_safe?: boolean
+  known_good_note?: string | null
 }
 
 export interface WarmupStatus {
