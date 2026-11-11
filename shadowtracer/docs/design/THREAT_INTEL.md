@@ -1470,3 +1470,38 @@ cluster (VERIFY 6.1-7).
 
 The renamed spike files (~36 GB) were deleted on the owner's instruction after
 revision 2 (see the 6.1a notes).
+
+---
+
+## 10. Phase 6.5 — free default layer, tenant-managed paid sources, selective VirusTotal
+
+Source terms were verified 2026-11-11 and recorded in `LICENSE_INVENTORY.md` §3. Nothing in 6.5
+runs on the shipper/writer/correlator hot path; the file-hash work is in ti-sync's worker loop.
+
+### A1 — CIRCL hashlookup free layer (DONE)
+
+The FIM-hash spool (new file hashes from rules 550/554, `custom-shadowtracer-virustotal.py`) is now
+a shared funnel queue (`vt_requests`). ti-sync's worker runs a **free CIRCL stage before
+VirusTotal** (`vt.VTWorker.free_layer`, `shadowtracer_intel/hashlookup.py`):
+
+- On by default for every tenant (opt out via `ti_tenant_settings.disabled_sources` = `hashlookup`);
+  when both the free layer and VirusTotal are off, the spool is discarded unread (nothing leaves).
+- Each new hash is bulk-checked against `hashlookup.circl.lu` (`POST /bulk/sha1`, CC-BY). Verdicts
+  are cached globally in Postgres `hashlookup_verdicts` (~30-day TTL), so a hash is looked up once.
+- A **known-good** file (present, not malicious/low-trust) marks its incident
+  (`incidents.known_good` + `known_good_source`, e.g. NSRL), which **lowers priority** (the generated
+  `priority` column caps a known-good FIM incident with no TI hit at 2) and the console shows
+  "Known file (source: …)". **No TI alert fires and the hash is never sent to VirusTotal.**
+- Only hashes CIRCL does not vouch for continue to VirusTotal (opt-in), so known-good OS/software
+  files stop dominating the queue and burning VT budget. Attribution (CC-BY) travels with the
+  verdict. Lab check: a known-good file → `known_good`, priority 5→2, 0 TI alerts, 0 VT calls.
+
+### A2 Local YARA-X scan · A3 CISA KEV + EPSS vuln prioritisation · A4 Tor exit context tag — planned
+
+A3 depends on a Wazuh vulnerability-detector finding stream, which ShadowTracer does not yet ingest
+(no CVE field in `events`); that ingestion is a prerequisite and is tracked for A3.
+
+### B tenant-managed paid keys · C selective VirusTotal funnel · D throughput gate — planned
+
+The funnel queue (`vt_requests.known_good` / `funnel_reason`) and the free stage are the first two
+stages of the selective-VirusTotal funnel (C).

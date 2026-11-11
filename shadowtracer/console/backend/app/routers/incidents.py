@@ -51,6 +51,10 @@ class IncidentSummary(BaseModel):
     # it - GREATEST(max_level, 12 if >= 75, 8 if >= 50). None/max_level without matches.
     ti_confidence: int | None = None
     priority: int
+    # Phase 6.5 A1: a FIM file in this incident is a known-good file (CIRCL hashlookup); priority is
+    # lowered and no TI alert fires. The source is shown as "known file (source: NSRL/…)".
+    known_good: bool = False
+    known_good_source: str | None = None
 
 
 class TiSource(BaseModel):

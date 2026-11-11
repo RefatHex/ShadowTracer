@@ -227,6 +227,7 @@ def db(engine):
     session.rollback()
     session.execute(text(
         "TRUNCATE TABLE audit_log, refresh_tokens, login_attempts, fingerprint_verdicts, "
+        "hashlookup_verdicts, "   # global (no tenant FK): not reached by the CASCADE below
         "incident_alerts, incidents, fingerprints, agent_role_tags, users, tenants RESTART IDENTITY CASCADE"
     ))
     session.commit()

@@ -17,6 +17,17 @@ from shadowtracer_intel import vt  # noqa: E402
 
 EICAR = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
 OTHER = "a" * 64
+
+
+def hl_http(known=()):
+    """Fake CIRCL hashlookup bulk endpoint: records (known-good) only for sha1s in `known`."""
+    known = {h.upper() for h in known}
+    import json as _j
+
+    def post(url, payload, timeout):
+        recs = [{"SHA-1": h, "db": "nsrl", "source": "RDS", "RDS:package_id": "1"} for h in payload["hashes"] if h in known]
+        return 200, _j.dumps(recs).encode()
+    return post
 REPORT = {"data": {"attributes": {"last_analysis_stats": {"malicious": 62, "suspicious": 0, "undetected": 8, "harmless": 0},
                                   "popular_threat_classification": {"suggested_threat_label": "virus.eicar/test"},
                                   "first_submission_date": 1148301722, "last_analysis_date": 1793900000,
@@ -45,9 +56,9 @@ class FakeNode:
     def send_event(self, message):
         self.sent.append(message)
 
-    def fim(self, alert_id, sha256, agent_id="002"):
+    def fim(self, alert_id, sha256, agent_id="002", sha1="s"):
         self.spool[f"{sha256}.{alert_id}.json"] = {
-            "sha256": sha256, "md5": "m", "sha1": "s", "path": f"/fim/{alert_id}", "alert_id": alert_id,
+            "sha256": sha256, "md5": "m", "sha1": sha1, "path": f"/fim/{alert_id}", "alert_id": alert_id,
             "alert_time": "2026-11-06T12:00:00.000+0000", "rule_id": "554", "node": self.name,
             "agent": {"id": agent_id, "name": "agent-x", "ip": "any"}}
 
@@ -60,10 +71,11 @@ def _new_tenant(db):
     return tid, key
 
 
-def _settings(db, tenant_key, enabled, budget=500):
-    db.execute(text("INSERT INTO ti_tenant_settings (tenant_key, vt_enabled, vt_daily_budget, updated_by) VALUES (:t, :e, :b, 'test') "
-                    "ON CONFLICT (tenant_key) DO UPDATE SET vt_enabled = :e, vt_daily_budget = :b"),
-               {"t": tenant_key, "e": enabled, "b": budget})
+def _settings(db, tenant_key, enabled, budget=500, disabled=None):
+    db.execute(text("INSERT INTO ti_tenant_settings (tenant_key, vt_enabled, vt_daily_budget, disabled_sources, updated_by) "
+                    "VALUES (:t, :e, :b, :d, 'test') ON CONFLICT (tenant_key) DO UPDATE SET vt_enabled = :e, "
+                    "vt_daily_budget = :b, disabled_sources = :d"),
+               {"t": tenant_key, "e": enabled, "b": budget, "d": disabled or []})
     db.commit()
 
 
@@ -71,6 +83,7 @@ def test_worker_lookup_once_cache_budget_opt_out_and_incident_link(db, engine):
     _, on = _new_tenant(db)
     _, off = _new_tenant(db)
     _settings(db, on, True, budget=500)
+    _settings(db, off, False, disabled=["hashlookup"])   # fully opted out: free layer off too, so it discards
     n_on, n_off = FakeNode("n-on"), FakeNode("n-off")
     calls = []
 
@@ -79,7 +92,8 @@ def test_worker_lookup_once_cache_budget_opt_out_and_incident_link(db, engine):
         return 200, json.dumps(REPORT).encode()
 
     worker = vt.VTWorker(engine, [{"tenant_key": on, "nodes": [["n-on", "c1"]]}, {"tenant_key": off, "nodes": [["n-off", "c2"]]}],
-                         {on: "key-1", off: "key-1"}, lambda name, c: {"n-on": n_on, "n-off": n_off}[name], http=fake_http)
+                         {on: "key-1", off: "key-1"}, lambda name, c: {"n-on": n_on, "n-off": n_off}[name], http=fake_http,
+                         hashlookup_http=hl_http())
     incident_id = _make_incident(db, on, agent_id="002")
     db.execute(incident_alerts.insert().values(incident_id=incident_id, tenant_key=on, node="n-on", alert_id="a1",
                                                alert_time=datetime.datetime.now(datetime.timezone.utc)))
@@ -139,6 +153,7 @@ def test_budget_reasons_and_quota_cooldown(db, engine):
     node = FakeNode("n")
     node.fim("q1", OTHER)
     w = vt.VTWorker(engine, [{"tenant_key": t, "nodes": [["n", "c"]]}], {t: "k2"}, lambda n, c: node,
+                    hashlookup_http=hl_http(),
                     http=lambda url, headers, timeout=20: (429, b"{}"))
     w.step()
     w.step()                                                             # in cooldown: no second call
@@ -206,3 +221,36 @@ def test_quota_backoff_doubles_and_survives_a_restart(db, engine):
         conn.execute(text("INSERT INTO vt_calls (key_fp, tenant_key, sha256, called_at, http_status, outcome) "
                           "VALUES (:k, 'x', :h, :at, 200, 'clean')"), {"k": fp, "h": OTHER, "at": t0 + datetime.timedelta(hours=1)})
         assert vt.quota_cooldown_until(conn, fp) is None                                             # a success resets it
+
+
+def test_free_layer_known_good_marks_incident_lowers_priority_no_vt(db, engine):
+    """Phase 6.5 A1: a VirusTotal-off tenant still runs the free CIRCL layer. A known-good FIM file
+    marks its incident (source shown), lowers its priority, and is never sent to VirusTotal."""
+    _, t = _new_tenant(db)
+    _settings(db, t, False)                      # VirusTotal off; free layer on by default
+    node = FakeNode("n")
+    kg_sha1 = "b" * 40
+    kg_sha256 = "c" * 64
+    node.fim("kg1", kg_sha256, sha1=kg_sha1)     # kg_sha256 is the sha256; CIRCL is queried by sha1
+    incident_id = _make_incident(db, t, agent_id="002")
+    db.execute(incident_alerts.insert().values(incident_id=incident_id, tenant_key=t, node="n", alert_id="kg1",
+                                               alert_time=datetime.datetime.now(datetime.timezone.utc)))
+    db.commit()
+    before = db.execute(incidents.select().where(incidents.c.id == incident_id)).mappings().one()["priority"]
+
+    worker = vt.VTWorker(engine, [{"tenant_key": t, "nodes": [["n", "c"]]}], {}, lambda n, c: node,
+                         http=lambda *a, **k: (_ for _ in ()).throw(AssertionError("VT must not be called")),
+                         hashlookup_http=hl_http(known={kg_sha1}))
+    worker.step()
+
+    req = db.execute(text("SELECT known_good, hashlookup_source, state, served_from FROM vt_requests "
+                          "WHERE tenant_key = :t AND alert_id = 'kg1'"), {"t": t}).mappings().one()
+    assert (req["known_good"], req["hashlookup_source"], req["state"], req["served_from"]) == (True, "NSRL", "resolved", "hashlookup")
+    inc = db.execute(incidents.select().where(incidents.c.id == incident_id)).mappings().one()
+    assert inc["known_good"] is True and inc["known_good_source"] == "NSRL"
+    assert inc["priority"] <= 2 and inc["priority"] <= before          # lowered, never raised
+    assert node.sent == []                                             # no VT event to the manager
+    assert db.execute(text("SELECT count(*) FROM vt_calls WHERE tenant_key = :t"), {"t": t}).scalar_one() == 0
+    # the global cache now holds the verdict, so the next cycle makes no CIRCL call either
+    assert db.execute(text("SELECT known_good, source FROM hashlookup_verdicts WHERE sha256 = :h"),
+                      {"h": kg_sha256}).mappings().one() == {"known_good": True, "source": "NSRL"}

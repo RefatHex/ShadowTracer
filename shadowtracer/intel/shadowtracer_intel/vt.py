@@ -27,7 +27,7 @@ from collections import Counter
 
 from sqlalchemy import text
 
-from . import matcher, store
+from . import hashlookup, matcher, store
 from .feeds import Observation
 
 log = logging.getLogger("ti-sync.vt")
@@ -176,9 +176,10 @@ class VTWorker:
     keys: {tenant_key: api key}. ch: optional ClickHouse client for ti_matches."""
 
     def __init__(self, engine, clusters, keys, node_factory, ch=None, http=_http_get,
-                 per_minute=PUBLIC_PER_MINUTE, per_day=PUBLIC_PER_DAY):
+                 per_minute=PUBLIC_PER_MINUTE, per_day=PUBLIC_PER_DAY, hashlookup_http=None):
         self.engine, self.keys, self.ch, self.http = engine, keys, ch, http
         self.per_minute, self.per_day = per_minute, per_day
+        self.hashlookup_http = hashlookup_http      # None -> real CIRCL HTTP; tests inject
         self.nodes = {c["tenant_key"]: [node_factory(n, ctr) for n, ctr in c["nodes"]] for c in clusters}
         self.stats = Counter()
 
@@ -187,18 +188,25 @@ class VTWorker:
                          {"t": tenant}).first()
         return (bool(r[0]), int(r[1])) if r else (False, 0)
 
+    def hashlookup_enabled(self, conn, tenant) -> bool:
+        """The CIRCL hashlookup free layer is on by default; a tenant opts out via disabled_sources."""
+        r = conn.execute(text("SELECT disabled_sources FROM ti_tenant_settings WHERE tenant_key = :t"),
+                         {"t": tenant}).first()
+        return not (r and r[0] and "hashlookup" in r[0])
+
     def collect(self) -> None:
         for tenant, nodes in self.nodes.items():
             with self.engine.begin() as conn:
                 enabled, _ = self.settings(conn, tenant)
+                free = self.hashlookup_enabled(conn, tenant)
             for node in nodes:
                 if not node.deployed():
                     continue
-                if not enabled:
-                    n = node.spool_discard()                 # unread: opt-in off means nothing leaves
+                if not enabled and not free:
+                    n = node.spool_discard()                 # both off: nothing leaves the host at all
                     if n:
                         self.stats["discarded_opt_in_off"] += n
-                        log.info("tenant %s: VirusTotal off, discarded %d spooled hashes on %s", tenant, n, node.name)
+                        log.info("tenant %s: TI file-hash layers off, discarded %d spooled hashes on %s", tenant, n, node.name)
                     continue
                 taken = node.spool_take()
                 with self.engine.begin() as conn:
@@ -216,14 +224,63 @@ class VTWorker:
                              "md5": req.get("md5"), "sha1": req.get("sha1")})
                 node.spool_delete([name for name, _ in taken])   # only after the requests are committed
 
+    def free_layer(self, now=None) -> None:
+        """Phase 6.5 A1: the free CIRCL hashlookup stage, BEFORE VirusTotal. Every pending FIM hash
+        is bulk-checked for known-good; a known-good file marks its incident ("known file (source
+        …)", priority lowered) with no TI alert and stops the funnel. Runs for every tenant that has
+        not opted out; VirusTotal (resolve) then only ever sees hashes CIRCL did not vouch for."""
+        now = now or dt.datetime.now(dt.timezone.utc)
+        for tenant in self.nodes:
+            with self.engine.begin() as conn:
+                if not self.hashlookup_enabled(conn, tenant):
+                    continue
+                reqs = [dict(r) for r in conn.execute(text(
+                    "SELECT id, sha256, sha1, md5, node, alert_id FROM vt_requests WHERE tenant_key = :t "
+                    "AND origin = 'fim' AND state = 'pending' AND known_good IS NULL"), {"t": tenant}).mappings()]
+                if reqs:
+                    verdicts = hashlookup.resolve(conn, reqs, now, self.hashlookup_http)
+                    for r in reqs:
+                        v = verdicts.get(r["sha256"], {"known_good": False, "source": None})
+                        conn.execute(text("UPDATE vt_requests SET known_good = :kg, hashlookup_source = :src, "
+                                          "funnel_reason = :rsn WHERE id = :i"),
+                                     {"kg": v["known_good"], "src": v.get("source"),
+                                      "rsn": "known_good" if v["known_good"] else "not_known_good", "i": r["id"]})
+                        self.stats["hashlookup_known_good" if v["known_good"] else "hashlookup_not_known_good"] += 1
+            self._deliver_known_good(tenant, now)
+
+    def _deliver_known_good(self, tenant, now) -> None:
+        """Mark each known-good FIM hash's incident, then close the request out. Non-known-good
+        hashes on a VirusTotal-off tenant are closed as free-layer-only (nothing more to do)."""
+        with self.engine.begin() as conn:
+            enabled, _ = self.settings(conn, tenant)
+            for r in conn.execute(text(
+                    "SELECT id, node, alert_id, sha256, hashlookup_source FROM vt_requests WHERE tenant_key = :t "
+                    "AND origin = 'fim' AND state = 'pending' AND known_good IS TRUE"), {"t": tenant}).mappings():
+                inc = conn.execute(text("SELECT incident_id FROM incident_alerts WHERE tenant_key = :t AND node = :n "
+                                        "AND alert_id = :a"), {"t": tenant, "n": r["node"], "a": r["alert_id"]}).scalar()
+                if inc is None:
+                    continue                                  # incident not correlated yet; retry next cycle
+                conn.execute(text("UPDATE incidents SET known_good = true, known_good_source = :s "
+                                  "WHERE id = :i AND NOT known_good"), {"s": r["hashlookup_source"] or "hashlookup", "i": inc})
+                conn.execute(text("UPDATE vt_requests SET state = 'resolved', resolved_at = :now, served_from = 'hashlookup' "
+                                  "WHERE id = :i"), {"now": now, "i": r["id"]})
+                self.stats["known_good_annotated"] += 1
+            if not enabled:
+                conn.execute(text("UPDATE vt_requests SET state = 'resolved', resolved_at = :now, served_from = 'free_only' "
+                                  "WHERE tenant_key = :t AND origin = 'fim' AND state = 'pending' AND known_good IS FALSE"),
+                             {"now": now, "t": tenant})
+
     def resolve(self, now=None) -> None:
         now = now or dt.datetime.now(dt.timezone.utc)
         for tenant in self.nodes:
             with self.engine.begin() as conn:
                 enabled, daily = self.settings(conn, tenant)
+                # VirusTotal only sees hashes CIRCL did not vouch for; if the free layer is off for
+                # this tenant, CIRCL never ran (known_good NULL) so every pending hash is eligible.
+                eligible = "known_good = false" if self.hashlookup_enabled(conn, tenant) else "known_good IS NOT TRUE"
                 pending = [r[0] for r in conn.execute(text(
                     "SELECT sha256 FROM vt_requests WHERE tenant_key = :t AND state = 'pending' "
-                    "GROUP BY sha256 ORDER BY min(requested_at)"), {"t": tenant})]
+                    f"AND {eligible} GROUP BY sha256 ORDER BY min(requested_at)"), {"t": tenant})]
             key = self.keys.get(tenant)
             for sha in pending:
                 with self.engine.begin() as conn:
@@ -317,5 +374,6 @@ class VTWorker:
 
     def step(self) -> None:
         self.collect()
+        self.free_layer()       # CIRCL known-good: free, default-on, before VirusTotal
         self.resolve()
         self.deliver()

@@ -74,6 +74,11 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
         {incident.alert_count} alerts · max level {incident.max_level}
         {incident.priority !== undefined && incident.priority !== incident.max_level && ` · priority ${incident.priority} (threat intel)`}
       </p>
+      {incident.known_good && (
+        <p className="mb-4 rounded bg-green-50 dark:bg-green-900/30 px-3 py-2 text-sm text-green-800 dark:text-green-300">
+          Known file (source: {incident.known_good_source ?? 'hashlookup'}) — priority lowered, no threat-intel alert.
+        </p>
+      )}
       {incident.rare_pattern_flag && (
         <p className="mb-4 rounded bg-purple-50 dark:bg-purple-900/30 px-3 py-2 text-sm text-purple-800 dark:text-purple-300">
           {/* rare_pattern_reason is already the complete, context-aware

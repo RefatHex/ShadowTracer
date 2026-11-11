@@ -43,6 +43,8 @@ export interface IncidentSummary {
   rare_pattern_flag: boolean
   prior_occurrences: number | null
   rare_pattern_reason: string | null
+  known_good?: boolean
+  known_good_source?: string | null
 }
 
 export interface WarmupStatus {

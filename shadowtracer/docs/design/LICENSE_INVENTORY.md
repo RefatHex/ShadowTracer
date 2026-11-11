@@ -137,3 +137,22 @@ this fork's public source (`github.com/RefatHex/ShadowTracer`) on a new About pa
 (`shadowtracer/console/frontend/src/AboutPage.tsx`, linked from the nav bar) - the
 customer-visible counterpart to this document's own GPLv2 source-availability
 obligation (§4).
+
+## 3. Phase 6.5 threat-intel sources (verified 2026-11-11, links below)
+
+Each source's current terms were read before use (Phase 6.5 requirement). "Not legal advice."
+
+| Source | Use | Licence / terms (verified 2026-11-11) | Attribution shown | Link |
+|---|---|---|---|---|
+| **CIRCL hashlookup** | Free default: known-good FIM hashes (NSRL etc.) | **CC-BY**, commercial use permitted; only acknowledgement required is a reference to the hashlookup page. No stated rate limit (we self-limit + 429 backoff). Bulk: `POST /bulk/md5`, `/bulk/sha1` | "known file (source: NSRL/…)" + a link to circl.lu/services/hashlookup | https://www.circl.lu/services/hashlookup/ |
+| **CISA KEV** | Free default: vulnerability prioritisation | **CC0 1.0**; "you may use this data in any legal manner", commercial OK, no attribution required; must not imply CISA/DHS endorsement or use their logo/seal | "CISA KEV" tag (no logo/seal) | https://www.cisa.gov/sites/default/files/licenses/kev/license.txt · feed: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json |
+| **FIRST EPSS** | Free default: vulnerability prioritisation | Freely and openly accessible (FIRST). No explicit licence on the API page; FIRST © retained. Courtesy attribution: cite FIRST EPSS. API `GET https://api.first.org/data/v1/epss` | "EPSS <score> (pNN) — FIRST.org" | https://www.first.org/epss/ · https://api.first.org/data/v1/epss |
+| **Tor exit list** | Free default: context tag only (not an alert) | Tor Project metrics data is **CC0** (all copyright/related rights waived); commercial OK | "Tor exit" tag | https://metrics.torproject.org/about.html · list: https://check.torproject.org/torbulkexitlist |
+| **signature-base** (YARA) | Free default: local YARA-X scan rules | **Detection Rule License (DRL) 1.1** — attribution + share-alike-style terms for modified rules (to verify at vendor time, A2) | rule name + author + tags on match (DRL attribution) | https://github.com/Neo23x0/signature-base |
+| **Yara-Rules/rules** (YARA) | Free default: local YARA-X scan rules | **GPL-2.0** (to verify at vendor time, A2) | rule name + author + tags on match | https://github.com/Yara-Rules/rules |
+| **YARA-X** engine | Free default: local scanning | Apache-2.0 / MIT (VirusTotal yara-x) | n/a (engine) | https://github.com/VirusTotal/yara-x |
+
+Paid/limited sources (Phase 6.5 B, tenant-managed keys, off by default): **VirusTotal**,
+**MalwareBazaar** (abuse.ch), **AbuseIPDB**, **GreyNoise** - each tenant supplies its own key under
+that provider's own terms; ShadowTracer makes no call to any of them with no key set. Their terms
+are the tenant's responsibility and are linked in `THREAT_INTEL.md`.
