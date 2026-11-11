@@ -48,6 +48,15 @@ def test_load_kek_validates():
             pass
 
 
+def test_env_vt_keys_off_unless_flag_set(monkeypatch):
+    from shadowtracer_intel import sync
+    monkeypatch.setattr(sync, "clickhouse_from_env", lambda env: None)
+    env = {"TI_CLUSTERS": "[]", "TI_VT_KEYS": '{"t1": "MYKEY"}', "MYKEY": "secret-val"}
+    assert sync.vt_worker_from_env(None, env=env).keys == {}          # off by default
+    env["TI_VT_ALLOW_ENV_KEYS"] = "1"
+    assert sync.vt_worker_from_env(None, env=env).keys == {"t1": "secret-val"}   # explicit opt-in
+
+
 def test_worker_key_loader_overrides_static_and_falls_back():
     w = vt.VTWorker(engine=None, clusters=[], keys={"t1": "static-key", "t2": "static-2"},
                     node_factory=lambda n, c: None, key_loader=lambda t: {"t1": "db-key"}.get(t))

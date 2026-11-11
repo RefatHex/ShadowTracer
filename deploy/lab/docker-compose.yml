@@ -885,10 +885,11 @@ services:
       TI_MISP_SERVERS: ${TI_MISP_SERVERS:-[]}
       # 6.5 B: a tenant's VirusTotal key is stored envelope-sealed in Postgres
       # (tenant_source_keys, set via the console, admin-only, audited) and opened here with
-      # KEY_ENCRYPTION_KEY - the preferred path. VT_API_KEY / TI_VT_KEYS below is the legacy
-      # env fallback, used only for a tenant without a DB key (being retired). Opt-in is per
-      # tenant in Postgres (PUT /api/ti/settings, admin-only, audited), default off.
+      # KEY_ENCRYPTION_KEY - the only path used by default. The legacy env path below
+      # (VT_API_KEY / TI_VT_KEYS) is OFF unless TI_VT_ALLOW_ENV_KEYS=1 is set explicitly.
+      # Opt-in is per tenant in Postgres (PUT /api/ti/settings, admin-only, audited), default off.
       KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY:-}
+      TI_VT_ALLOW_ENV_KEYS: ${TI_VT_ALLOW_ENV_KEYS:-0}
       VT_API_KEY: ${VT_API_KEY:-}
       TI_VT_KEYS: >-
         {"${TENANT_KEY}": "VT_API_KEY", "${TEST_TENANT_KEY}": "VT_API_KEY"}

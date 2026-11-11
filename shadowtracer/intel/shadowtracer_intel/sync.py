@@ -343,14 +343,22 @@ def db_vt_key_loader(engine, kek):
 
 def vt_worker_from_env(engine, env=os.environ):
     """VirusTotal worker. Keys come from the console (tenant_source_keys, envelope-sealed) when
-    KEY_ENCRYPTION_KEY is set - the preferred path (6.5 B). TI_VT_KEYS (an env var per tenant) is
-    the legacy fallback, used only for tenants without a DB key, and is being retired. Opt-in is
+    KEY_ENCRYPTION_KEY is set - the preferred path (6.5 B). The legacy TI_VT_KEYS env path (an env
+    var per tenant) is OFF unless TI_VT_ALLOW_ENV_KEYS=1 is set explicitly. Opt-in is
     ti_tenant_settings.vt_enabled (console, admin-only, audited); VT_PER_MINUTE / VT_PER_DAY are
     the key's limits (default: the public API's 4 and 500)."""
     from . import keyvault, vt
-    keys = {t: env.get(var, "") for t, var in json.loads(env.get("TI_VT_KEYS", "{}")).items()}
+    # The DB (envelope) path is the source of truth. The legacy TI_VT_KEYS env path is OFF by
+    # default (6.5 B) and used only when TI_VT_ALLOW_ENV_KEYS=1 is set explicitly - a deliberate,
+    # audited-by-config-review opt-in for a migration or an air-gapped deployment, not a default.
+    allow_env = env.get("TI_VT_ALLOW_ENV_KEYS", "0").lower() in ("1", "true", "yes")
+    keys = ({t: env.get(var, "") for t, var in json.loads(env.get("TI_VT_KEYS", "{}")).items()}
+            if allow_env else {})
     kek_raw = env.get("KEY_ENCRYPTION_KEY")
     key_loader = db_vt_key_loader(engine, keyvault.load_kek(kek_raw)) if kek_raw else None
+    if not allow_env and not kek_raw:
+        log.warning("VirusTotal worker has no key source: set KEY_ENCRYPTION_KEY for the DB path "
+                    "(preferred), or TI_VT_ALLOW_ENV_KEYS=1 to use the legacy TI_VT_KEYS env path")
     return vt.VTWorker(engine, json.loads(env.get("TI_CLUSTERS", "[]")), {t: k for t, k in keys.items() if k},
                        safe_reload.DockerNode, ch=clickhouse_from_env(env), per_minute=int(env.get("VT_PER_MINUTE", vt.PUBLIC_PER_MINUTE)),
                        per_day=int(env.get("VT_PER_DAY", vt.PUBLIC_PER_DAY)), key_loader=key_loader)

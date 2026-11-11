@@ -201,3 +201,44 @@ disaster, same realistic scenario as §2) still had the real tenant/admin row
 untouched throughout. Main lab's 26 containers confirmed still running before and
 after (`docker compose -f deploy/lab/docker-compose.yml ps` -> 26, unaffected).
 Teardown: `docker compose down -v` in the separate stack.
+
+## 5. The key-encryption key (KEK) is backed up separately (Phase 6.5 B)
+
+Tenant-managed paid-source API keys (VirusTotal/MalwareBazaar/AbuseIPDB/GreyNoise) are
+stored in Postgres only as envelope-encrypted blobs (`tenant_source_keys.sealed_key`,
+see `THREAT_INTEL.md` §10 B and `app/secrets_crypto.py`). The key-encryption key that
+unwraps them, **`KEY_ENCRYPTION_KEY`**, is deliberately **not in the database and never
+in a database backup**. It lives only where the console and ti-sync read it from the
+environment (a Docker/host secret, a secrets manager, or sealed offline storage).
+
+**Why separate**: a Postgres backup is copied, shipped offsite and kept for a long time;
+if it also carried the KEK, a single leaked dump would expose every tenant's third-party
+key. Separating them means a leaked DB backup yields only ciphertext, and losing the KEK
+(not the DB) is what makes the sealed keys unrecoverable - so the KEK gets its own backup,
+on a different medium and rotation schedule from the database, and a KEK restore is tested
+with it.
+
+**Back up the KEK** whenever it is set or rotated: store the exact `KEY_ENCRYPTION_KEY`
+value (base64 of 32 bytes) in the secret store, tagged with the date. Rotation re-wraps
+the stored DEKs (`secrets_crypto.rewrap`) without re-encrypting the secrets, so keep the
+**previous** KEK until every row has been re-wrapped, then retire it.
+
+**Restore test** (run against the real lab Postgres, HEAD code): sealed a real key under
+a KEK, inserted the row, then read back only what a DB backup contains - the `sealed_key`
+blob - and decrypted it two ways:
+
+```
+restored sealed_key (DB backup content): U1RLMQEAMNIusSEjEVDQZ0o28Rocme/Z+CU//6709fzBPAH7 ...
+decrypt WITH correct KEK      : VT-REAL-KEY-7f3a
+decrypt WITHOUT the KEK       : FAILS -> sealed key failed to authenticate - wrong KEK, ...
+OK: DB backup alone cannot reveal keys; KEK is required and sufficient
+```
+
+The blob begins `U1RLMQ` = base64 of the `STK1` envelope header, i.e. ciphertext - the key
+value never appears in the backup. Decryption succeeds **only** with the separately-stored
+KEK and fails (GCM authentication error) with any other key. After a disaster restore,
+bring the KEK back from its own backup into `KEY_ENCRYPTION_KEY`; the restored rows then
+decrypt. Without the KEK, the keys are gone and each tenant simply re-enters its own key
+in the console (admin-only, audited) - the sealed rows are never a silent partial restore.
+This is the same property `secrets_crypto.demo()` and `tests/test_paid_sources.py` assert
+in unit form; §5 is the end-to-end restore proof against a real database.
