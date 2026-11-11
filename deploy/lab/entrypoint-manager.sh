@@ -189,6 +189,14 @@ fi
 mkdir -p /var/log/chrony
 chronyd -x || true
 
+# Phase 6.5 A2: run the local YARA-X scan on the agent (execd) when a high-risk FIM change fires
+# rule 110200. <location>local</location> runs it on the agent that generated the alert.
+if ! grep -q "shadowtracer-yara-scan" "$OSSEC_CONF"; then
+    ar_block="  <command>\n    <name>shadowtracer-yara-scan</name>\n    <executable>shadowtracer-yara-scan</executable>\n    <timeout_allowed>no</timeout_allowed>\n  </command>\n  <active-response>\n    <command>shadowtracer-yara-scan</command>\n    <location>local</location>\n    <rules_id>110200</rules_id>\n  </active-response>"
+    awk -v block="$ar_block" '/<\/ossec_config>/{print block} {print}' "$OSSEC_CONF" > "${OSSEC_CONF}.tmp"
+    mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
+fi
+
 "${SHADOWTRACER_INSTALL_DIR}/bin/shadowtracer-control" start
 
 exec tail -F "${SHADOWTRACER_INSTALL_DIR}/logs/ossec.log" "${SHADOWTRACER_INSTALL_DIR}/logs/cluster.log" "${SHADOWTRACER_INSTALL_DIR}/logs/api.log" 2>/dev/null

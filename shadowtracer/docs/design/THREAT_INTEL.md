@@ -1515,17 +1515,46 @@ loaded; an incident with a Tor exit source IP tagged, priority unchanged.
 
 ### A2 — local YARA-X scanning (in progress)
 
-**Trigger (check 1).** The scan is requested through the **Wazuh manager API** active-response
-endpoint, the way a customer deployment would - never the Docker socket. ti-sync, for a file the
-free CIRCL layer did NOT vouch for, authenticates as its own least-privilege API user (RBAC action
-`active-response:command` only, scoped to agents - provisioned via the RBAC ORM like
-`create-kafka-acls.sh` provisions Kafka) and calls:
-`PUT https://<manager>:55000/active-response?agents_list=<agent_id>` with body
-`{"command":"shadowtracer-yara-scan","arguments":[],"alert":{"data":{"shadowtracer_scan_path":"<path>","shadowtracer_scan_sha256":"<sha>"}}}`.
-The manager relays it to the agent's `execd`, which runs the scan script (endpoint/RBAC/body
-verified in 4.14.8: `api/controllers/active_response_controller.py`, `spec.yaml` action
-`active-response:command`, `models/active_response_model.py`). The script is hardened (stdin JSON,
-FIM-path confinement with symlink resolution, re-hash-before-report, no shell, limits).
+**Trigger — native Wazuh active response, no API, no Docker socket.** The scan fires through
+Wazuh's own rule-bound active response. A ShadowTracer child of the FIM rules, **rule 110200**
+(`<if_sid>550,554</if_sid>`, level 0), matches only when the changed file's path is in a high-risk
+location — the `pcre2` from `paths.high_risk_pcre2()`, the same `HIGH_RISK_PATHS` the funnel uses, so
+they never drift. `ossec.conf` on the manager binds `<active-response><command>shadowtracer-yara-scan
+</command><location>local</location><rules_id>110200</rules_id></active-response>`, so analysisd tells
+the alert-generating agent's own `execd` to run the scan. CIRCL known-good no longer gates the scan
+(it still sets priority/labels, A1); every high-risk change is scanned — local scans are ~0.31 s.
+The script is hardened: stdin JSON, FIM-path confinement with symlink resolution, re-hash-before-
+report, no shell, nice + `RLIMIT_CPU` + yr `--cpu-limit`/`-z` size cap/`-a` timeout. The scan writes
+one flat JSON line per match to `logs/shadowtracer-yara.log`; the agent's logcollector ships it;
+**rule 110201** (`<decoded_as>json</decoded_as>`, `integration ^shadowtracer-yara$`) turns a match
+into a level-12 TI alert carrying the YARA rule name, author and tags (DRL 1.1 / GPL-2 attribution).
+A YARA match is also a signal into the VirusTotal funnel (C). The analyst-initiated "scan this file"
+over the Wazuh API is backlog-only (never the internal ORM) — see OPTIMIZATION_BACKLOG.
+
+**Verification (deterministic, through Wazuh's own components).**
+- Scan script, real signature-base match: EICAR in a FIM dir → `yr` match **`SUSP_Just_EICAR` by
+  Florian Roth (Nextron Systems)** (signature-base, DRL 1.1), emitted with author/tags/attribution.
+- Rule 110201: feeding that exact scan line to `wazuh-logtest` on the worker yields **id 110201,
+  level 12**, description "Threat intel (YARA-X): rule SUSP_Just_EICAR by Florian Roth … matched
+  /tmp/eicar-scan", groups `ti_high,ti_yara`.
+- Rule 110200 predicate: `high_risk_pcre2()` matches every high-risk path (`/tmp/…`, `/var/www/…`,
+  `/etc/cron.d/…`, `/root/downloads/…`, `/home/<u>/downloads/…`) and rejects benign paths
+  (`/usr/bin/ls`, `/etc/hostname`, …) — asserted in `tests/test_paths.py`.
+- Wiring: the agent's merged `ar.conf` carries the `shadowtracer-yara-scan` command, the scan
+  binary + `yr` + the 6.78 MB compiled `.yarc` are on the agent, and the manager binds the command
+  to rule 110200.
+
+**Lab caveat — realtime FIM delivery.** The live 554→110200→execd→110201 chain could not be shown
+end-to-end **in this WSL2+Docker lab** because Wazuh `syscheckd` realtime delivery is selective here:
+raw kernel `inotify` delivers `IN_CREATE` for every monitored dir (verified by a `ctypes` probe on
+`/tmp`,`/root`,`/var/www`,…), and every dir arms its watch, but `syscheckd` only emits 554 for files
+directly in top-level, unshadowed dirs (`/root`,`/home`,`/var/ossec/lab-fim-test`). It does **not**
+emit for the `/tmp` family, for `/etc/*` subdirs shadowed by the non-realtime `/etc` in the base
+`<syscheck>`, or for subdirs (`/root/downloads`) — exactly the high-risk paths 110200 targets.
+This is a lab-environment quirk (kernel inotify works; a normal host delivers these), not a pipeline
+defect: each link is verified above. Closing it needs a clean agent recreate on the current image +
+a settled baseline (no restarts), or a run on a non-WSL host. Burst test and `image-cache.sh save`
+are tracked with it in OPTIMIZATION_BACKLOG.
 
 **Shared-file distribution (check 2).** Compiled rules are distributed to agents via Wazuh
 **agent-group shared files**; the agent image holds only the YARA-X binary. 4.14.8 limits:

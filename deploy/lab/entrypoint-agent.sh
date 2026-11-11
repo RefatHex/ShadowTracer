@@ -54,6 +54,18 @@ if [ "$AGENT_NAME" = "agent-ubuntu-1" ] && ! grep -q "shadowtracer-ml-fim" "$OSS
     mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
 fi
 
+# Phase 6.5 A2 (docs/design/THREAT_INTEL.md §10): watch the high-risk locations the YARA-X scan
+# targets (temp, web roots - cron/systemd/startup and home are already watched above) in real time,
+# so a change there raises a FIM alert that rule 110200 turns into a local YARA-X scan; and read the
+# scan result log that rule 110201 turns into a TI alert on a match.
+if ! grep -q "shadowtracer-yara" "$OSSEC_CONF"; then
+    mkdir -p /tmp /var/tmp /dev/shm /var/www /srv/www
+    yara_fim="  <syscheck><!-- shadowtracer-yara --><directories check_all=\"yes\" realtime=\"yes\" report_changes=\"no\">/tmp,/var/tmp,/dev/shm,/var/www,/srv/www</directories></syscheck>"
+    yara_log="  <localfile><!-- shadowtracer-yara --><log_format>json</log_format><location>${SHADOWTRACER_INSTALL_DIR}/logs/shadowtracer-yara.log</location></localfile>"
+    awk -v b1="$yara_fim" -v b2="$yara_log" '/<\/ossec_config>/{print b1; print b2} {print}' "$OSSEC_CONF" > "${OSSEC_CONF}.tmp"
+    mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
+fi
+
 # --- one-time runtime config: monitor the sshd auth log (not in the
 # default localfile list) so the brute-force/active-response tests fire ---
 AUTH_LOG=/var/log/auth.log
