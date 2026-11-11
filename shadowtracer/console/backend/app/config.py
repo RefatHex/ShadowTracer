@@ -79,10 +79,21 @@ class Settings:
     # construction in tests doesn't need updating for a check most of them
     # don't exercise.
     clickhouse_hosts: list[tuple[str, int]] = field(default_factory=list)
+    # Phase 6.5 B: key-encryption key for tenant-managed paid-source API keys
+    # (secrets_crypto). Optional - None means paid-key management is disabled and
+    # its endpoints return 503; set KEY_ENCRYPTION_KEY to enable. Never logged.
+    key_encryption_key: bytes | None = None
 
 
 def load_settings() -> Settings:
     jwt_secret = validate_jwt_secret(_env_or_file("JWT_SECRET"))
+
+    # Optional so a deployment not yet using paid sources still starts; when set it
+    # must be a valid AES-256 KEK (load_kek raises otherwise - a malformed KEK is a
+    # hard error, never a silent fallback).
+    from .secrets_crypto import load_kek
+    kek_raw = _env_or_file("KEY_ENCRYPTION_KEY")
+    key_encryption_key = load_kek(kek_raw) if kek_raw else None
 
     # The app (and this CLI) connect as shadowtracer_app, a restricted role
     # created by the Phase 4 audit-log migration - NOT the table-owning
@@ -136,4 +147,5 @@ def load_settings() -> Settings:
         shipper_metrics_urls=shipper_urls,
         cors_allow_origins=cors_origins,
         clickhouse_hosts=clickhouse_hosts,
+        key_encryption_key=key_encryption_key,
     )
