@@ -253,3 +253,55 @@ def test_free_layer_known_good_downranks_only_in_expected_paths(db, engine):
     assert tmp["known_good"] and not tmp["known_good_safe"] and tmp["known_good_note"] == "known file in unusual location"
     assert tmp["priority"] == tmp_before and tmp["priority"] > 2   # priority kept in /tmp
     assert node.sent == [] and db.execute(text("SELECT count(*) FROM vt_calls WHERE tenant_key = :t"), {"t": t}).scalar_one() == 0
+
+
+def test_malwarebazaar_checked_before_virustotal(db, engine):
+    """6.5 C: MalwareBazaar runs before VirusTotal. A hit resolves the hash malicious without a VT
+    call (served_from=malwarebazaar) and links the incident; a miss falls through to VirusTotal."""
+    _, t = _new_tenant(db)
+    _settings(db, t, True)                        # VT enabled: a MBZ miss must fall through to VT
+    db.execute(text("INSERT INTO tenant_source_keys (tenant_key, source, enabled, sealed_key, key_fingerprint, key_last4, key_version) "
+                    "VALUES (:t, 'malwarebazaar', true, 'sealed-x', 'fp', 'last', 1)"), {"t": t})
+    db.commit()
+    mal_sha, unk_sha = "a" * 64, "b" * 64
+    node = FakeNode("n")
+    node.fim("mal", mal_sha, path="/tmp/evil")
+    node.fim("unk", unk_sha, path="/tmp/maybe")
+    inc_mal, inc_unk = _make_incident(db, t, agent_id="002"), _make_incident(db, t, agent_id="002")
+    for iid, aid in ((inc_mal, "mal"), (inc_unk, "unk")):
+        db.execute(incident_alerts.insert().values(incident_id=iid, tenant_key=t, node="n", alert_id=aid,
+                                                   alert_time=datetime.datetime.now(datetime.timezone.utc)))
+    db.commit()
+
+    def mbz_http(url, data, headers, timeout=20):
+        if mal_sha in data.decode():
+            return 200, json.dumps({"query_status": "ok", "data": [{"sha256_hash": mal_sha, "signature": "AgentTesla",
+                                    "tags": ["exe"], "first_seen": "2024-01-02 03:04:05"}]}).encode()
+        return 200, json.dumps({"query_status": "hash_not_found"}).encode()
+
+    def vt_http(url, headers, timeout=20):
+        assert mal_sha not in url, "a MalwareBazaar hit must short-circuit VirusTotal"
+        return 200, json.dumps({"data": {"attributes": {"last_analysis_stats": {"malicious": 0, "undetected": 70},
+                                "last_analysis_results": {}}}}).encode()
+
+    worker = vt.VTWorker(engine, [{"tenant_key": t, "nodes": [["n", "c"]]}], {t: "vtkey"}, lambda n, c: node,
+                         http=vt_http, hashlookup_http=hl_http(known=set()),
+                         source_key_loader=lambda tk, s: "MBZ-KEY" if (tk == t and s == "malwarebazaar") else None,
+                         mbz_http=mbz_http)
+    worker.step()
+
+    mal = db.execute(text("SELECT state, served_from, funnel_reason, mbz_checked FROM vt_requests "
+                          "WHERE tenant_key=:t AND alert_id='mal'"), {"t": t}).mappings().one()
+    assert mal["state"] == "resolved" and mal["served_from"] == "malwarebazaar" and mal["funnel_reason"] == "mbz_malicious"
+    unk = db.execute(text("SELECT served_from, funnel_reason, mbz_checked FROM vt_requests "
+                          "WHERE tenant_key=:t AND alert_id='unk'"), {"t": t}).mappings().one()
+    assert unk["mbz_checked"] and unk["funnel_reason"] == "mbz_unknown" and unk["served_from"] == "api"
+    # the incident for the malicious hash is annotated with a MalwareBazaar TI match
+    assert db.execute(text("SELECT count(*) FROM incident_ti WHERE tenant_key=:t AND 'malwarebazaar' = ANY(sources)"),
+                      {"t": t}).scalar_one() >= 1
+    # both verdicts cached; a second cycle makes no new MalwareBazaar call (cache hit)
+    assert db.execute(text("SELECT count(*) FROM source_verdicts WHERE tenant_key=:t AND source='malwarebazaar'"),
+                      {"t": t}).scalar_one() == 2
+    before = db.execute(text("SELECT count(*) FROM source_calls WHERE tenant_key=:t"), {"t": t}).scalar_one()
+    worker.step()
+    assert db.execute(text("SELECT count(*) FROM source_calls WHERE tenant_key=:t"), {"t": t}).scalar_one() == before

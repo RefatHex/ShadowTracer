@@ -318,27 +318,33 @@ def clickhouse_from_env(env=os.environ):
                                          database=env.get("CLICKHOUSE_DATABASE", "shadowtracer"))
 
 
-def db_vt_key_loader(engine, kek):
-    """6.5 B: a callable (tenant) -> the tenant's VirusTotal key, envelope-sealed in
-    tenant_source_keys and decrypted with the deployment KEK. Read per cycle so a rotation or
-    removal in the console takes effect without restarting the worker. A blob that fails to open
-    is logged and treated as no key (the tenant simply isn't resolved) - never a crash."""
+def db_source_key_loader(engine, kek):
+    """6.5 B/C: a callable (tenant, source) -> the tenant's key for that paid source, envelope-
+    sealed in tenant_source_keys and decrypted with the deployment KEK. Read per cycle so a
+    rotation or removal in the console takes effect without restarting the worker. A blob that
+    fails to open is logged and treated as no key (the source is simply skipped) - never a crash."""
     from . import keyvault
 
-    def loader(tenant):
+    def loader(tenant, source):
         with engine.begin() as conn:
             blob = conn.execute(text(
                 "SELECT sealed_key FROM tenant_source_keys "
-                "WHERE tenant_key = :t AND source = 'virustotal' AND sealed_key IS NOT NULL"),
-                {"t": tenant}).scalar()
+                "WHERE tenant_key = :t AND source = :s AND sealed_key IS NOT NULL"),
+                {"t": tenant, "s": source}).scalar()
         if not blob:
             return None
         try:
-            return keyvault.open_sealed(kek, tenant, "virustotal", blob)
+            return keyvault.open_sealed(kek, tenant, source, blob)
         except keyvault.KeyVaultError:
-            log.warning("could not open the VirusTotal key for tenant %s (KEK mismatch?)", tenant)
+            log.warning("could not open the %s key for tenant %s (KEK mismatch?)", source, tenant)
             return None
     return loader
+
+
+def db_vt_key_loader(engine, kek):
+    """6.5 B: the VirusTotal-only view of db_source_key_loader (callable (tenant) -> key)."""
+    source_loader = db_source_key_loader(engine, kek)
+    return lambda tenant: source_loader(tenant, "virustotal")
 
 
 def vt_worker_from_env(engine, env=os.environ):
@@ -355,13 +361,16 @@ def vt_worker_from_env(engine, env=os.environ):
     keys = ({t: env.get(var, "") for t, var in json.loads(env.get("TI_VT_KEYS", "{}")).items()}
             if allow_env else {})
     kek_raw = env.get("KEY_ENCRYPTION_KEY")
-    key_loader = db_vt_key_loader(engine, keyvault.load_kek(kek_raw)) if kek_raw else None
+    kek = keyvault.load_kek(kek_raw) if kek_raw else None
+    key_loader = db_vt_key_loader(engine, kek) if kek else None
+    source_key_loader = db_source_key_loader(engine, kek) if kek else None   # 6.5 C: MalwareBazaar etc.
     if not allow_env and not kek_raw:
         log.warning("VirusTotal worker has no key source: set KEY_ENCRYPTION_KEY for the DB path "
                     "(preferred), or TI_VT_ALLOW_ENV_KEYS=1 to use the legacy TI_VT_KEYS env path")
     return vt.VTWorker(engine, json.loads(env.get("TI_CLUSTERS", "[]")), {t: k for t, k in keys.items() if k},
                        safe_reload.DockerNode, ch=clickhouse_from_env(env), per_minute=int(env.get("VT_PER_MINUTE", vt.PUBLIC_PER_MINUTE)),
-                       per_day=int(env.get("VT_PER_DAY", vt.PUBLIC_PER_DAY)), key_loader=key_loader)
+                       per_day=int(env.get("VT_PER_DAY", vt.PUBLIC_PER_DAY)), key_loader=key_loader,
+                       source_key_loader=source_key_loader)
 
 
 def _vt_loop(engine, interval: float) -> None:

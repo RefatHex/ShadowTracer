@@ -27,7 +27,7 @@ from collections import Counter
 
 from sqlalchemy import text
 
-from . import hashlookup, matcher, paths, store
+from . import hashlookup, malwarebazaar, matcher, paths, store
 from .feeds import Observation
 
 log = logging.getLogger("ti-sync.vt")
@@ -42,6 +42,10 @@ TTL = {"malicious": dt.timedelta(days=30), "clean": dt.timedelta(days=7), "unkno
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 QUOTA_COOLDOWN = dt.timedelta(seconds=65)
 QUOTA_COOLDOWN_MAX = dt.timedelta(hours=6)
+# 6.5 C MalwareBazaar funnel stage (defaults match console/backend paid_sources SOURCES)
+MBZ_DEFAULT_BUDGET = 1000
+MBZ_DEFAULT_TTL_HOURS = 24
+MBZ_CONFIDENCE = 88                 # a confirmed malware sample is a high-confidence hit
 
 
 class VTError(Exception):
@@ -176,14 +180,19 @@ class VTWorker:
     keys: {tenant_key: api key}. ch: optional ClickHouse client for ti_matches."""
 
     def __init__(self, engine, clusters, keys, node_factory, ch=None, http=_http_get,
-                 per_minute=PUBLIC_PER_MINUTE, per_day=PUBLIC_PER_DAY, hashlookup_http=None, key_loader=None):
+                 per_minute=PUBLIC_PER_MINUTE, per_day=PUBLIC_PER_DAY, hashlookup_http=None, key_loader=None,
+                 source_key_loader=None, mbz_http=None):
         self.engine, self.keys, self.ch, self.http = engine, keys, ch, http
         self.per_minute, self.per_day = per_minute, per_day
         self.hashlookup_http = hashlookup_http      # None -> real CIRCL HTTP; tests inject
+        self.mbz_http = mbz_http                    # None -> real MalwareBazaar HTTP; tests inject
         # key_loader(tenant) -> the tenant's current VirusTotal key (6.5 B: envelope-sealed in
         # tenant_source_keys, decrypted per cycle so a rotation takes effect without a restart).
         # None -> fall back to the static `keys` dict (legacy env path, being retired).
         self.key_loader = key_loader
+        # source_key_loader(tenant, source) -> any paid source's current key (6.5 C, e.g.
+        # malwarebazaar). None -> that source is unavailable.
+        self.source_key_loader = source_key_loader
         self.nodes = {c["tenant_key"]: [node_factory(n, ctr) for n, ctr in c["nodes"]] for c in clusters}
         self.stats = Counter()
 
@@ -191,6 +200,9 @@ class VTWorker:
         if self.key_loader is not None:
             return self.key_loader(tenant) or self.keys.get(tenant)
         return self.keys.get(tenant)
+
+    def _source_key(self, tenant, source):
+        return self.source_key_loader(tenant, source) if self.source_key_loader is not None else None
 
     def settings(self, conn, tenant):
         r = conn.execute(text("SELECT vt_enabled, vt_daily_budget FROM ti_tenant_settings WHERE tenant_key = :t"),
@@ -367,28 +379,158 @@ class VTWorker:
                     conn.execute(text("UPDATE vt_requests SET delivered_at = :now WHERE id = :i"), {"now": now, "i": r["id"]})
 
     def _annotate(self, tenant, r, v, now) -> None:
-        """Tenant-private hash IOC (later sightings hit locally, by CDB and ti-matcher) and
-        the incident link for the FIM alert, exactly like a ti-matcher hit."""
-        conf = confidence(v)
+        self._annotate_hit(tenant, r, sha256=v["sha256"], source="virustotal", labels=list(v["labels"]),
+                           permalink=v["permalink"], confidence=confidence(v),
+                           first_seen=v["first_submission"], now=now)
+
+    def _annotate_hit(self, tenant, r, *, sha256, source, labels, permalink, confidence, first_seen, now) -> None:
+        """Tenant-private hash IOC (later sightings hit locally, by CDB and ti-matcher) and the
+        incident link for the FIM alert, exactly like a ti-matcher hit. Shared by the VirusTotal
+        and MalwareBazaar (6.5 C) funnel stages - only the source name/labels/confidence differ."""
         with self.engine.begin() as conn:
-            sid = store.ensure_source(conn, f"virustotal:{tenant}", "virustotal", tenant_key=tenant, trust=0.9)
-            obs = [Observation("sha256", v["sha256"], source_ref=v["permalink"], reference_url=v["permalink"],
-                               source_info=", ".join(v["labels"][:3]), source_confidence=conf / 90, tlp="amber",
-                               labels=list(v["labels"]), first_seen=v["first_submission"] or now, last_seen=now)]
+            sid = store.ensure_source(conn, f"{source}:{tenant}", source, tenant_key=tenant, trust=0.9)
+            obs = [Observation("sha256", sha256, source_ref=permalink, reference_url=permalink,
+                               source_info=", ".join(labels[:3]), source_confidence=confidence / 90, tlp="amber",
+                               labels=list(labels), first_seen=first_seen or now, last_seen=now)]
             store.apply_observations(conn, sid, tenant, obs, snapshot=False, now=now)
             ioc_id = conn.execute(text("SELECT id FROM iocs WHERE tenant_key = :t AND type = 'sha256' AND value = :v"),
-                                  {"t": tenant, "v": v["sha256"]}).scalar_one()
+                                  {"t": tenant, "v": sha256}).scalar_one()
             row = {"tenant_key": tenant, "node": r["node"], "alert_id": r["alert_id"],
                    "alert_time": r["alert_time"] or now, "rule_id": r["rule_id"] or "", "field": "syscheck.sha256_after",
-                   "observable_type": "sha256", "observable": v["sha256"], "ioc_id": ioc_id, "ioc_value": v["sha256"],
-                   "sources": ["virustotal"], "confidence": conf, "origin": "virustotal"}
+                   "observable_type": "sha256", "observable": sha256, "ioc_id": ioc_id, "ioc_value": sha256,
+                   "sources": [source], "confidence": confidence, "origin": source}
             matcher.write_pg(conn, [row])                    # incident_ti + link + incident ti_confidence
         if self.ch is not None:
             rows = matcher.ch_rows([row], now)
             self.ch.insert("ti_matches", rows, column_names=matcher.CH_COLUMNS)
 
+    # --- 6.5 C: MalwareBazaar funnel stage, before VirusTotal ------------------------------
+    def _mbz_config(self, conn, tenant):
+        r = conn.execute(text("SELECT enabled, daily_budget, cache_ttl_hours, cooldown_until FROM tenant_source_keys "
+                              "WHERE tenant_key = :t AND source = 'malwarebazaar'"), {"t": tenant}).mappings().first()
+        if not r or not r["enabled"]:
+            return None
+        return {"budget": r["daily_budget"] if r["daily_budget"] is not None else MBZ_DEFAULT_BUDGET,
+                "ttl": dt.timedelta(hours=r["cache_ttl_hours"] if r["cache_ttl_hours"] is not None else MBZ_DEFAULT_TTL_HOURS),
+                "cooldown": r["cooldown_until"]}
+
+    @staticmethod
+    def _source_call(conn, tenant, indicator, http_status, outcome, source="malwarebazaar"):
+        conn.execute(text("INSERT INTO source_calls (tenant_key, source, indicator, http_status, outcome) "
+                          "VALUES (:t, :s, :i, :st, :o)"),
+                     {"t": tenant, "s": source, "i": indicator, "st": http_status, "o": outcome})
+
+    @staticmethod
+    def _cache_verdict(conn, tenant, source, indicator, indicator_type, verdict, now, ttl):
+        data = {k: (v.isoformat() if isinstance(v, dt.datetime) else v) for k, v in verdict.items() if k != "status"}
+        conn.execute(text(
+            "INSERT INTO source_verdicts (tenant_key, source, indicator, indicator_type, status, data, fetched_at, expires_at) "
+            "VALUES (:t, :s, :i, :it, :st, CAST(:d AS jsonb), :now, :exp) "
+            "ON CONFLICT (tenant_key, source, indicator) DO UPDATE SET status = EXCLUDED.status, data = EXCLUDED.data, "
+            "fetched_at = EXCLUDED.fetched_at, expires_at = EXCLUDED.expires_at"),
+            {"t": tenant, "s": source, "i": indicator, "it": indicator_type, "st": verdict["status"],
+             "d": json.dumps(data), "now": now, "exp": now + ttl})
+
+    def malwarebazaar_layer(self, now=None) -> None:
+        """Before VirusTotal, check MalwareBazaar for each not-known-good pending hash. A hit is a
+        malicious verdict delivered without spending a VirusTotal call (served_from='malwarebazaar',
+        funnel_reason='mbz_malicious'); a miss sets mbz_checked so VirusTotal takes over
+        (funnel_reason='mbz_unknown'). Cached per the tenant's cache_ttl; budget and 429 cooldown
+        per (tenant, malwarebazaar)."""
+        now = now or dt.datetime.now(dt.timezone.utc)
+        http = self.mbz_http or malwarebazaar._http_post
+        for tenant in self.nodes:
+            with self.engine.begin() as conn:
+                cfg = self._mbz_config(conn, tenant)
+            if cfg is None:
+                continue
+            if cfg["cooldown"] and cfg["cooldown"] > now:
+                self.stats["mbz:cooldown"] += 1
+                continue
+            key = self._source_key(tenant, "malwarebazaar")
+            if not key:
+                continue
+            with self.engine.begin() as conn:
+                pending = [row[0].strip() for row in conn.execute(text(
+                    "SELECT DISTINCT sha256 FROM vt_requests WHERE tenant_key = :t AND state = 'pending' "
+                    "AND known_good = false AND mbz_checked = false ORDER BY sha256"), {"t": tenant})]
+            for sha in pending:
+                with self.engine.begin() as conn:
+                    cached = conn.execute(text(
+                        "SELECT status, data FROM source_verdicts WHERE tenant_key = :t AND source = 'malwarebazaar' "
+                        "AND indicator = :i AND expires_at > :now"), {"t": tenant, "i": sha, "now": now}).mappings().first()
+                if cached:
+                    verdict = {"status": cached["status"], **(cached["data"] or {})}
+                    self.stats["mbz:cache_hits"] += 1
+                else:
+                    with self.engine.begin() as conn:
+                        used = conn.execute(text(
+                            "SELECT count(*) FROM source_calls WHERE tenant_key = :t AND source = 'malwarebazaar' "
+                            "AND called_at >= date_trunc('day', :now)"), {"t": tenant, "now": now}).scalar_one()
+                    if used >= cfg["budget"]:
+                        self.stats["mbz:budget"] += 1
+                        break
+                    try:
+                        verdict = malwarebazaar.lookup(sha, key, now, http=http)
+                    except malwarebazaar.MBZQuotaExceeded:
+                        with self.engine.begin() as conn:
+                            conn.execute(text("UPDATE tenant_source_keys SET cooldown_until = :u "
+                                              "WHERE tenant_key = :t AND source = 'malwarebazaar'"),
+                                         {"u": now + QUOTA_COOLDOWN, "t": tenant})
+                            self._source_call(conn, tenant, sha, 429, "quota_exceeded")
+                        self.stats["mbz:429"] += 1
+                        break
+                    except malwarebazaar.MBZAuthError as exc:
+                        log.warning("MalwareBazaar auth failed for tenant %s: %s", tenant, exc)
+                        break
+                    except (malwarebazaar.MBZError, OSError, ValueError) as exc:
+                        with self.engine.begin() as conn:
+                            self._source_call(conn, tenant, sha, None, f"error: {str(exc)[:120]}")
+                        self.stats["mbz:error"] += 1
+                        continue
+                    with self.engine.begin() as conn:
+                        self._source_call(conn, tenant, sha, 200, verdict["status"])
+                        self._cache_verdict(conn, tenant, "malwarebazaar", sha, "sha256", verdict, now, cfg["ttl"])
+                    self.stats["mbz:api_malicious" if verdict["status"] == "malicious" else "mbz:api_unknown"] += 1
+                with self.engine.begin() as conn:
+                    conn.execute(text("UPDATE vt_requests SET mbz_checked = true "
+                                      "WHERE tenant_key = :t AND sha256 = :h AND state = 'pending'"),
+                                 {"t": tenant, "h": sha})
+                    if verdict["status"] == "malicious":
+                        conn.execute(text("UPDATE vt_requests SET funnel_reason = 'mbz_malicious' "
+                                          "WHERE tenant_key = :t AND sha256 = :h AND state = 'pending'"),
+                                     {"t": tenant, "h": sha})
+                        self._resolved(conn, tenant, sha, "malwarebazaar", now)
+                    else:
+                        conn.execute(text("UPDATE vt_requests SET funnel_reason = 'mbz_unknown' "
+                                          "WHERE tenant_key = :t AND sha256 = :h AND state = 'pending' "
+                                          "AND funnel_reason = 'not_known_good'"), {"t": tenant, "h": sha})
+                if verdict["status"] == "malicious":
+                    self._deliver_mbz(tenant, sha, verdict, now)
+
+    def _deliver_mbz(self, tenant, sha, verdict, now) -> None:
+        with self.engine.begin() as conn:
+            rows = conn.execute(text("SELECT * FROM vt_requests WHERE tenant_key = :t AND sha256 = :h "
+                                     "AND served_from = 'malwarebazaar' AND delivered_at IS NULL"),
+                                {"t": tenant, "h": sha}).mappings().all()
+        labels = ([verdict["signature"]] if verdict.get("signature") else []) + list(verdict.get("tags") or [])
+        first_seen = verdict.get("first_seen")
+        if isinstance(first_seen, str):
+            try:
+                first_seen = dt.datetime.fromisoformat(first_seen)
+            except ValueError:
+                first_seen = None
+        for r in rows:
+            if r["origin"] == "fim":
+                self._annotate_hit(tenant, r, sha256=sha, source="malwarebazaar", labels=labels or ["malware sample"],
+                                   permalink=verdict.get("permalink"), confidence=MBZ_CONFIDENCE, first_seen=first_seen, now=now)
+                self.stats["mbz:delivered_malicious"] += 1
+            with self.engine.begin() as conn:
+                conn.execute(text("UPDATE vt_requests SET delivered_at = :now WHERE id = :i"), {"now": now, "i": r["id"]})
+
     def step(self) -> None:
         self.collect()
-        self.free_layer()       # CIRCL known-good: free, default-on, before VirusTotal
+        self.free_layer()            # CIRCL known-good: free, default-on, before the paid sources
+        self.malwarebazaar_layer()   # 6.5 C: MalwareBazaar, checked before VirusTotal
         self.resolve()
         self.deliver()
