@@ -152,7 +152,19 @@ Each source's current terms were read before use (Phase 6.5 requirement). "Not l
 | **Yara-Rules/rules** (YARA) | Free default: local YARA-X scan rules | **GPL-2.0** (verified 2026-11-12): commercial use allowed; a distributed derivative must be GPL-2 with source - compatible, ShadowTracer is already GPLv2. Downloaded at runtime, not committed | rule name + author + tags on match | https://github.com/Yara-Rules/rules |
 | **YARA-X** engine | Free default: local scanning | Apache-2.0 / MIT (VirusTotal yara-x) | n/a (engine) | https://github.com/VirusTotal/yara-x |
 
-Paid/limited sources (Phase 6.5 B, tenant-managed keys, off by default): **VirusTotal**,
-**MalwareBazaar** (abuse.ch), **AbuseIPDB**, **GreyNoise** - each tenant supplies its own key under
-that provider's own terms; ShadowTracer makes no call to any of them with no key set. Their terms
-are the tenant's responsibility and are linked in `THREAT_INTEL.md`.
+Paid/limited sources (Phase 6.5 B/C, **tenant-managed keys, off by default**): each tenant supplies
+its **own** key and accepts that provider's terms; ShadowTracer ships no shared key and makes no call
+to any of them for a tenant with no key set, so the commercial-use obligation rests with the tenant,
+not the platform. Terms below checked 2026-11-12 (secondary sources where the provider's own terms
+page was not reachable; "not legal advice").
+
+| Source | Use in ShadowTracer | Terms (checked 2026-11-12) | Link |
+|---|---|---|---|
+| **VirusTotal** | Funnel verdict on a FIM hash (C) | Public API is non-commercial; commercial use needs a VT Enterprise/Premium licence. Tenant's own key + licence | https://www.virustotal.com/gui/ · https://docs.virustotal.com/ |
+| **MalwareBazaar** (abuse.ch) | Funnel stage **before** VT: hash → known-malware verdict (C) | Free **Auth-Key** from auth.abuse.ch for non-commercial; commercial use may need a Spamhaus-managed subscription. Tenant's own Auth-Key + licence | https://bazaar.abuse.ch/api/ · https://abuse.ch/terms-of-use/ |
+| **AbuseIPDB** | On-demand analyst IP reputation lookup (C) | Free plan **not** for commercial use; commercial needs a paid plan (Basic+). Free limit ~1,000 checks/day. Tenant's own key + plan | https://www.abuseipdb.com/legal · https://www.abuseipdb.com/api.html |
+| **GreyNoise** | On-demand analyst IP context lookup (C) | Community API free, rate-limited (business-email key ≈ 50 lookups/week); commercial use governed by the GreyNoise EULA / a separate Data Licence. Tenant's own key + licence | https://docs.greynoise.io/docs/using-the-greynoise-community-api · https://www.greynoise.io/terms |
+
+AbuseIPDB and GreyNoise are **analyst-initiated only** (a button on an IP in the incident view), never
+an automatic background worker, so their quota is spent only on a deliberate click (same per-tenant
+key/opt-in/budget/cache/audit as the other paid sources).
