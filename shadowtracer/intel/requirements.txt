@@ -4,3 +4,4 @@ pytest==9.1.1
 pymisp==2.5.34.4
 responses==0.26.3
 clickhouse-connect==1.9.0
+cryptography==41.0.7

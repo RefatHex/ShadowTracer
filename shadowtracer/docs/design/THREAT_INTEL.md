@@ -1578,7 +1578,32 @@ full set fits, no curated subset needed**.
 A3 depends on a Wazuh vulnerability-detector finding stream, which ShadowTracer does not yet ingest
 (no CVE field in `events`); that ingestion is a prerequisite and is tracked for A3.
 
-### B tenant-managed paid keys · C selective VirusTotal funnel · D throughput gate — planned
+### B — tenant-managed paid-source keys (in progress)
+
+A tenant supplies its own API key for a paid source (VirusTotal, MalwareBazaar, AbuseIPDB,
+GreyNoise). Keys are **envelope-encrypted** and stored **write-only**:
+
+- **Sealing (`app/secrets_crypto.py`).** A fresh 256-bit data key (DEK) encrypts the key with
+  AES-256-GCM; the DEK is wrapped with AES-256-GCM under the deployment KEK (`KEY_ENCRYPTION_KEY`,
+  never in the DB). Both layers bind `tenant_key|source` as AAD, so a sealed blob cannot be replayed
+  into another tenant's or source's row. `rewrap()` rotates the KEK by re-wrapping the small DEKs
+  without re-encrypting every secret.
+- **Storage (`tenant_source_keys`, migration `f3a7c9e1d2b4`).** One row per (tenant, source):
+  `sealed_key` (never returned to the console), `key_fingerprint`/`key_last4` (non-secret display),
+  `key_version`, per-tenant `daily_budget`/`cache_ttl_hours` overrides, `cooldown_until` (429),
+  `enabled` opt-in gated on a key being present.
+- **API (`/api/ti/paid-sources`, admin-only, audited).** GET returns status for all four sources
+  (metadata only); PUT sets/rotates a key and/or settings; POST `/{source}/remove` wipes it. The key
+  value is never logged or returned — audit records fingerprint/last4. Without a KEK the write is 503.
+- **Worker (`keyvault.py` + `sync.db_vt_key_loader`).** ti-sync opens the sealed VirusTotal key with
+  the KEK per cycle (a rotation/removal takes effect with no restart). A cross-compat test seals with
+  the console module and opens with the worker module so the STK1 format can't drift. The env path
+  (`VT_API_KEY`/`TI_VT_KEYS`) is the legacy fallback, used only for a tenant without a DB key.
+
+MalwareBazaar/AbuseIPDB/GreyNoise key storage + opt-in are in place; their lookup workers and the
+per-source cache/budget wiring are the next B steps.
+
+### C selective VirusTotal funnel · D throughput gate — planned
 
 The funnel queue (`vt_requests.known_good` / `funnel_reason`) and the free stage are the first two
 stages of the selective-VirusTotal funnel (C).

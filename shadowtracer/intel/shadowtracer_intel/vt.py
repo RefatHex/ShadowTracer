@@ -176,12 +176,21 @@ class VTWorker:
     keys: {tenant_key: api key}. ch: optional ClickHouse client for ti_matches."""
 
     def __init__(self, engine, clusters, keys, node_factory, ch=None, http=_http_get,
-                 per_minute=PUBLIC_PER_MINUTE, per_day=PUBLIC_PER_DAY, hashlookup_http=None):
+                 per_minute=PUBLIC_PER_MINUTE, per_day=PUBLIC_PER_DAY, hashlookup_http=None, key_loader=None):
         self.engine, self.keys, self.ch, self.http = engine, keys, ch, http
         self.per_minute, self.per_day = per_minute, per_day
         self.hashlookup_http = hashlookup_http      # None -> real CIRCL HTTP; tests inject
+        # key_loader(tenant) -> the tenant's current VirusTotal key (6.5 B: envelope-sealed in
+        # tenant_source_keys, decrypted per cycle so a rotation takes effect without a restart).
+        # None -> fall back to the static `keys` dict (legacy env path, being retired).
+        self.key_loader = key_loader
         self.nodes = {c["tenant_key"]: [node_factory(n, ctr) for n, ctr in c["nodes"]] for c in clusters}
         self.stats = Counter()
+
+    def _key(self, tenant):
+        if self.key_loader is not None:
+            return self.key_loader(tenant) or self.keys.get(tenant)
+        return self.keys.get(tenant)
 
     def settings(self, conn, tenant):
         r = conn.execute(text("SELECT vt_enabled, vt_daily_budget FROM ti_tenant_settings WHERE tenant_key = :t"),
@@ -287,7 +296,7 @@ class VTWorker:
                 pending = [r[0] for r in conn.execute(text(
                     "SELECT sha256 FROM vt_requests WHERE tenant_key = :t AND state = 'pending' "
                     f"AND {eligible} GROUP BY sha256 ORDER BY min(requested_at)"), {"t": tenant})]
-            key = self.keys.get(tenant)
+            key = self._key(tenant)
             for sha in pending:
                 with self.engine.begin() as conn:
                     if cached(conn, tenant, sha, now):

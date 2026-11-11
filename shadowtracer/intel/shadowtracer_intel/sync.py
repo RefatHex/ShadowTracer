@@ -318,15 +318,42 @@ def clickhouse_from_env(env=os.environ):
                                          database=env.get("CLICKHOUSE_DATABASE", "shadowtracer"))
 
 
+def db_vt_key_loader(engine, kek):
+    """6.5 B: a callable (tenant) -> the tenant's VirusTotal key, envelope-sealed in
+    tenant_source_keys and decrypted with the deployment KEK. Read per cycle so a rotation or
+    removal in the console takes effect without restarting the worker. A blob that fails to open
+    is logged and treated as no key (the tenant simply isn't resolved) - never a crash."""
+    from . import keyvault
+
+    def loader(tenant):
+        with engine.begin() as conn:
+            blob = conn.execute(text(
+                "SELECT sealed_key FROM tenant_source_keys "
+                "WHERE tenant_key = :t AND source = 'virustotal' AND sealed_key IS NOT NULL"),
+                {"t": tenant}).scalar()
+        if not blob:
+            return None
+        try:
+            return keyvault.open_sealed(kek, tenant, "virustotal", blob)
+        except keyvault.KeyVaultError:
+            log.warning("could not open the VirusTotal key for tenant %s (KEK mismatch?)", tenant)
+            return None
+    return loader
+
+
 def vt_worker_from_env(engine, env=os.environ):
-    """6.3: TI_VT_KEYS = {"<tenant_key>": "<env var holding that tenant's VirusTotal key>"};
-    VT_PER_MINUTE / VT_PER_DAY: the key's limits (default: the public API's 4 and 500).
-    Opt-in itself is ti_tenant_settings.vt_enabled (console, admin-only, audited)."""
-    from . import vt
+    """VirusTotal worker. Keys come from the console (tenant_source_keys, envelope-sealed) when
+    KEY_ENCRYPTION_KEY is set - the preferred path (6.5 B). TI_VT_KEYS (an env var per tenant) is
+    the legacy fallback, used only for tenants without a DB key, and is being retired. Opt-in is
+    ti_tenant_settings.vt_enabled (console, admin-only, audited); VT_PER_MINUTE / VT_PER_DAY are
+    the key's limits (default: the public API's 4 and 500)."""
+    from . import keyvault, vt
     keys = {t: env.get(var, "") for t, var in json.loads(env.get("TI_VT_KEYS", "{}")).items()}
+    kek_raw = env.get("KEY_ENCRYPTION_KEY")
+    key_loader = db_vt_key_loader(engine, keyvault.load_kek(kek_raw)) if kek_raw else None
     return vt.VTWorker(engine, json.loads(env.get("TI_CLUSTERS", "[]")), {t: k for t, k in keys.items() if k},
                        safe_reload.DockerNode, ch=clickhouse_from_env(env), per_minute=int(env.get("VT_PER_MINUTE", vt.PUBLIC_PER_MINUTE)),
-                       per_day=int(env.get("VT_PER_DAY", vt.PUBLIC_PER_DAY)))
+                       per_day=int(env.get("VT_PER_DAY", vt.PUBLIC_PER_DAY)), key_loader=key_loader)
 
 
 def _vt_loop(engine, interval: float) -> None:

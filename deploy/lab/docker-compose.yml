@@ -41,6 +41,10 @@ x-agent-env: &agent-env
 x-console-backend-env: &console-backend-env
   JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in deploy/lab/.env}
   APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in deploy/lab/.env}
+  # 6.5 B: KEK that seals tenant-managed paid-source API keys (tenant_source_keys).
+  # Optional - unset disables paid-key management (its endpoints return 503). Must be the
+  # SAME value here and on ti-sync, which opens the sealed keys to call VirusTotal.
+  KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY:-}
   POSTGRES_HOST: postgres
   POSTGRES_DB: ${POSTGRES_DB:-shadowtracer}
   CLICKHOUSE_HOST: ch-clickhouse-1
@@ -879,9 +883,12 @@ services:
       TI_FEED_CIRCL_OSINT: "1"
       # A tenant's own MISP server: none in the lab (no MISP container, memory).
       TI_MISP_SERVERS: ${TI_MISP_SERVERS:-[]}
-      # 6.3 VirusTotal: each tenant's key comes from the env var named here (customer-
-      # supplied in the product; the lab's free public key for both). Opt-in is per tenant
-      # in Postgres (PUT /api/ti/settings, admin-only, audited), default off.
+      # 6.5 B: a tenant's VirusTotal key is stored envelope-sealed in Postgres
+      # (tenant_source_keys, set via the console, admin-only, audited) and opened here with
+      # KEY_ENCRYPTION_KEY - the preferred path. VT_API_KEY / TI_VT_KEYS below is the legacy
+      # env fallback, used only for a tenant without a DB key (being retired). Opt-in is per
+      # tenant in Postgres (PUT /api/ti/settings, admin-only, audited), default off.
+      KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY:-}
       VT_API_KEY: ${VT_API_KEY:-}
       TI_VT_KEYS: >-
         {"${TENANT_KEY}": "VT_API_KEY", "${TEST_TENANT_KEY}": "VT_API_KEY"}
