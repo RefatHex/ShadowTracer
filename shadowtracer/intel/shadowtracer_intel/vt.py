@@ -626,6 +626,9 @@ class VTWorker:
                     "AND ia.alert_id=r.alert_id LEFT JOIN incidents i ON i.id=ia.incident_id "
                     "WHERE r.tenant_key=:t AND r.sha256 = ANY(:shas) AND r.state='pending' AND r.origin='fim' GROUP BY r.sha256"),
                     {"t": tenant, "shas": rest}).mappings().all()
+            # compute every hash's decision in Python first, then write them in ONE transaction
+            # (a per-hash commit is a per-hash fsync - the measured funnel bottleneck).
+            no_signal, scored = [], []
             for row in sigrows:
                 sha = row["sha256"].strip()
                 signals = []
@@ -641,19 +644,22 @@ class VTWorker:
                     signals.append("rare_pattern")
                 if any(p and _HIGH_RISK_RE.match(p) for p in (row["paths"] or [])):
                     signals.append("high_risk_path")
-                with self.engine.begin() as conn:
-                    if not signals:
-                        conn.execute(text("UPDATE vt_requests SET state='resolved', resolved_at=:now, served_from='skipped', "
-                                          "funnel_reason='skipped_no_signal', prioritised=true "
-                                          "WHERE tenant_key=:t AND sha256=:s AND state='pending' AND origin='fim'"),
-                                     {"now": now, "t": tenant, "s": sha})
-                        self.stats["funnel:skipped_no_signal"] += 1
-                    else:
-                        score = int(row["sev"] or 0) + sum(SIGNAL_WEIGHTS[s] for s in signals)
-                        conn.execute(text("UPDATE vt_requests SET priority_score=:sc, signals=:sig, prioritised=true "
-                                          "WHERE tenant_key=:t AND sha256=:s AND state='pending' AND origin='fim'"),
-                                     {"sc": score, "sig": signals, "t": tenant, "s": sha})
-                        self.stats["funnel:sent_to_vt"] += 1
+                if signals:
+                    scored.append((sha, int(row["sev"] or 0) + sum(SIGNAL_WEIGHTS[s] for s in signals), signals))
+                else:
+                    no_signal.append(sha)
+            with self.engine.begin() as conn:
+                if no_signal:
+                    conn.execute(text("UPDATE vt_requests SET state='resolved', resolved_at=:now, served_from='skipped', "
+                                      "funnel_reason='skipped_no_signal', prioritised=true "
+                                      "WHERE tenant_key=:t AND sha256 = ANY(:shas) AND state='pending' AND origin='fim'"),
+                                 {"now": now, "t": tenant, "shas": no_signal})
+                for sha, score, sig in scored:
+                    conn.execute(text("UPDATE vt_requests SET priority_score=:sc, signals=:sig, prioritised=true "
+                                      "WHERE tenant_key=:t AND sha256=:s AND state='pending' AND origin='fim'"),
+                                 {"sc": score, "sig": sig, "t": tenant, "s": sha})
+            self.stats["funnel:skipped_no_signal"] += len(no_signal)
+            self.stats["funnel:sent_to_vt"] += len(scored)
 
     def funnel_stats(self, tenant) -> dict:
         """The funnel's per-tenant distribution (THREAT_INTEL.md §10 C): sent_to_vt should be a

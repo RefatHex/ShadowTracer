@@ -1347,3 +1347,41 @@ Cross-device activity is still grouped by campaigns. `incidents.agent_id` stays 
 | lock-wait samples | 218 per 300 s | 36 per 600 s | — |
 
 0 dead letters, 0 restarts, ti-matcher lag ≤468 throughout. **500/s end to end holds again.**
+
+## 18. Phase 6.5 throughput gate (2026-11-12)
+
+Does Phase 6.5 (threat-intel funnel, YARA active-response, KEV/EPSS enrichment) cost the hot path
+anything? All of 6.5 runs **off** the writer/correlator path (ti-sync reads spools + ClickHouse +
+Postgres; the YARA scan runs on the agent via execd; KEV/EPSS is a ti-sync pass), so the gate is: at
+500/s end to end with every 6.5 component running, is writer/correlator within the §17 baseline?
+
+**500/s e2e, 180 s, all 6.5 components up** (`../load/e2e_step.sh 500 180 d65hotpath`):
+
+| | §17 baseline | 6.5 running |
+|---|---|---|
+| rate sustained | 500/s | **500/s, 0 drops** |
+| writer latency p50/p95/p99 | 1.1 / 2.0 / 2.5 s | **1.27 / 2.02 / 2.09 s** |
+| correlator latency p50/p95/p99 | 1.3 / 2.4 / 2.7 s | **0.74 / 1.29 / 1.44 s** |
+| writer / correlator lag | flat | **flat (≤762)** |
+| dead letters / errors / restarts | 0 | **0 / 0 / 0** |
+
+ti-sync CPU stayed 0-13% throughout. Writer/correlator latencies are within the baseline
+(correlator better; writer p95/p99 within, p50 +15% inside the lab's disk-I/O noise, backlog T13/T14).
+So 6.5 adds no measurable hot-path cost. (Observed separately: ti-matcher was in a restart loop,
+restarts=29 - unrelated to the hot path, flagged for follow-up.)
+
+**Real FIM burst -> funnel** (256 real file changes on lab agents, FIM 554 -> custom-shadowtracer
+-virustotal integration -> spool -> ti-sync, test tenant, VirusTotal enabled):
+
+- funnel: seen **256** -> known_good 14, cached 1, skipped_common 0, **skipped_no_signal 200**,
+  mbz_malicious 0, **sent_to_vt 41**. So **of 256 file changes, 41 (16%) reached VirusTotal**; the
+  free layer + signal gate filtered 215 (84%) for free.
+- VT worker lag: the 41 gated hashes queue for VirusTotal (ordered by priority_score); none sent in
+  this run (no VT key set for the tenant), so lag = 41 pending, bounded.
+- **decision time: 0.43 ms/hash** (collect+free_layer+mbz+prioritise+resolve over 256 hashes, after
+  the fix below). free_layer's CIRCL bulk call is ~2.6 s/batch (network, amortised over the batch).
+
+**Fix found by this gate**: `prioritise()` opened one Postgres transaction per hash - 256 fsync
+commits on the disk-bound lab = 25.5 s for the stage (112 ms/hash). Batched into one transaction
+(skipped hashes in a single `sha = ANY(...)` update): **prioritise 25.5 s -> 0.079 s, 112 -> 0.43
+ms/hash**.
