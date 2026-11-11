@@ -47,6 +47,7 @@ export interface IncidentSummary {
   known_good_source?: string | null
   known_good_safe?: boolean
   known_good_note?: string | null
+  tor_exit_ips?: string[]
 }
 
 export interface WarmupStatus {

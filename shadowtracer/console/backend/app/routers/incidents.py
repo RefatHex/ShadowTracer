@@ -57,6 +57,7 @@ class IncidentSummary(BaseModel):
     known_good_source: str | None = None
     known_good_safe: bool = False
     known_good_note: str | None = None
+    tor_exit_ips: list[str] = []
 
 
 class TiSource(BaseModel):

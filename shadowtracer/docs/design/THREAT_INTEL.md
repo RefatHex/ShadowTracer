@@ -1503,7 +1503,17 @@ VirusTotal** (`vt.VTWorker.free_layer`, `shadowtracer_intel/hashlookup.py`):
   files stop dominating the queue and burning VT budget. Attribution (CC-BY) travels with the
   verdict. Lab check: a known-good file → `known_good`, priority 5→2, 0 TI alerts, 0 VT calls.
 
-### A2 Local YARA-X scan · A3 CISA KEV + EPSS vuln prioritisation · A4 Tor exit context tag — planned
+### A4 — Tor exit node context tag (DONE)
+
+ti-sync refreshes the Tor Project bulk exit list (CC0, `check.torproject.org/torbulkexitlist`,
+`tor_exit.refresh`) into `tor_exit_nodes` (hourly; whole-feed rejection if implausibly small; nodes
+absent 3 days are dropped). A tagging pass (`tor_exit.tag_incidents`, each ti-sync cycle, bounded to
+a 7-day window) sets `incidents.tor_exit_ips` = the incident's source IPs that are Tor exit nodes.
+This is **context only**: shown as "Tor exit node: <ip>", low severity, **never an alert on its own
+and it does not change priority**. Default on; disable with `TI_TOR_EXIT=0`. Lab: 1252 exit nodes
+loaded; an incident with a Tor exit source IP tagged, priority unchanged.
+
+### A2 Local YARA-X scan · A3 CISA KEV + EPSS vuln prioritisation — planned
 
 A3 depends on a Wazuh vulnerability-detector finding stream, which ShadowTracer does not yet ingest
 (no CVE field in `events`); that ingestion is a prerequisite and is tracked for A3.

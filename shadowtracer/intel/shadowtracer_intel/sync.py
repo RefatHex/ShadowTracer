@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import create_engine, text
 
-from . import feeds, listgen, safe_reload, store
+from . import feeds, listgen, safe_reload, store, tor_exit
 
 log = logging.getLogger("ti-sync")
 WARNINGLIST_REFRESH = dt.timedelta(days=1)
@@ -267,8 +267,39 @@ def run_retro(engine, env=os.environ) -> list:
     return out
 
 
+TOR_REFRESH = dt.timedelta(hours=1)
+
+
+def refresh_tor_exits(engine, env=os.environ, now=None) -> dict:
+    """Phase 6.5 A4: keep tor_exit_nodes current (refetch when stale) and tag recent incidents.
+    Context only - never an alert. Default on; disable with TI_TOR_EXIT=0."""
+    if env.get("TI_TOR_EXIT", "1") == "0":
+        return {"source": "tor-exit-list", "skipped": "disabled"}
+    now = now or dt.datetime.now(dt.timezone.utc)
+    with engine.connect() as conn:
+        last = conn.execute(text("SELECT max(last_seen) FROM tor_exit_nodes")).scalar()
+    counts, err = {}, None
+    if not (last and now - last < TOR_REFRESH):
+        try:
+            ips = tor_exit.parse(feeds.fetch(tor_exit.URL, timeout=60))     # HTTP outside any txn
+            if len(ips) < 50:
+                raise feeds.FeedError(f"tor exit list implausibly small ({len(ips)})")   # whole-feed rejection
+        except (feeds.FeedError, OSError) as exc:
+            err = str(exc)[:500]
+            ips = None
+        if ips is not None:
+            with engine.begin() as conn:
+                counts = tor_exit.refresh(conn, ips, now=now)
+    with engine.begin() as conn:
+        tagged = tor_exit.tag_incidents(conn, now=now)
+    out = {"source": "tor-exit-list", "tagged": tagged, **counts}
+    if err:
+        out["error"] = err
+    return out
+
+
 def run_once(engine, env=os.environ) -> list:
-    report = [refresh_warninglists(engine)]
+    report = [refresh_warninglists(engine), refresh_tor_exits(engine, env)]
     report += [sync_source(engine, f) for f in sources_from_env(env)]
     report += sync_misp_servers(engine, env)
     report += [deploy(engine, c) for c in json.loads(env.get("TI_CLUSTERS", "[]"))]

@@ -122,6 +122,8 @@ incidents = Table(
     # non-dual-use name; known_good_note is the label shown ("known file" / "... in unusual location").
     Column("known_good_safe", Boolean, nullable=False, server_default=text("false")),
     Column("known_good_note", Text, nullable=True),
+    # Phase 6.5 A4: source IPs that are Tor exit nodes - context only, never an alert, no priority change.
+    Column("tor_exit_ips", ARRAY(String), nullable=False, server_default="{}"),
     # Phase 7.0: written only by ml-enricher (ingest migration d8a2e6f1c3b7); scores never trigger actions.
     Column("ml_score", REAL, nullable=True),
     Column("ml_reasons", JSONB, nullable=True),

@@ -84,6 +84,11 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
             : ' — priority kept: a known file here is still worth a look.'}
         </p>
       )}
+      {incident.tor_exit_ips && incident.tor_exit_ips.length > 0 && (
+        <p className="mb-4 rounded bg-slate-100 dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-300">
+          Tor exit node: {incident.tor_exit_ips.join(', ')} — context only, not an alert.
+        </p>
+      )}
       {incident.rare_pattern_flag && (
         <p className="mb-4 rounded bg-purple-50 dark:bg-purple-900/30 px-3 py-2 text-sm text-purple-800 dark:text-purple-300">
           {/* rare_pattern_reason is already the complete, context-aware
