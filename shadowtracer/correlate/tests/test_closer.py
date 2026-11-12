@@ -9,9 +9,17 @@ from conftest import TEST_CLICKHOUSE_DB, insert_tenant
 from shadowtracer_correlate.closer import close_eligible_incidents
 from shadowtracer_correlate.closer_loop import run as run_closer_loop
 from shadowtracer_correlate.metrics import Metrics
-from shadowtracer_correlate.models import fingerprints, incidents
+from shadowtracer_correlate.models import fingerprints, incidents, tenant_alert_settings
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 INTERNAL_RANGES = ["10.0.0.0/8"]
+
+
+def _set_demo_fast_close(db, tenant, seconds):
+    db.execute(pg_insert(tenant_alert_settings)
+               .values(tenant_key=tenant, demo_fast_close_seconds=seconds)
+               .on_conflict_do_update(index_elements=["tenant_key"], set_={"demo_fast_close_seconds": seconds}))
+    db.commit()
 
 
 def _insert_quiet_incident(db, tenant, agent, last_seen_ago_seconds, rule_groups=None, alert_count=10):
@@ -65,6 +73,35 @@ def test_incident_within_session_gap_is_not_closed(db, ch_client):
     assert incident_id not in closed
     row = db.execute(select(incidents).where(incidents.c.id == incident_id)).mappings().one()
     assert row["state"] == "open"
+
+
+def test_demo_fast_close_overrides_global_gap_per_tenant(db, ch_client):
+    # 90s quiet: untouched under the global 600s gap, but closed once this tenant's
+    # demo_fast_close_seconds is 60. Phase 7.8.
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    incident_id = _insert_quiet_incident(db, tenant, "agent-demo", last_seen_ago_seconds=90)
+
+    closed = close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
+    assert incident_id not in closed  # global gap still applies -> stays open
+
+    _set_demo_fast_close(db, tenant, 60)
+    closed = close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
+    assert incident_id in closed      # demo gap (60s) < 90s quiet -> closes
+    row = db.execute(select(incidents).where(incidents.c.id == incident_id)).mappings().one()
+    assert row["state"] == "closed"
+
+
+def test_demo_fast_close_does_not_leak_across_tenants(db, ch_client):
+    # tenant A has a 60s demo gap; tenant B does not. A 90s-quiet incident on B must stay open.
+    a, b = f"t-{uuid.uuid4().hex[:8]}", f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, a); insert_tenant(db, b)
+    _set_demo_fast_close(db, a, 60)
+    inc_b = _insert_quiet_incident(db, b, "agent-b", last_seen_ago_seconds=90)
+
+    closed = close_eligible_incidents(db, ch_client, TEST_CLICKHOUSE_DB, session_gap_seconds=600, internal_ranges=INTERNAL_RANGES)
+    assert inc_b not in closed
+    assert db.execute(select(incidents.c.state).where(incidents.c.id == inc_b)).scalar_one() == "open"
 
 
 def test_same_attack_two_source_ips_two_incidents_one_fingerprint(db, ch_client):

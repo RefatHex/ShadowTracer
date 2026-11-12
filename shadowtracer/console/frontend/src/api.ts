@@ -343,6 +343,39 @@ export interface CveRow {
   last_seen: string
 }
 
+// Phase 7.8 demo: Live view.
+export interface LiveStage { name: string; value: number | null }
+export interface LiveAlert { time: number; agent_name: string; rule_id: string; rule_level: number; rule_description: string; message: string }
+export interface LiveIncident { id: number; agent_id: string; alert_count: number; max_level: number; state: string; priority: number | null; last_seen: string | null }
+export interface LiveHit { time: number; agent_name: string; kind: string; label: string; rule_id: string }
+export interface LiveOverview {
+  tenant: string
+  stages: LiveStage[]
+  events_total: number
+  events_last_min: number
+  incidents_open: number
+  incidents_total: number
+  incidents_last_min: number
+  recent_alerts: LiveAlert[]
+  recent_incidents: LiveIncident[]
+  hits: LiveHit[]
+  demo: { fast_close_seconds: number | null }
+  as_of: number
+}
+
+export async function fetchLiveOverview(accessToken: string): Promise<LiveOverview> {
+  const resp = await fetch(`${API_BASE}/api/live/overview`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<LiveOverview>(resp)
+}
+
+export async function setDemoFastClose(accessToken: string, seconds: number | null): Promise<{ fast_close_seconds: number | null }> {
+  const resp = await fetch(`${API_BASE}/api/live/demo-settings`, {
+    method: 'PUT', headers: { ...authHeaders(accessToken), 'Content-Type': 'application/json' },
+    credentials: 'include', body: JSON.stringify({ fast_close_seconds: seconds }),
+  })
+  return handle<{ fast_close_seconds: number | null }>(resp)
+}
+
 export async function fetchVulnHosts(accessToken: string): Promise<HostVuln[]> {
   const resp = await fetch(`${API_BASE}/api/vulnerabilities`, {
     headers: authHeaders(accessToken), credentials: 'include',

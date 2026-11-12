@@ -25,13 +25,13 @@ ClickHouse row at all, since a closed incident is never reconsidered.
 
 import datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from .campaigns import link_campaign
 from .fingerprint import RULESET_VERSION, compute_fingerprint
-from .models import agent_role_tags, fingerprints, incidents
+from .models import agent_role_tags, fingerprints, incidents, tenant_alert_settings
 from .rarity import evaluate_rare_pattern
 
 
@@ -43,11 +43,20 @@ def close_eligible_incidents(
     internal_ranges: list[str],
 ) -> list[int]:
     """Returns the ids this call actually closed (not ones another
-    replica got to first, and not ones a fresh alert kept open)."""
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=session_gap_seconds)
+    replica got to first, and not ones a fresh alert kept open).
 
+    Phase 7.8: the close window is per-tenant - tenant_alert_settings.demo_fast_close_seconds
+    overrides the global session_gap_seconds when set (a demo knob; NULL = off = global gap)."""
+    # Per-tenant cutoff computed server-side: last_seen < now() - (demo gap or the global gap).
+    tenant_gap = func.coalesce(tenant_alert_settings.c.demo_fast_close_seconds, session_gap_seconds)
     candidate_ids = db.execute(
-        select(incidents.c.id).where(incidents.c.state == "open", incidents.c.last_seen < cutoff)
+        select(incidents.c.id)
+        .select_from(incidents.outerjoin(
+            tenant_alert_settings, tenant_alert_settings.c.tenant_key == incidents.c.tenant_key))
+        .where(
+            incidents.c.state == "open",
+            incidents.c.last_seen < func.now() - func.make_interval(0, 0, 0, 0, 0, 0, tenant_gap),
+        )
     ).scalars().all()
     # The SELECT above auto-begins a transaction on this Session (SQLAlchemy
     # 2.0 default) - close it out before the per-incident loop below opens
@@ -65,7 +74,15 @@ def close_eligible_incidents(
             row = db.execute(
                 select(incidents).where(incidents.c.id == incident_id).with_for_update()
             ).mappings().first()
-            if row is None or row["state"] != "open" or row["last_seen"] >= cutoff:
+            # Re-check under the row lock with THIS tenant's effective gap (demo override or global):
+            # a fresh alert may have extended last_seen past the cutoff since the candidate scan.
+            gap = db.execute(
+                select(func.coalesce(tenant_alert_settings.c.demo_fast_close_seconds, session_gap_seconds))
+                .where(tenant_alert_settings.c.tenant_key == row["tenant_key"])
+            ).scalar() if row is not None else None
+            row_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+                seconds=gap if gap is not None else session_gap_seconds)
+            if row is None or row["state"] != "open" or row["last_seen"] >= row_cutoff:
                 continue  # closed already, or a fresh alert extended it since the scan
 
             role_row = db.execute(

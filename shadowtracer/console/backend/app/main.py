@@ -14,6 +14,7 @@ from .routers import health as health_router
 from .routers import graph as graph_router
 from .routers import incidents as incidents_router
 from .routers import ip_lookups as ip_lookups_router
+from .routers import live as live_router
 from .routers import paid_sources as paid_sources_router
 from .routers import vulnerabilities as vulnerabilities_router
 from .routers import ti as ti_router
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
     app.include_router(agents_router.router)
     app.include_router(attack_coverage_router.router)
     app.include_router(vulnerabilities_router.router)
+    app.include_router(live_router.router)
 
     return app
 

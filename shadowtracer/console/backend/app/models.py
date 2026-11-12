@@ -198,6 +198,8 @@ tenant_alert_settings = Table(
     Column("rare_alert_warmup_days", Integer, nullable=False, server_default="7"),
     Column("rare_alert_warmup_min_incidents", Integer, nullable=False, server_default="30"),
     Column("rare_alert_prior_occurrence_threshold", Integer, nullable=False, server_default="0"),
+    # Phase 7.8: demo-only per-tenant close window (NULL = off, use the global gap).
+    Column("demo_fast_close_seconds", Integer, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )

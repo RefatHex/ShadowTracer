@@ -1,0 +1,4 @@
+# Phase 7.8 demo runtime state (per-run, machine-local - never committed)
+.demo_run_id
+.demo_warmup_pid
+.demo_warmup.log

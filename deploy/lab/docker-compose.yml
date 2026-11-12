@@ -56,6 +56,9 @@ x-console-backend-env: &console-backend-env
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
   CLICKHOUSE_DATABASE: shadowtracer
+  # Phase 7.8 demo: the Live view reads the TEST tenant's shipper counters for the
+  # upstream pipeline stages (best-effort; the authoritative counts come from the stores).
+  LIVE_SHIPPER_METRICS_URL: http://shipper-worker-test:9101/
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   KAFKA_WRITER_GROUP: shadowtracer-writer
   # Phase 5.6 Item 1: Describe-only credential (no topic Read/Write) -
@@ -1322,6 +1325,25 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.37
+
+  # Phase 7.8 recorded-demo attacker box. Only started under the "demo" profile
+  # (`docker compose --profile demo up -d demo-attacker`); never part of a normal
+  # bring-up. Holds an SSH client; the brute-force loop lives in deploy/demo/
+  # demo-scenario.sh. Targets the TEST tenant's agent (agent-ubuntu-1) only.
+  demo-attacker:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/attacker.Dockerfile
+    image: shadowtracer-lab/demo-attacker:local
+    hostname: demo-attacker
+    profiles: ["demo"]
+    restart: unless-stopped
+    mem_limit: 32m
+    memswap_limit: 32m
+    labels:
+      org.shadowtracer.role: "demo-attacker"
+    networks:
+      - lab
 
 networks:
   lab:

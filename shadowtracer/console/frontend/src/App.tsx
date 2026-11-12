@@ -11,11 +11,13 @@ import { IncidentsPage } from './IncidentsPage'
 import { IocBrowserPage } from './IocBrowserPage'
 import { TiSettingsPage } from './TiSettingsPage'
 import { VulnerabilitiesPage } from './VulnerabilitiesPage'
+import { LiveViewPage } from './LiveViewPage'
 import { LoginPage } from './LoginPage'
 
 // A handful of screens - deliberately no router library for this: one
 // piece of view state plus whatever id/key the current screen needs.
 type View =
+  | { name: 'live' }
   | { name: 'alerts' }
   | { name: 'incidents' }
   | { name: 'incident'; id: number }
@@ -30,6 +32,7 @@ type View =
 function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => void }) {
   const { logout } = useAuth()
   const tabs: { label: string; view: View }[] = [
+    { label: 'Live', view: { name: 'live' } },
     { label: 'Alerts', view: { name: 'alerts' } },
     { label: 'Incidents', view: { name: 'incidents' } },
     { label: 'Attack library', view: { name: 'fingerprints' } },
@@ -98,6 +101,7 @@ function viewFromHash(): View {
   if (incident) return { name: 'incident', id: Number(incident[1]) }
   if (h === '#/iocs') return { name: 'iocs' }
   if (h === '#/ti-settings') return { name: 'ti-settings' }
+  if (h === '#/live') return { name: 'live' }
   return { name: 'alerts' }
 }
 
@@ -119,6 +123,7 @@ function AppContent() {
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       <NavBar view={view} onNavigate={setView} />
+      {view.name === 'live' && <LiveViewPage />}
       {view.name === 'alerts' && <AlertsPage />}
       {view.name === 'incidents' && <IncidentsPage onOpen={(id) => setView({ name: 'incident', id })} />}
       {view.name === 'incident' && (
