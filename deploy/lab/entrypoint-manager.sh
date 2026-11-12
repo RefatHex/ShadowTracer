@@ -147,6 +147,32 @@ if [ -n "${LOAD_TEST_SYSLOG_TCP_PORT:-}" ] && ! grep -q "<port>${LOAD_TEST_SYSLO
 EOF
 fi
 
+# Phase 7.7: point the vulnerability-detector's indexer-connector at the
+# ShadowTracer indexer shim (VULN_SHIM_HOST, test manager only). The shim speaks
+# plain HTTP with basic auth on the isolated lab network, so rewrite <indexer> to
+# that host and drop the <ssl> block (the stock config's cert paths,
+# /etc/filebeat/certs/*, don't exist here anyway). Idempotent: skipped once the
+# shim host is already present. Without a reachable indexer the scanner still runs
+# and just queues its CVE state ("No available server"); with the shim it flushes.
+if [ -n "${VULN_SHIM_HOST:-}" ] && ! grep -q "<host>http://${VULN_SHIM_HOST}</host>" "$OSSEC_CONF"; then
+    new_indexer="  <indexer>
+    <enabled>yes</enabled>
+    <hosts>
+      <host>http://${VULN_SHIM_HOST}</host>
+    </hosts>
+  </indexer>"
+    if grep -q "<indexer>" "$OSSEC_CONF"; then
+        awk -v repl="$new_indexer" '
+          /<indexer>/ {print repl; skip=1; next}
+          skip && /<\/indexer>/ {skip=0; next}
+          skip {next}
+          {print}
+        ' "$OSSEC_CONF" > "${OSSEC_CONF}.tmp" && mv "${OSSEC_CONF}.tmp" "$OSSEC_CONF"
+    else
+        printf '<ossec_config>\n%s\n</ossec_config>\n' "$new_indexer" >> "$OSSEC_CONF"
+    fi
+fi
+
 # Step 3 item 14 (data volume) temporarily flipped <logall>/<logall_json> on
 # here to measure the archives.json-to-alerts.json ratio under real agent
 # activity - that measurement is done (see PHASE1_FINDINGS.md) and the raw

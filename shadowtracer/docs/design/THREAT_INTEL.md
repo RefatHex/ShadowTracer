@@ -1636,15 +1636,33 @@ CVEs actually seen. A KEV CVE is actively exploited, so it floors the (generated
 at 13 (migration `c6f1a3b5d7e9`). The console shows a CVE / KEV / EPSS badge on the incident. Lab:
 1,779 KEV loaded, **3,126 incidents tagged with a CVE, 1 in KEV**.
 
+### A5 — per-host CVE inventory via the indexer shim (DONE, Phase 7.7)
+
+Resolves D22. In 4.14.8 the vulnerability-detector writes the full per-host CVE inventory **only** to
+the Wazuh indexer's `wazuh-states-vulnerabilities-<cluster>` index (NDJSON `_bulk`); only real-time
+dbsync deltas also alert (`eventPackageAlertDetailsBuilder.hpp:71`), so the complete list is never in
+`alerts.json`. Rather than run OpenSearch, ShadowTracer runs a tiny **indexer shim**
+(`shadowtracer_ingest/vulnshim.py`, stdlib `http.server`, ~26 MiB) that answers the exact OpenSearch
+subset the indexer-connector calls — `/_cat/health`, template/index bootstrap, `/_bulk`,
+`/_search` scroll, `/_delete_by_query` — and upserts each ECS vuln doc into ClickHouse
+`vulnerability_states` (migration `0008`, `ReplacingMergeTree(last_seen, is_deleted)` keyed on
+`(tenant_id, doc_id)`: re-scan replaces, DELETE/DELETE_BY_QUERY soft-deletes). No Wazuh C/C++ change:
+the test manager's entrypoint rewrites `<indexer>` to `http://vuln-shim:9200` (plain HTTP + basic auth
+on the isolated lab network; the stock `/etc/filebeat/certs/*` TLS paths don't exist). Tenant comes
+from the index-name cluster suffix (`VULN_TENANT_MAP`), unknown cluster → rows dropped (isolation).
+
+Console **Vulnerabilities** view (`routers/vulnerabilities.py`, `VulnerabilitiesPage.tsx`): per-host
+CVE list enriched from the same A3 `kev_vulnerabilities` / `epss_scores` tables, sorted KEV-first then
+EPSS; a KEV on a host raises the host's priority to critical. Lab check: agent-ubuntu-1 (060) → 13
+CVEs in ClickHouse (matches the shim's `13 indexed` log); `apt upgrade libpcre2-8-0` → the 7 pinned
+CVEs resolve (`7 deleted`, dropped from the live view); survives a manager restart (connector
+re-initializes against the shim). *Lab KEV/EPSS values for the synthetic `CVE-2026-*` feed are seeded
+demo data; the enrichment join itself is real and unit-tested.*
+
 ### Limitations
 
-- **D22 — no per-host CVE inventory.** In 4.14.8 the Wazuh vulnerability-detection module writes its
-  findings to the **Wazuh indexer** (OpenSearch), which ShadowTracer does not run, so per-host CVE
-  findings never reach `alerts.json` / the ClickHouse `events` map (verified: 0 events with a
-  vulnerability rule group). A3 therefore enriches only CVE ids that already appear in an alert's
-  text; it does **not** know which CVEs each host is actually vulnerable to. `syscollector` package
-  inventory is likewise not in the pipeline, so a package→KEV watchlist is not available. Ingesting
-  the indexer's findings (or the Wazuh API) and syscollector inventory is backlog D22.
+- **D22 — RESOLVED (Phase 7.7, A5 above).** Per-host CVE inventory now lands in ClickHouse
+  `vulnerability_states` via the indexer shim; a package→KEV/EPSS view exists per host and per tenant.
 - **D18 — live FIM→YARA chain unproven in this lab.** In WSL2+Docker, `syscheckd` realtime delivery
   is selective (kernel inotify works; `/tmp`-family and `/etc` sub-paths do not deliver), so the live
   `554→110200→execd→110201` chain could not be shown here; every link is verified deterministically

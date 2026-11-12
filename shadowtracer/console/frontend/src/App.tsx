@@ -10,6 +10,7 @@ import { IncidentDetailPage } from './IncidentDetailPage'
 import { IncidentsPage } from './IncidentsPage'
 import { IocBrowserPage } from './IocBrowserPage'
 import { TiSettingsPage } from './TiSettingsPage'
+import { VulnerabilitiesPage } from './VulnerabilitiesPage'
 import { LoginPage } from './LoginPage'
 
 // A handful of screens - deliberately no router library for this: one
@@ -21,6 +22,7 @@ type View =
   | { name: 'fingerprints' }
   | { name: 'fingerprint'; key: string }
   | { name: 'attack-coverage' }
+  | { name: 'vulnerabilities' }
   | { name: 'iocs' }
   | { name: 'ti-settings' }
   | { name: 'about' }
@@ -32,6 +34,7 @@ function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => voi
     { label: 'Incidents', view: { name: 'incidents' } },
     { label: 'Attack library', view: { name: 'fingerprints' } },
     { label: 'ATT&CK coverage', view: { name: 'attack-coverage' } },
+    { label: 'Vulnerabilities', view: { name: 'vulnerabilities' } },
     { label: 'Threat intel', view: { name: 'iocs' } },
     { label: 'TI settings', view: { name: 'ti-settings' } },
   ]
@@ -128,6 +131,7 @@ function AppContent() {
         <FingerprintDetailPage fingerprintKey={view.key} onBack={() => setView({ name: 'fingerprints' })} />
       )}
       {view.name === 'attack-coverage' && <AttackCoveragePage />}
+      {view.name === 'vulnerabilities' && <VulnerabilitiesPage />}
       {view.name === 'iocs' && <IocBrowserPage />}
       {view.name === 'ti-settings' && <TiSettingsPage />}
       {view.name === 'about' && <AboutPage />}

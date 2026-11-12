@@ -316,6 +316,47 @@ export async function fetchWarmupStatus(accessToken: string): Promise<WarmupStat
   return handle<WarmupStatus>(resp)
 }
 
+// Phase 7.7: vulnerability view (CVE inventory landed in ClickHouse by the indexer shim,
+// enriched with CISA KEV + FIRST EPSS). Hosts and CVEs come back already sorted KEV-first then EPSS.
+export interface HostVuln {
+  agent_id: string
+  agent_name: string
+  total: number
+  kev_count: number
+  max_epss: number | null
+  max_cvss: number
+  severities: Record<string, number>
+  priority: 'critical' | 'high' | 'medium' | 'low'
+}
+
+export interface CveRow {
+  cve_id: string
+  package_name: string
+  package_version: string
+  severity: string
+  cvss_score: number
+  kev: boolean
+  kev_ransomware: boolean
+  epss: number | null
+  epss_percentile: number | null
+  first_seen: string
+  last_seen: string
+}
+
+export async function fetchVulnHosts(accessToken: string): Promise<HostVuln[]> {
+  const resp = await fetch(`${API_BASE}/api/vulnerabilities`, {
+    headers: authHeaders(accessToken), credentials: 'include',
+  })
+  return handle<HostVuln[]>(resp)
+}
+
+export async function fetchHostCves(accessToken: string, agentId: string): Promise<CveRow[]> {
+  const resp = await fetch(`${API_BASE}/api/vulnerabilities/hosts/${encodeURIComponent(agentId)}`, {
+    headers: authHeaders(accessToken), credentials: 'include',
+  })
+  return handle<CveRow[]>(resp)
+}
+
 export async function fetchIncidents(accessToken: string, state?: 'open' | 'closed'): Promise<IncidentsPage> {
   const query = state ? `?state=${state}` : ''
   const resp = await fetch(`${API_BASE}/api/incidents${query}`, {

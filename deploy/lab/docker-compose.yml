@@ -338,6 +338,11 @@ services:
       LOAD_TEST_SYSLOG_PORT: "5514"
       # The same input over TCP (no kernel drops; back-pressure instead).
       LOAD_TEST_SYSLOG_TCP_PORT: "5515"
+      # Phase 7.7: point the vulnerability-detector's indexer-connector at the
+      # ShadowTracer indexer shim (plain HTTP on the lab network, basic auth).
+      # The entrypoint rewrites <indexer> to this host and strips the <ssl>
+      # block. Test manager only.
+      VULN_SHIM_HOST: vuln-shim:9200
       SHADOWTRACER_INSTALL_DIR: ${SHADOWTRACER_INSTALL_DIR:-/var/ossec}
     volumes:
       - ./entrypoint-manager.sh:/entrypoint.sh:ro
@@ -352,6 +357,38 @@ services:
     networks:
       lab:
         ipv4_address: 172.28.0.14
+
+  # Phase 7.7: OpenSearch indexer shim. Stands in for the Wazuh indexer so the
+  # test manager's vulnerability-detector can push its full CVE inventory, which
+  # the shim writes to ClickHouse vulnerability_states. See vulnshim.py.
+  vuln-shim:
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ingest.Dockerfile
+    image: shadowtracer-lab/ingest:local
+    hostname: vuln-shim
+    command: ["python3", "-m", "shadowtracer_ingest.vulnshim"]
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    environment:
+      CLICKHOUSE_HOSTS: ${CLICKHOUSE_HOSTS:-ch-clickhouse-1:8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in deploy/lab/.env}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/lab/.env}
+      CLICKHOUSE_DATABASE: shadowtracer
+      # cluster-name -> tenant-key. The test manager's cluster is shadowtracer-test.
+      VULN_TENANT_MAP: '{"shadowtracer-test": "${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env}"}'
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9200/_cat/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
+    depends_on:
+      ch-clickhouse-1:
+        condition: service_healthy
+    networks:
+      - lab
 
   # Agent event traffic (1514) load balancer. Kept running per the Step 2
   # spec, but agent traffic bypasses it - see the note above x-agent-env.
