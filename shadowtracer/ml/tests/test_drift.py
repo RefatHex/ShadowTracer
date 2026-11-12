@@ -60,3 +60,40 @@ def test_each_metric_is_independent():
     _feed(det, "agent|t|a", "distinct_users", [1.0] * 200)
     drifts = _feed(det, "agent|t|a", "alert_volume", [1.0] * 200 + [20.0] * 60)
     assert len(drifts) == 1                                        # only alert_volume drifts
+
+
+def test_state_envelope_roundtrip_and_version_guard():
+    from shadowtracer_ml import drift as D
+    det = Detectors()
+    _feed(det, "agent|t|a", "alert_volume", [1.0] * 50)
+    last = __import__("datetime").datetime(2026, 10, 1, tzinfo=__import__("datetime").timezone.utc)
+    blob = D._encode_state(det, last)
+    # header is JSON and gates the payload
+    assert blob.split(b"\n", 1)[0].startswith(b'{') and D.STATE_FORMAT.encode() in blob
+    det2, last2 = D._decode_state(blob)
+    assert det2.entity_count() == 1 and last2 == last
+    # a version/format/river mismatch is rejected (-> caller re-warms), never a bare pickle load
+    import json
+    for bad in ({"format": "other"}, {"format": D.STATE_FORMAT, "drift_version": "nope"},
+                {"format": D.STATE_FORMAT, "drift_version": D.DRIFT_VERSION, "river": "0.0.0"}):
+        tampered = json.dumps(bad).encode() + b"\n" + blob.split(b"\n", 1)[1]
+        try:
+            D._decode_state(tampered)
+            assert False, f"accepted {bad}"
+        except D.StateIncompatible:
+            pass
+    # no header at all -> rejected
+    try:
+        D._decode_state(b"not-an-envelope")
+        assert False
+    except D.StateIncompatible:
+        pass
+
+
+def test_load_state_rewarms_on_bad_file(tmp_path, monkeypatch):
+    from shadowtracer_ml import drift as D
+    p = tmp_path / "drift_state.pkl"
+    p.write_bytes(b"garbage without header")
+    monkeypatch.setattr(D, "STATE_PATH", str(p))
+    det, last = D.load_state()                      # must not raise; re-warms fresh
+    assert isinstance(det, Detectors) and det.entity_count() == 0 and last is None

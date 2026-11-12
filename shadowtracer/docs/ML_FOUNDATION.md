@@ -420,3 +420,33 @@ normal activity, and the BOTSv3 Windows-Sysmon benign replay:
   attack incidents predate per-tenant warm-up), reported as-is.
 - **Scorer health:** 1 model (test tenant) warm (>300 alerts), ~14k scores, 0 restarts; dedup
   verified (rows == distinct identities after a restart); checkpoint restore confirmed.
+
+## 17. Phase 7.2 — behavioural + model-input drift (River ADWIN)
+
+`drift-monitor` (own service, every 60 s, off the hot path, **ClickHouse rollups only - 0 Kafka env
+vars, cannot read an alert topic**) runs one River ADWIN per (entity, metric), LRU-capped, with a
+**versioned/validated state envelope** (same shape as the HST checkpoint: a JSON header gates the
+pickle, a format/River/drift-version mismatch discards the state and re-warms - never a bare pickle
+load). Behaviour drift per (tenant, agent) from `events_hourly_rollup`; model-input drift per served
+model from `ml_feature_stats`. Advisory only -> `drift_events`.
+
+**ADWIN tuning.** `delta=0.2, clock=1, grace_period=5, min_window_length=3` - catches a 2-3 bucket
+behaviour change with **0 false drifts** on a stable/noisy stream (the defaults, delta 0.002, need
+~30 buckets). Measured: on a clean baseline ADWIN confirms a change on the **2nd elevated bucket**
+(index 1), i.e. it waits for the change to persist one more bucket before firing.
+
+**Real burst through the full pipeline.** A live SSH brute force on a lab agent (60 distinct
+usernames) produced **62 `Invalid user` (rule 5710) alerts** that flowed agent -> manager -> shipper
+-> Kafka -> writer -> ClickHouse in ~55 s and landed in the rollup as **`distinct_users = 64` for
+that agent's current hour** (vs a single-digit recent baseline). Because the rollup dedups rows per
+(rule, level) per hour, a same-rule brute force surfaces in `distinct_users`, not `alert_volume`. The
+drift-monitor then found real drift events across the tenant's agents on real data (1,841 events,
+e.g. agent 001 `distinct_users 64.5 -> 904`, load agents `~14 -> 156`).
+
+**Detection delay (given hourly rollups).** change start -> drift event =
+  (time for the change's hour bucket to close: 0-60 min, since only completed hours are processed)
+  + (1 confirming elevated bucket for ADWIN: ~1 h)
+  ≈ **1-2 h**. A single-hour transient burst is therefore an *anomaly* (caught per-alert by the 7.1
+HST scorer), not a *drift*: the drift-monitor flags a behaviour change only once it persists past the
+confirming bucket. This is deliberate - a drift event means "this agent's normal has shifted and
+stayed shifted", and it never triggers any action or retrain.

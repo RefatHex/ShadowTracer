@@ -15,6 +15,7 @@ Bounded state: one ADWIN per (entity, metric), with an LRU cap on entities; the 
 """
 import argparse
 import datetime as dt
+import json
 import logging
 import os
 import pickle
@@ -27,10 +28,26 @@ from . import db
 
 log = logging.getLogger("ml-drift")
 
-DRIFT_VERSION = "drift-v1"
+DRIFT_VERSION = "drift-v2"
+STATE_FORMAT = "shadowtracer-drift/1"
+
+
+class StateIncompatible(Exception):
+    """The saved drift state cannot be trusted with this code/library - discard and re-warm."""
+
+
+def _river_version() -> str:
+    import river
+    return river.__version__
 INTERVAL = float(os.environ.get("DRIFT_INTERVAL_SECONDS", "60"))
 MAX_ENTITIES = int(os.environ.get("DRIFT_MAX_ENTITIES", "5000"))
-ADWIN_DELTA = float(os.environ.get("DRIFT_ADWIN_DELTA", "0.002"))
+# ADWIN tuned for responsiveness to a short behaviour burst over hourly buckets (a 2-3 bucket change
+# is caught, not only a 30-bucket slow drift) while holding zero false drifts on a stable/noisy
+# stream: delta 0.2, check every bucket (clock=1), grace 5, min sub-window 3.
+ADWIN_DELTA = float(os.environ.get("DRIFT_ADWIN_DELTA", "0.2"))
+ADWIN_CLOCK = int(os.environ.get("DRIFT_ADWIN_CLOCK", "1"))
+ADWIN_GRACE = int(os.environ.get("DRIFT_ADWIN_GRACE", "5"))
+ADWIN_MIN_WINDOW = int(os.environ.get("DRIFT_ADWIN_MIN_WINDOW", "3"))
 # how far back to catch up the first time there is no state (completed hours)
 BACKFILL_HOURS = int(os.environ.get("DRIFT_BACKFILL_HOURS", "168"))
 STATE_DIR = os.environ.get("DRIFT_STATE_DIR", "/state")
@@ -60,15 +77,20 @@ class Detectors:
         if st is None:
             # keep a short window of recent values so before/after read the OLD vs NEW regime
             # cleanly (ADWIN's own estimation at detection is a partial blend across the change).
-            st = {"adwin": ADWIN(delta=self.delta), "hist": deque(maxlen=160)}
+            st = {"adwin": ADWIN(delta=self.delta, clock=ADWIN_CLOCK, grace_period=ADWIN_GRACE,
+                                 min_window_length=ADWIN_MIN_WINDOW), "hist": deque(maxlen=160)}
             slot[metric] = st
         a, hist = st["adwin"], st["hist"]
         hist.append(float(value))
         a.update(float(value))
         if a.drift_detected and len(hist) >= 2:
-            k = max(1, min(10, len(hist) // 2))
-            before = sum(list(hist)[:k]) / k               # oldest k values = pre-change regime
-            after = sum(list(hist)[-k:]) / k               # newest k values = post-change regime
+            # 'after' is the value of the bucket that tripped the detector (unambiguously the new
+            # regime - ADWIN can fire with as few as 3 new samples, so any window averaged over the
+            # deque is diluted by old values); 'before' is the stable baseline (oldest buckets).
+            vals = list(hist)
+            k = max(1, min(10, len(vals) // 2))
+            before = sum(vals[:k]) / k
+            after = float(value)
             hist.clear()                                    # start the new regime's window fresh
             return (before, after, abs(after - before))
         return None
@@ -139,12 +161,47 @@ def process(engine, ch, det: Detectors, last_hour: dt.datetime, until: dt.dateti
 
 
 # --- state ------------------------------------------------------------------------------------
+def _encode_state(det: Detectors, last_hour: dt.datetime) -> bytes:
+    """Versioned, validated envelope (same shape as the HST checkpoint): a JSON header gates the
+    pickle payload, so a format/library/version change forces a clean rebuild - never a bare pickle."""
+    header = json.dumps({
+        "format": STATE_FORMAT, "river": _river_version(), "drift_version": DRIFT_VERSION,
+        "entities": det.entity_count(), "last_hour": last_hour.isoformat() if last_hour else None,
+        "saved_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }).encode()
+    payload = pickle.dumps({"detectors": det, "last_hour": last_hour}, protocol=pickle.HIGHEST_PROTOCOL)
+    return header + b"\n" + payload
+
+
+def _decode_state(data: bytes):
+    nl = data.find(b"\n")
+    if nl < 0:
+        raise StateIncompatible("no header")
+    try:
+        head = json.loads(data[:nl])
+    except ValueError as exc:
+        raise StateIncompatible(f"bad header: {exc}") from exc
+    if head.get("format") != STATE_FORMAT:
+        raise StateIncompatible(f"format {head.get('format')} != {STATE_FORMAT}")
+    if head.get("drift_version") != DRIFT_VERSION:
+        raise StateIncompatible(f"drift version {head.get('drift_version')} != {DRIFT_VERSION}")
+    if head.get("river") != _river_version():
+        raise StateIncompatible(f"river {head.get('river')} != {_river_version()} (pickle not portable across versions)")
+    body = pickle.loads(data[nl + 1:])      # only after the header validates
+    if not isinstance(body.get("detectors"), Detectors):
+        raise StateIncompatible("payload is not a Detectors")
+    return body["detectors"], body["last_hour"]
+
+
 def load_state():
+    """Load the validated state, or re-warm from scratch on any mismatch/corruption."""
     try:
         with open(STATE_PATH, "rb") as f:
-            s = pickle.load(f)
-        return s["detectors"], s["last_hour"]
-    except (OSError, KeyError, pickle.UnpicklingError):
+            return _decode_state(f.read())
+    except FileNotFoundError:
+        return Detectors(), None
+    except (StateIncompatible, OSError, pickle.UnpicklingError, KeyError) as exc:
+        log.warning("discarding drift state, re-warming: %s", exc)
         return Detectors(), None
 
 
@@ -152,7 +209,7 @@ def save_state(det: Detectors, last_hour: dt.datetime):
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "wb") as f:
-        pickle.dump({"detectors": det, "last_hour": last_hour}, f)
+        f.write(_encode_state(det, last_hour))
     os.replace(tmp, STATE_PATH)
 
 
