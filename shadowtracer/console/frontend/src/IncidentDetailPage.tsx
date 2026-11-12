@@ -90,6 +90,16 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
           Tor exit node: {incident.tor_exit_ips.join(', ')} — context only, not an alert.
         </p>
       )}
+      {incident.drift_events && incident.drift_events.length > 0 && (
+        <div className="mb-4 rounded bg-sky-50 dark:bg-sky-950 px-3 py-2 text-sm text-sky-800 dark:text-sky-300">
+          {incident.drift_events.map((d) => (
+            <div key={`${d.metric}-${d.window_start}`}>
+              Behaviour changed: <span className="font-medium">{d.metric.replace(/_/g, ' ')}</span> went from{' '}
+              {(+d.before_value).toFixed(2)} to {(+d.after_value).toFixed(2)} around {d.window_start.slice(0, 16).replace('T', ' ')} — advisory, no action taken.
+            </div>
+          ))}
+        </div>
+      )}
       {incident.cve_ids && incident.cve_ids.length > 0 && (
         <p className={`mb-4 rounded px-3 py-2 text-sm ${incident.kev_cve_ids && incident.kev_cve_ids.length > 0
           ? 'bg-red-50 dark:bg-red-950 text-red-800 dark:text-red-300' : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'}`}>

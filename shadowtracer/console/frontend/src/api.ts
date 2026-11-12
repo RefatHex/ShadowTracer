@@ -82,6 +82,16 @@ export interface IncidentDetail extends IncidentSummary {
   ti_confidence?: number | null
   priority?: number
   ti_matches?: TiMatch[]
+  drift_events?: DriftEvent[]
+}
+
+// Phase 7.2: River ADWIN behaviour-drift note (advisory).
+export interface DriftEvent {
+  metric: string
+  before_value: number
+  after_value: number
+  magnitude: number
+  window_start: string
 }
 
 // --- Phase 6.4: threat intel ---------------------------------------------------------

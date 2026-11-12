@@ -120,6 +120,15 @@ class IncidentAlert(BaseModel):
     message: str
 
 
+class DriftEvent(BaseModel):
+    # Phase 7.2: advisory behaviour-drift note for this incident's agent.
+    metric: str
+    before_value: float
+    after_value: float
+    magnitude: float
+    window_start: datetime.datetime
+
+
 class IncidentDetail(IncidentSummary):
     rule_ids: list[str]
     rule_groups: list[str]
@@ -131,6 +140,7 @@ class IncidentDetail(IncidentSummary):
     closed_at: datetime.datetime | None
     alerts: list[IncidentAlert]
     ti_matches: list[TiMatch] = []
+    drift_events: list[DriftEvent] = []
 
 
 class TriageRequest(BaseModel):
@@ -315,7 +325,13 @@ def get_incident(
         "WHERE t.incident_id = :i AND t.tenant_key = :t ORDER BY t.confidence DESC, t.id"),
         {"i": incident_id, "t": current_user.tenant_key}).mappings().all()
     ti_matches = [TiMatch(**r) for r in rows]
-    return IncidentDetail(**row, alerts=alerts, ti_matches=ti_matches)
+    # Phase 7.2: recent behaviour drift for this incident's agent (advisory).
+    drift = db.execute(text(
+        "SELECT metric, before_value, after_value, magnitude, window_start FROM drift_events "
+        "WHERE tenant_key = :t AND entity_type = 'agent' AND entity = :a ORDER BY window_start DESC LIMIT 5"),
+        {"t": current_user.tenant_key, "a": row["agent_id"]}).mappings().all()
+    drift_events = [DriftEvent(**d) for d in drift]
+    return IncidentDetail(**row, alerts=alerts, ti_matches=ti_matches, drift_events=drift_events)
 
 
 @router.post("/incidents/{incident_id}/triage", response_model=TriageResponse)

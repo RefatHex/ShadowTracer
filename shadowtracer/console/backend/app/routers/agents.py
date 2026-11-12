@@ -5,18 +5,39 @@ the alert stream (see shadowtracer/correlate's models.py). Changing
 either one changes which fingerprint a future incident on that agent
 computes to, so every change is audited, per spec."""
 
+import datetime
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from ..audit import append_entry
 from ..deps import get_db
 from ..models import agent_role_tags
-from ..rbac import ADMIN_ONLY, CurrentUser
+from ..rbac import ADMIN_ONLY, ALL_ROLES, CurrentUser
 
 router = APIRouter(prefix="/api", tags=["agents"])
+
+
+class AgentDrift(BaseModel):
+    # Phase 7.2: River ADWIN behaviour-drift events for one agent (advisory).
+    metric: str
+    before_value: float
+    after_value: float
+    magnitude: float
+    window_start: datetime.datetime
+
+
+@router.get("/agents/{agent_id}/drift", response_model=list[AgentDrift])
+def agent_drift(agent_id: str, db: Session = Depends(get_db), current_user: CurrentUser = Depends(ALL_ROLES)):
+    """Recent behaviour-drift events for this agent (advisory; the drift-monitor writes them)."""
+    rows = db.execute(text(
+        "SELECT metric, before_value, after_value, magnitude, window_start FROM drift_events "
+        "WHERE tenant_key = :t AND entity_type = 'agent' AND entity = :a ORDER BY window_start DESC LIMIT 20"),
+        {"t": current_user.tenant_key, "a": agent_id}).mappings().all()
+    return [AgentDrift(**r) for r in rows]
 
 
 class AgentRoleTagRequest(BaseModel):

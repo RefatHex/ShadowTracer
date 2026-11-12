@@ -1067,6 +1067,29 @@ services:
     networks:
       - lab
 
+  # drift-monitor (Phase 7.2): River ADWIN behavioural + model-input drift. Periodic (every minute),
+  # reads ClickHouse rollups only, writes drift_events (advisory). Deliberately has NO Kafka config -
+  # it cannot read any alert topic. Off the hot path.
+  ml-drift:
+    image: shadowtracer-lab/ml:local
+    restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
+    command: ["python", "-m", "shadowtracer_ml.drift", "loop"]
+    environment:
+      <<: *ml-env
+      DRIFT_INTERVAL_SECONDS: "60"
+      DRIFT_STATE_DIR: /state
+    volumes:
+      - ml-drift-state:/state
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    networks:
+      - lab
+
   writer-1:
     build:
       context: ../..
@@ -1273,6 +1296,7 @@ networks:
 volumes:
   mlflow-artifacts:
   ml-scorer-state:
+  ml-drift-state:
   master-etc:
   master-queue:
   master-multigroups:
