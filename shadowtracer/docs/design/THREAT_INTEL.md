@@ -1627,10 +1627,28 @@ owner` defined at compile, `--ignore-invalid-rules`); a scan is **~0.31 s** with
 the agent's own processes use ~58 MB, so a scan peaks ~132 MB, **within the 176 MB agent limit - the
 full set fits, no curated subset needed**.
 
-### A3 CISA KEV + EPSS vuln prioritisation — planned
+### A3 — CISA KEV + FIRST EPSS enrichment (DONE)
 
-A3 depends on a Wazuh vulnerability-detector finding stream, which ShadowTracer does not yet ingest
-(no CVE field in `events`); that ingestion is a prerequisite and is tracked for A3.
+`cve_enrich.py` refreshes CISA KEV (CC0, ~1,779 entries) daily and enriches any CVE id that appears
+in an alert (read from ClickHouse `events.raw_event`, mapped to incidents via `incident_alerts`):
+`incidents.cve_ids` / `kev_cve_ids` / `max_epss` are set, and EPSS (FIRST) is fetched only for the
+CVEs actually seen. A KEV CVE is actively exploited, so it floors the (generated) `incidents.priority`
+at 13 (migration `c6f1a3b5d7e9`). The console shows a CVE / KEV / EPSS badge on the incident. Lab:
+1,779 KEV loaded, **3,126 incidents tagged with a CVE, 1 in KEV**.
+
+### Limitations
+
+- **D22 — no per-host CVE inventory.** In 4.14.8 the Wazuh vulnerability-detection module writes its
+  findings to the **Wazuh indexer** (OpenSearch), which ShadowTracer does not run, so per-host CVE
+  findings never reach `alerts.json` / the ClickHouse `events` map (verified: 0 events with a
+  vulnerability rule group). A3 therefore enriches only CVE ids that already appear in an alert's
+  text; it does **not** know which CVEs each host is actually vulnerable to. `syscollector` package
+  inventory is likewise not in the pipeline, so a package→KEV watchlist is not available. Ingesting
+  the indexer's findings (or the Wazuh API) and syscollector inventory is backlog D22.
+- **D18 — live FIM→YARA chain unproven in this lab.** In WSL2+Docker, `syscheckd` realtime delivery
+  is selective (kernel inotify works; `/tmp`-family and `/etc` sub-paths do not deliver), so the live
+  `554→110200→execd→110201` chain could not be shown here; every link is verified deterministically
+  and the shipped `etc/ossec-agent.conf` makes the high-risk paths realtime for a normal host.
 
 ### B — tenant-managed paid-source keys (in progress)
 
