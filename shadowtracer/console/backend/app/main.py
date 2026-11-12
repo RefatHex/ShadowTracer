@@ -11,6 +11,7 @@ from .routers import attack_coverage as attack_coverage_router
 from .routers import auth as auth_router
 from .routers import fingerprints as fingerprints_router
 from .routers import health as health_router
+from .routers import graph as graph_router
 from .routers import incidents as incidents_router
 from .routers import ip_lookups as ip_lookups_router
 from .routers import paid_sources as paid_sources_router
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
     app.include_router(ti_router.router)
     app.include_router(paid_sources_router.router)
     app.include_router(ip_lookups_router.router)
+    app.include_router(graph_router.router)
     app.include_router(fingerprints_router.router)
     app.include_router(agents_router.router)
     app.include_router(attack_coverage_router.router)

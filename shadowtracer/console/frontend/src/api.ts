@@ -501,3 +501,30 @@ export async function lookupIp(accessToken: string, ip: string, source: 'abuseip
   })
   return handle<IpVerdict>(resp)
 }
+
+// Phase 7.6: event-relationship graph (NetworkX, on-demand).
+export interface GraphNode {
+  id: string; type: string; label: string
+  external?: boolean | null; mitre?: string[] | null; kev?: boolean | null; colour: string
+}
+export interface GraphEdge {
+  source: string; target: string; relation: string; count: number
+  first_seen?: number | null; last_seen?: number | null
+}
+export interface GraphData {
+  nodes: GraphNode[]; edges: GraphEdge[]
+  analytics: { components: number[]; most_central_degree: string[]; most_central_betweenness: string[]; external_ip_to_host_path: string[] | null }
+  summary: { capped: boolean; notes: string[]; node_count: number; edge_count: number }
+  response_ms: number; cached: boolean
+  shared_nodes?: [string, number[]][]; incident_count?: number; campaign_actor?: string
+}
+
+export async function fetchIncidentGraph(accessToken: string, incidentId: number): Promise<GraphData> {
+  const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/graph`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<GraphData>(resp)
+}
+
+export async function fetchCampaignGraph(accessToken: string, campaignId: number): Promise<GraphData> {
+  const resp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/graph`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<GraphData>(resp)
+}

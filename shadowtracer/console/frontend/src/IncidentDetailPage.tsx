@@ -4,6 +4,7 @@ import * as api from './api'
 import type { IncidentDetail, TriageAction } from './api'
 import { TiSection } from './TiSection'
 import { IpReputation } from './IpReputation'
+import { GraphView } from './GraphView'
 
 // Every field below - including alert.message, which is fully
 // attacker-controlled (see AlertRow.tsx/AlertRow.test.tsx) - is rendered
@@ -183,7 +184,9 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
 
       <TiSection matches={incident.ti_matches ?? []} onChanged={() => void load()} />
 
-      <h2 className="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300">Alerts in this incident</h2>
+      <GraphView kind="incident" id={incident.id} />
+
+      <h2 className="mb-2 mt-6 text-sm font-semibold text-gray-700 dark:text-gray-300">Alerts in this incident</h2>
       <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
         <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
           <thead className="bg-gray-50 dark:bg-gray-900">
