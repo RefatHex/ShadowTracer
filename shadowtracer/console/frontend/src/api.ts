@@ -620,3 +620,18 @@ export async function fetchCampaignGraph(accessToken: string, campaignId: number
   const resp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/graph`, { headers: authHeaders(accessToken), credentials: 'include' })
   return handle<GraphData>(resp)
 }
+
+// Phase 7.6 follow-up: campaigns list, so the console can open a campaign's relationship graph.
+export interface Campaign {
+  id: number
+  actor_type: string
+  actor_value: string
+  incident_count: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
+export async function fetchCampaigns(accessToken: string): Promise<Campaign[]> {
+  const resp = await fetch(`${API_BASE}/api/campaigns`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<Campaign[]>(resp)
+}

@@ -13,6 +13,7 @@ import { TiSettingsPage } from './TiSettingsPage'
 import { VulnerabilitiesPage } from './VulnerabilitiesPage'
 import { LiveViewPage } from './LiveViewPage'
 import { AgentsPage } from './AgentsPage'
+import { CampaignsPage } from './CampaignsPage'
 import { LoginPage } from './LoginPage'
 
 // A handful of screens - deliberately no router library for this: one
@@ -25,6 +26,7 @@ type View =
   | { name: 'incident'; id: number }
   | { name: 'fingerprints' }
   | { name: 'fingerprint'; key: string }
+  | { name: 'campaigns' }
   | { name: 'attack-coverage' }
   | { name: 'vulnerabilities' }
   | { name: 'iocs' }
@@ -39,6 +41,7 @@ function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => voi
     { label: 'Alerts', view: { name: 'alerts' } },
     { label: 'Incidents', view: { name: 'incidents' } },
     { label: 'Attack library', view: { name: 'fingerprints' } },
+    { label: 'Campaigns', view: { name: 'campaigns' } },
     { label: 'ATT&CK coverage', view: { name: 'attack-coverage' } },
     { label: 'Vulnerabilities', view: { name: 'vulnerabilities' } },
     { label: 'Threat intel', view: { name: 'iocs' } },
@@ -106,6 +109,7 @@ function viewFromHash(): View {
   if (h === '#/ti-settings') return { name: 'ti-settings' }
   if (h === '#/live') return { name: 'live' }
   if (h === '#/agents') return { name: 'agents' }
+  if (h === '#/campaigns') return { name: 'campaigns' }
   return { name: 'alerts' }
 }
 
@@ -140,6 +144,7 @@ function AppContent() {
       {view.name === 'fingerprint' && (
         <FingerprintDetailPage fingerprintKey={view.key} onBack={() => setView({ name: 'fingerprints' })} />
       )}
+      {view.name === 'campaigns' && <CampaignsPage />}
       {view.name === 'attack-coverage' && <AttackCoveragePage />}
       {view.name === 'vulnerabilities' && <VulnerabilitiesPage />}
       {view.name === 'iocs' && <IocBrowserPage />}
