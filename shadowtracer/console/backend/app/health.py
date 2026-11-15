@@ -57,6 +57,39 @@ def check_kafka(settings: Settings) -> tuple[bool, str]:
         return False, str(exc)
 
 
+# Phase 6.6 (A.2 follow-up): the Kafka test failures were NOT expired certs (the lab CA/broker are
+# valid for years), but a silent future expiry would break every SASL_SSL connection at once with no
+# warning. Surface days-to-expiry in /health/detail so it is caught well ahead of time.
+KAFKA_CERT_WARN_DAYS = 30
+
+
+def kafka_cert_expiry(settings: Settings) -> dict:
+    """notAfter + days-remaining for the Kafka TLS CA (and the client cert, if one is configured).
+    alert=True when anything is within KAFKA_CERT_WARN_DAYS of expiry. Best-effort: a missing/unreadable
+    cert is reported, never raised."""
+    import datetime
+    import os
+    paths = {"ca": os.environ.get("KAFKA_SSL_CA_LOCATION"),
+             "client_cert": os.environ.get("KAFKA_SSL_CERTIFICATE_LOCATION")}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    certs, alert = {}, False
+    for name, path in paths.items():
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            from cryptography import x509
+            cert = x509.load_pem_x509_certificate(open(path, "rb").read())
+            exp = cert.not_valid_after_utc
+            days = (exp - now).days
+            certs[name] = {"subject": cert.subject.rfc4514_string(), "not_after": exp.isoformat(),
+                           "days_remaining": days, "expiring_soon": days < KAFKA_CERT_WARN_DAYS}
+            alert = alert or days < KAFKA_CERT_WARN_DAYS
+        except Exception as exc:  # noqa: BLE001
+            certs[name] = {"error": str(exc)[:200]}
+            alert = True
+    return {"warn_days": KAFKA_CERT_WARN_DAYS, "certs": certs, "alert": alert}
+
+
 def clickhouse_replica_health(settings: Settings) -> dict:
     """Dead-letter-ClickHouse incident (2026-10-08): a replica stuck
     read-only or with an expired Keeper session (system.replicas'

@@ -103,6 +103,13 @@ os.environ.setdefault("POSTGRES_DB", TEST_POSTGRES_DB)
 os.environ.setdefault("CLICKHOUSE_USER", _lab_env_for_import.get("CLICKHOUSE_USER", ""))
 os.environ.setdefault("CLICKHOUSE_PASSWORD", _lab_env_for_import.get("CLICKHOUSE_PASSWORD", ""))
 os.environ.setdefault("CLICKHOUSE_HOST", "127.0.0.1")
+# Phase 6.6 (A.2): the lab Kafka is TLS+SASL/SCRAM; build that client env if the runner (run-ci.sh)
+# did not, so a bare `pytest` run doesn't default to PLAINTEXT and get dropped in the TLS handshake.
+os.environ.setdefault("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+os.environ.setdefault("KAFKA_SASL_USERNAME", "admin")
+os.environ.setdefault("KAFKA_SASL_PASSWORD", _lab_env_for_import.get("KAFKA_ADMIN_PASSWORD", ""))
+os.environ.setdefault("KAFKA_SSL_CA_LOCATION",
+                      os.path.join(os.path.dirname(ENV_PATH), "kafka-certs", "ca.crt"))
 
 
 @pytest.fixture(scope="session")

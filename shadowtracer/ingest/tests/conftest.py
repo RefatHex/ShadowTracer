@@ -48,6 +48,32 @@ def delete_topics_and_wait(admin: AdminClient, topics: list[str], timeout: float
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "deploy", "lab", ".env")
 INGEST_DIR = os.path.join(os.path.dirname(__file__), "..")
 
+
+# Phase 6.6 (A.2): the suites talk to the lab's TLS+SASL/SCRAM Kafka and build their client config
+# from KAFKA_* env (kafka_security.py). deploy/ci/run-ci.sh sets that env; a bare `pytest` run does
+# not, so without this the clients default to PLAINTEXT and the broker drops them in the TLS
+# handshake - run-ci.sh's own note records this cost "23 tests + 8 errors" on 2026-11-05. setdefault
+# so the CI runner's explicit values still win.
+def _kafka_env_defaults() -> None:
+    vals = {}
+    try:
+        with open(ENV_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    vals[k] = v
+    except OSError:
+        return
+    os.environ.setdefault("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+    os.environ.setdefault("KAFKA_SASL_USERNAME", "admin")
+    os.environ.setdefault("KAFKA_SASL_PASSWORD", vals.get("KAFKA_ADMIN_PASSWORD", ""))
+    os.environ.setdefault("KAFKA_SSL_CA_LOCATION",
+                          os.path.join(os.path.dirname(ENV_PATH), "kafka-certs", "ca.crt"))
+
+
+_kafka_env_defaults()
+
 # Phase 5C Step 0: the writer gained a real Postgres dependency (tenants.py's
 # TenantCache) - session-unique from the start this time (not a shared fixed
 # name later fixed in a panic - see MEMORY/project_test_suite_db_race.md for

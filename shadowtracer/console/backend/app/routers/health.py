@@ -49,4 +49,5 @@ def health_detail(db: Session = Depends(get_db), settings=Depends(get_settings),
         "ti_matcher": health_checks.ti_matcher(db, settings),
         "virustotal": health_checks.virustotal(db),
         "ml": health_checks.ml_scores(db),
+        "kafka_cert_expiry": health_checks.kafka_cert_expiry(settings),
     }
