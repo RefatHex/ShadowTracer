@@ -322,6 +322,7 @@ def refresh_cve_enrichment(engine, env=os.environ, now=None) -> dict:
     ch = clickhouse_from_env(env)
     days = int(env.get("TI_CVE_WINDOW_DAYS", "7"))
     tagged = {"incidents": 0, "cves": 0, "kev": 0}
+    vuln = {"cves": 0, "epss_fetched": 0}
     for tenant in _tenant_keys(engine):
         try:
             r = cve_enrich.tag_incidents(engine, ch, tenant, now=now, days=days)
@@ -329,7 +330,16 @@ def refresh_cve_enrichment(engine, env=os.environ, now=None) -> dict:
                 tagged[k] += r.get(k, 0)
         except Exception as exc:  # noqa: BLE001 - one tenant's ClickHouse/enrich trouble never stops the rest
             log.warning("CVE enrichment failed for tenant %s: %s", tenant, exc)
+        try:
+            # Phase 6.6: real EPSS for the tenant's vulnerability inventory (indexer shim), so the
+            # console vuln view is real KEV/EPSS, not hand-seeded.
+            v = cve_enrich.enrich_vuln_states(engine, ch, tenant, http=cve_enrich._get)
+            for k in vuln:
+                vuln[k] += v.get(k, 0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vuln-state EPSS enrichment failed for tenant %s: %s", tenant, exc)
     out["tagged"] = tagged
+    out["vuln_states"] = vuln
     return out
 
 

@@ -147,7 +147,7 @@ if [ -n "${LOAD_TEST_SYSLOG_TCP_PORT:-}" ] && ! grep -q "<port>${LOAD_TEST_SYSLO
 EOF
 fi
 
-# Phase 7.7: point the vulnerability-detector's indexer-connector at the
+# Phase 6.6: point the vulnerability-detector's indexer-connector at the
 # ShadowTracer indexer shim (VULN_SHIM_HOST, test manager only). The shim speaks
 # plain HTTP with basic auth on the isolated lab network, so rewrite <indexer> to
 # that host and drop the <ssl> block (the stock config's cert paths,

@@ -347,7 +347,7 @@ services:
       LOAD_TEST_SYSLOG_PORT: "5514"
       # The same input over TCP (no kernel drops; back-pressure instead).
       LOAD_TEST_SYSLOG_TCP_PORT: "5515"
-      # Phase 7.7: point the vulnerability-detector's indexer-connector at the
+      # Phase 6.6: point the vulnerability-detector's indexer-connector at the
       # ShadowTracer indexer shim (plain HTTP on the lab network, basic auth).
       # The entrypoint rewrites <indexer> to this host and strips the <ssl>
       # block. Test manager only.
@@ -367,7 +367,7 @@ services:
       lab:
         ipv4_address: 172.28.0.14
 
-  # Phase 7.7: OpenSearch indexer shim. Stands in for the Wazuh indexer so the
+  # Phase 6.6: OpenSearch indexer shim. Stands in for the Wazuh indexer so the
   # test manager's vulnerability-detector can push its full CVE inventory, which
   # the shim writes to ClickHouse vulnerability_states. See vulnshim.py.
   vuln-shim:

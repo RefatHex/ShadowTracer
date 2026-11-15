@@ -42,3 +42,70 @@ def test_cve_regex_case_insensitive():
 
 def test_attribution_names_kev_and_epss():
     assert "KEV" in cve_enrich.ATTRIBUTION and "EPSS" in cve_enrich.ATTRIBUTION
+
+
+# --- Phase 6.6: real EPSS enrichment of the vulnerability inventory ------------------------------
+class _FakeCh:
+    def __init__(self, cves):
+        self._cves = cves
+
+    def query(self, sql, parameters=None):
+        class R:
+            result_rows = [[c] for c in self._cves]
+        return R()
+
+
+class _FakeConn:
+    def __init__(self, existing):
+        self._existing = existing
+        self.stored = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, stmt, params=None):
+        text = str(stmt)
+        if "SELECT cve_id FROM epss_scores" in text:
+            return [(c,) for c in self._existing]
+        self.stored.append(params)   # _epss_upsert
+        return None
+
+
+class _FakeEngine:
+    def __init__(self, existing):
+        self.read = _FakeConn(existing)
+        self.write = _FakeConn(existing)
+
+    def connect(self):
+        return self.read
+
+    def begin(self):
+        return self.write
+
+
+def test_vuln_state_cves_filters_to_valid_ids():
+    ch = _FakeCh(["CVE-2026-84782", "not-a-cve", "cve-2026-35189", ""])
+    assert cve_enrich.vuln_state_cves(ch, "t") == {"CVE-2026-84782", "CVE-2026-35189"}
+
+
+def test_enrich_vuln_states_fetches_only_missing_epss():
+    ch = _FakeCh(["CVE-2026-84782", "CVE-2026-35189"])
+    engine = _FakeEngine(existing={"CVE-2026-84782"})          # one already has EPSS
+    calls = []
+
+    def http(url):
+        calls.append(url)
+        # EPSS API JSON for the one missing CVE
+        return b'{"data":[{"cve":"CVE-2026-35189","epss":"0.0035","percentile":"0.29","date":"2026-11-14"}]}'
+
+    r = cve_enrich.enrich_vuln_states(engine, ch, "t", http=http)
+    assert r == {"cves": 2, "epss_fetched": 1}
+    assert len(calls) == 1 and "CVE-2026-35189" in calls[0]      # only the missing one fetched
+    assert engine.write.stored == [{"cve_id": "CVE-2026-35189", "epss": 0.0035, "percentile": 0.29, "scored_date": "2026-11-14"}]
+
+
+def test_enrich_vuln_states_noop_when_no_inventory():
+    assert cve_enrich.enrich_vuln_states(_FakeEngine(set()), _FakeCh([]), "t", http=lambda u: b"") == {"cves": 0, "epss_fetched": 0}

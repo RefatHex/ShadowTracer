@@ -1,4 +1,4 @@
-"""Phase 7.7: the per-host / per-tenant vulnerability view - KEV-first + EPSS sort, enrichment,
+"""Phase 6.6: the per-host / per-tenant vulnerability view - KEV-first + EPSS sort, enrichment,
 tenant isolation, and resolved (is_deleted) rows excluded. Uses the real isolated CH + PG test DBs
 (same harness as test_incidents_api)."""
 import datetime
@@ -87,6 +87,23 @@ def test_resolved_rows_excluded(client, db, ch_client, tenant):
     ], column_names=VS_COLS)
     r = client.get(f"/api/vulnerabilities/hosts/{agent}", headers=_hdr(client, db, tenant))
     assert [row["cve_id"] for row in r.json()] == [f"CVE-LIVE-{m}"]
+
+
+def test_duplicate_detections_collapse_to_one_row(client, db, ch_client, tenant):
+    # Phase 6.6: the detector can re-emit the same package-CVE under a new doc_id (feed offset change);
+    # the view must show it once, with the latest values - not count it several times.
+    _tid, tkey = tenant
+    m = uuid.uuid4().hex[:8]
+    agent, cve = f"host-dup-{m}", f"CVE-DUP-{m}"
+    r1 = _vrow(tkey, agent, "web01", "openssl", "1.1", cve, "Medium", 5.0)
+    r2 = _vrow(tkey, agent, "web01", "openssl", "1.1", cve, "High", 8.1)   # newer re-detection
+    r1[VS_COLS.index("doc_id")] = f"{agent}-{cve}-a"
+    r2[VS_COLS.index("doc_id")] = f"{agent}-{cve}-b"
+    r2[VS_COLS.index("last_seen")] = datetime.datetime(2026, 11, 14, 12, 0, 0)  # later than r1
+    ch_client.insert("vulnerability_states", [r1, r2], column_names=VS_COLS)
+    rows = client.get(f"/api/vulnerabilities/hosts/{agent}", headers=_hdr(client, db, tenant)).json()
+    assert [r["cve_id"] for r in rows] == [cve]          # one row, not two
+    assert rows[0]["cvss_score"] == 8.1                  # the latest detection's values win
 
 
 def test_tenant_isolation(client, db, ch_client, tenant):

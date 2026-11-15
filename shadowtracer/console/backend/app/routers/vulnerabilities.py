@@ -1,4 +1,4 @@
-"""Phase 7.7: per-host / per-tenant vulnerability view over ClickHouse vulnerability_states
+"""Phase 6.6: per-host / per-tenant vulnerability view over ClickHouse vulnerability_states
 (landed by the indexer shim, shadowtracer_ingest/vulnshim.py), enriched with CISA KEV and FIRST
 EPSS from Postgres (the same kev_vulnerabilities / epss_scores tables the incident enrichment uses).
 
@@ -66,9 +66,16 @@ def _live_rows(settings: Settings, tenant: str, agent_id: str | None):
         if agent_id is not None:
             where += " AND agent_id = {a:String}"
             params["a"] = agent_id
+        # One row per (agent, package, version, CVE): the vulnerability detector can re-emit a finding
+        # under a new document id when the feed's detection offset changes (and the shim's empty sync
+        # read means the superseded row isn't reconciled away), so collapse to the latest by last_seen
+        # here - otherwise a single vulnerable package-CVE would be counted several times. See
+        # OPTIMIZATION_BACKLOG (Phase 6.6: shim sync read) for removing the stale rows at the source.
         return ch.query(
-            "SELECT agent_id, agent_name, package_name, package_version, cve_id, severity, cvss_score, "
-            f"first_seen, last_seen FROM vulnerability_states FINAL WHERE {where}",
+            "SELECT agent_id, argMax(agent_name, last_seen), package_name, package_version, cve_id, "
+            "argMax(severity, last_seen), argMax(cvss_score, last_seen), min(first_seen), max(last_seen) "
+            f"FROM vulnerability_states FINAL WHERE {where} "
+            "GROUP BY agent_id, package_name, package_version, cve_id",
             parameters=params).result_rows
     finally:
         ch.close()

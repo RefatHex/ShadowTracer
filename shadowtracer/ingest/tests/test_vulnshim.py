@@ -1,4 +1,4 @@
-"""Phase 7.7: indexer-shim parsing + ClickHouse write logic. No live server/DB - a fake CH client
+"""Phase 6.6: indexer-shim parsing + ClickHouse write logic. No live server/DB - a fake CH client
 captures inserts. Covers bulk index/delete, tenant resolution from the index name, first_seen
 preservation, delete-by-query, and the sentinel/odd-value coercions."""
 from datetime import datetime

@@ -1,4 +1,4 @@
-"""Phase 7.7: a minimal OpenSearch "indexer" shim for Wazuh 4.14.8's vulnerability-detector.
+"""Phase 6.6: a minimal OpenSearch "indexer" shim for Wazuh 4.14.8's vulnerability-detector.
 
 In 4.14.8 the vulnerability scanner writes the full CVE inventory only to the Wazuh indexer's
 states index (wazuh-states-vulnerabilities-<cluster>), never to alerts.json - only real-time

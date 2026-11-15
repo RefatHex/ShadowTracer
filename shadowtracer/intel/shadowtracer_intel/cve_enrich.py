@@ -94,6 +94,40 @@ def cve_mentions(ch, tenant_key: str, since: dt.datetime, limit: int = 20000) ->
     return [(node, aid, list(cves)) for node, aid, cves in rows if cves]
 
 
+def vuln_state_cves(ch, tenant_key: str, limit: int = 20000) -> set:
+    """Distinct live CVE ids in the tenant's vulnerability inventory (landed by the indexer shim,
+    Phase 6.6). Bounded."""
+    if ch is None:
+        return set()
+    rows = ch.query(
+        "SELECT DISTINCT cve_id FROM vulnerability_states FINAL "
+        "WHERE tenant_id = {t:String} AND is_deleted = 0 AND cve_id != '' "
+        f"LIMIT {int(limit)}", parameters={"t": tenant_key}).result_rows
+    return {r[0].upper() for r in rows if CVE_RE.fullmatch((r[0] or "").upper())}
+
+
+def enrich_vuln_states(engine, ch, tenant_key: str, http=_get) -> dict:
+    """Phase 6.6: fetch REAL FIRST EPSS for the CVEs in the tenant's vulnerability inventory and store
+    it, so the console vuln view shows real EPSS and real KEV (matched against the synced CISA KEV) -
+    no hand-seeding. Only fetches EPSS for CVEs not already stored (idempotent). KEV matching itself
+    needs no fetch here: the console joins the inventory's CVE ids against kev_vulnerabilities, which
+    refresh_kev keeps current from CISA."""
+    cves = vuln_state_cves(ch, tenant_key)
+    if not cves:
+        return {"cves": 0, "epss_fetched": 0}
+    with engine.connect() as conn:
+        have = {r[0] for r in conn.execute(
+            _text("SELECT cve_id FROM epss_scores WHERE cve_id = ANY(:c)"), {"c": list(cves)})}
+    missing = sorted(cves - have)
+    fetched = 0
+    if missing:
+        scores = fetch_epss(missing, http)
+        with engine.begin() as conn:
+            store_epss(conn, scores)
+        fetched = len(scores)
+    return {"cves": len(cves), "epss_fetched": fetched}
+
+
 def tag_incidents(engine, ch, tenant_key: str, now: dt.datetime = None, days: int = 7, http=_get) -> dict:
     """Enrich incidents (in the window) whose alerts mention a CVE: set cve_ids, kev_cve_ids (those
     in KEV), max_epss, and floor priority for a KEV hit. Fetches EPSS for any new CVEs first."""

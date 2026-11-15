@@ -1636,7 +1636,7 @@ CVEs actually seen. A KEV CVE is actively exploited, so it floors the (generated
 at 13 (migration `c6f1a3b5d7e9`). The console shows a CVE / KEV / EPSS badge on the incident. Lab:
 1,779 KEV loaded, **3,126 incidents tagged with a CVE, 1 in KEV**.
 
-### A5 — per-host CVE inventory via the indexer shim (DONE, Phase 7.7)
+### A5 — per-host CVE inventory via the indexer shim (DONE, Phase 6.6)
 
 Resolves D22. In 4.14.8 the vulnerability-detector writes the full per-host CVE inventory **only** to
 the Wazuh indexer's `wazuh-states-vulnerabilities-<cluster>` index (NDJSON `_bulk`); only real-time
@@ -1653,16 +1653,27 @@ from the index-name cluster suffix (`VULN_TENANT_MAP`), unknown cluster → rows
 
 Console **Vulnerabilities** view (`routers/vulnerabilities.py`, `VulnerabilitiesPage.tsx`): per-host
 CVE list enriched from the same A3 `kev_vulnerabilities` / `epss_scores` tables, sorted KEV-first then
-EPSS; a KEV on a host raises the host's priority to critical. Lab check: agent-ubuntu-1 (060) → 13
-CVEs in ClickHouse (matches the shim's `13 indexed` log); `apt upgrade libpcre2-8-0` → the 7 pinned
-CVEs resolve (`7 deleted`, dropped from the live view); survives a manager restart (connector
-re-initializes against the shim). *Lab KEV/EPSS values for the synthetic `CVE-2026-*` feed are seeded
-demo data; the enrichment join itself is real and unit-tested.*
+EPSS; a KEV on a host raises the host's priority to critical. The list is deduplicated to one row per
+(agent, package, version, CVE) — the detector re-emits a finding under a new document id when the
+feed's detection offset changes, and the shim's empty sync read leaves the superseded row in place
+(OPTIMIZATION_BACKLOG: shim sync read).
+
+**Enrichment is real, not seeded.** The CVE content is the real Wazuh CTI vulnerability feed (default
+source, ~13 GB; `feed-update` + re-scan in the manager log), so the `CVE-2026-*` ids are real published
+CVEs — confirmed by FIRST EPSS returning scores for every one, and by the real CISA KEV sync carrying
+`CVE-2026-*` ids with real `date_added`. `cve_enrich.enrich_vuln_states` fetches real FIRST EPSS for the
+CVEs in the inventory (idempotent; stored in `epss_scores`), and KEV comes from the existing CISA sync;
+nothing is hand-seeded. Lab check (agent-ubuntu-1 / 060): 7 real CVEs across libssl3 / apt /
+libapt-pkg6.0, real EPSS 0.4–1.2 %, **0 in KEV** (none actively exploited), max CVSS 8.2 → host
+priority *high*. Screenshot: `docs/report/6.6-vulnerabilities.png` (real data). Earlier lab checks
+still hold: `apt upgrade libpcre2-8-0` → the pinned CVEs resolve (`N deleted`, dropped from the view);
+survives a manager restart (connector re-initializes against the shim).
 
 ### Limitations
 
-- **D22 — RESOLVED (Phase 7.7, A5 above).** Per-host CVE inventory now lands in ClickHouse
-  `vulnerability_states` via the indexer shim; a package→KEV/EPSS view exists per host and per tenant.
+- **D22 — RESOLVED (Phase 6.6, A5 above).** Per-host CVE inventory now lands in ClickHouse
+  `vulnerability_states` via the indexer shim; a package→KEV/EPSS view exists per host and per tenant,
+  enriched with real CISA KEV + FIRST EPSS.
 - **D18 — live FIM→YARA chain unproven in this lab.** In WSL2+Docker, `syscheckd` realtime delivery
   is selective (kernel inotify works; `/tmp`-family and `/etc` sub-paths do not deliver), so the live
   `554→110200→execd→110201` chain could not be shown here; every link is verified deterministically

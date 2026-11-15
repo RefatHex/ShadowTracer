@@ -1,4 +1,4 @@
-// Phase 7.7 report screenshot of the running lab console vulnerability view (not a test suite).
+// Phase 6.6 report screenshot of the running lab console vulnerability view (not a test suite).
 // usage: ST_URL=https://localhost:8443 ANALYST_EMAIL=.. ANALYST_PASSWORD=.. \
 //        OUT=../../docs/report node e2e/report-screenshots-77.mjs
 import { chromium } from '@playwright/test'
@@ -16,9 +16,9 @@ try {
   await page.getByRole('button', { name: 'Vulnerabilities' }).click()
   await page.waitForFunction(() => /\d+ CVEs/.test(document.body.innerText), { timeout: 60000 })
   await page.getByText(/\d+ CVEs/).first().click()   // expand the host's CVE table
-  await page.waitForSelector('text=KEV', { timeout: 60000 })
+  await page.waitForFunction(() => /CVE-/.test(document.body.innerText), { timeout: 60000 })
   await page.waitForTimeout(800)
-  await page.screenshot({ path: out('7.7-vulnerabilities.png'), fullPage: false })
+  await page.screenshot({ path: out('6.6-vulnerabilities.png'), fullPage: false })
   console.log('vuln screenshot written to', env.OUT)
 } finally {
   await browser.close()
