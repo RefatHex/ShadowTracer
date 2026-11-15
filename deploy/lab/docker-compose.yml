@@ -59,6 +59,12 @@ x-console-backend-env: &console-backend-env
   # Phase 7.8 demo: the Live view reads the TEST tenant's shipper counters for the
   # upstream pipeline stages (best-effort; the authoritative counts come from the stores).
   LIVE_SHIPPER_METRICS_URL: http://shipper-worker-test:9101/
+  # Phase 7.8 demo: the Agents page reads the tenant's manager via the Wazuh API (one cluster
+  # per tenant). Map tenant_key -> manager API base URL. wazuh-wui is the lab default API user;
+  # set WAZUH_API_PASSWORD in deploy/lab/.env to override the lab default.
+  WAZUH_API_ENDPOINTS: '{"${TEST_TENANT_KEY}":"https://shadowtracer-worker-test:55000"}'
+  WAZUH_API_USER: ${WAZUH_API_USER:-wazuh-wui}
+  WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD:-wazuh-wui}
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   KAFKA_WRITER_GROUP: shadowtracer-writer
   # Phase 5.6 Item 1: Describe-only credential (no topic Read/Write) -

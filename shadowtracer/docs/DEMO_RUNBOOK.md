@@ -8,19 +8,37 @@ incident close, and the big-screen **Live view** are all built for this.
 > Atomic Red Team steps are run by the owner's own `st-record` script and are **not** part of this
 > runbook. The `replay` step below replays a *recorded* public dataset, which is different.
 
+Console URL: **<https://localhost:8443>** (self-signed cert - accept it once).
+
+## The recording order (login → agents → attack → alerts → incident findings)
+
+1. **Login** — open the URL, sign in. *(screenshot: `docs/report/7.8-step1-login.png`)*
+2. **Agents** — click **Agents**: the fleet from the tenant's Wazuh manager, active ones on top
+   (`agent-ubuntu-1` = the victim). *(screenshot: `docs/report/7.8-step2-agents.png`)*
+3. **Live view** — click **Live** (or `#/live`), put it on the big screen. Run the attack steps
+   below; watch the pipeline counters, alert ticker, incidents, and TI/YARA/VT hits move.
+   *(screenshot mid-attack: `docs/report/7.8-step3-live-view.png`)*
+4. **Incident findings** — click an incident (in Live view or **Incidents**): rule groups, MITRE,
+   source IPs (with AbuseIPDB/GreyNoise), users, triage, and the **attack-relationship graph**
+   (Phase 7.6 - it exists: IP → users → host → rules). Click **Build graph**.
+   *(screenshot: `docs/report/7.8-step4-incident-findings.png`)*
+
 ## 0. One-time setup
 
 ```bash
 cd deploy/lab
-# a console admin for the TEST tenant (prompts for a password):
+# a console admin for the TEST tenant (prompts for a password - never pass it on the CLI):
 docker exec -it shadowtracer-lab-console-backend-1-1 python cli.py create-admin \
     --tenant shadowtracer-lab-test --email demo@test.lab
 # the attacker box (compose "demo" profile - not part of a normal bring-up):
 docker compose --profile demo up -d demo-attacker
 ```
 
-Open the console at <https://localhost:8443>, sign in as `demo@test.lab`, click **Live** (or go to
-`#/live`). Put that on the big screen. It polls every 3 s.
+**Verify login works** before recording: open <https://localhost:8443>, sign in as the admin you
+just created. A 200 and the nav bar means you're in. (If `create-admin` says the user already
+exists, pick another email or reset the password the same way.)
+
+Then sign in, click **Live** (or go to `#/live`), and put it on the big screen. It polls every 3 s.
 
 ## 1. Reset (start of every take)
 

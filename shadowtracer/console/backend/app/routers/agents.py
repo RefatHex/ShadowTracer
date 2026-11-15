@@ -17,8 +17,36 @@ from ..audit import append_entry
 from ..deps import get_db
 from ..models import agent_role_tags
 from ..rbac import ADMIN_ONLY, ALL_ROLES, CurrentUser
+from .. import wazuh_api
 
 router = APIRouter(prefix="/api", tags=["agents"])
+
+
+class Agent(BaseModel):
+    id: str
+    name: str
+    os: str
+    status: str
+    last_seen: str | None
+    manager: str
+    tenant: str
+    ip: str | None = None
+    version: str | None = None
+
+
+@router.get("/agents", response_model=list[Agent])
+def list_agents(current_user: CurrentUser = Depends(ALL_ROLES)):
+    """Agents for the caller's tenant, from that tenant's Wazuh manager API (one cluster per
+    tenant). Returns [] if no manager API is configured for the tenant or it is unreachable - the
+    Agents page then shows an empty state rather than erroring."""
+    base = wazuh_api.endpoints().get(current_user.tenant_key)
+    if not base:
+        return []
+    try:
+        agents = wazuh_api.list_agents(base)
+    except wazuh_api.WazuhApiError:
+        return []
+    return [Agent(tenant=current_user.tenant_key, **a) for a in agents]
 
 
 class AgentDrift(BaseModel):

@@ -343,6 +343,24 @@ export interface CveRow {
   last_seen: string
 }
 
+// Phase 7.8 demo: Agents page (from the tenant's Wazuh manager API).
+export interface Agent {
+  id: string
+  name: string
+  os: string
+  status: string
+  last_seen: string | null
+  manager: string
+  tenant: string
+  ip: string | null
+  version: string | null
+}
+
+export async function fetchAgents(accessToken: string): Promise<Agent[]> {
+  const resp = await fetch(`${API_BASE}/api/agents`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<Agent[]>(resp)
+}
+
 // Phase 7.8 demo: Live view.
 export interface LiveStage { name: string; value: number | null }
 export interface LiveAlert { time: number; agent_name: string; rule_id: string; rule_level: number; rule_description: string; message: string }
