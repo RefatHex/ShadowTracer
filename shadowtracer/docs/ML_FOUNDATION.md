@@ -450,3 +450,32 @@ e.g. agent 001 `distinct_users 64.5 -> 904`, load agents `~14 -> 156`).
 HST scorer), not a *drift*: the drift-monitor flags a behaviour change only once it persists past the
 confirming bucket. This is deliberate - a drift event means "this agent's normal has shifted and
 stayed shifted", and it never triggers any action or retrain.
+
+## 18. Phase 7.5 — similar past incidents (Sentence Transformers + Qdrant)
+
+At incident close the ml-enricher builds a short text from the incident's **structured fields only**
+(rule descriptions/groups, MITRE techniques+tactics, actor class internal/external, target class,
+alert-count bucket, duration bucket, TI sources, YARA rule names, FIM path *classes*, analyst
+verdict) - never raw full_log, usernames, IPs or hostnames: similarity is about attack **shape**,
+and campaigns (7.6) already link the same attackers. The text builder is versioned (`TEXT_VERSION`)
+and shared by the live path and the backfill. It is embedded once with **all-MiniLM-L6-v2** (CPU,
+Apache-2.0; loaded once, batched, off the hot path - only closed incidents) and the 384-dim vector is
+upserted to **Qdrant** (Apache-2.0; internal network, persistent volume, 384 MiB). `similar.py`.
+
+Payload: tenant_key, incident_id, fingerprint, verdict, closed_at, model + text version. Every query
+goes through `QdrantIndex`/`qdrant_similar`, which **always** adds the tenant filter; the console API
+also tenant-scopes the Postgres detail join, so a cross-tenant id is 404 and a foreign vector never
+surfaces (tested). Re-index on a model/text-version change (`ml_sim_text_version`); hourly
+consistency purge deletes vectors whose incident was removed. model/version logged to MLflow.
+
+API (analyst+): `GET /api/incidents/{id}/similar` → top-k with similarity, verdict and how each was
+resolved. Console: a **Similar past incidents** section on the incident page.
+
+Evaluation (`evaluate_similar.py`, precision@5 on ml_labels technique over the ART + replay pool,
+K=5): embed **0.282** vs rule-group-Jaccard baseline **0.241** for technique (tactic 0.353 vs 0.315);
+per source embed wins on splunk (0.192 vs 0.067), ties on atomic_linux (0.889), both fail on otrf
+(diverse techniques). Per-OS collapses to "unknown" (replay agents have no os_family role tag). Lab
+checks: a repeated SSH brute force retrieves 5/5 earlier brute-force incidents at 1.000; cross-tenant
+query → 404; embedding ~33-82 ms/incident; Qdrant survives a restart (830 vectors kept); running
+mem_limit 12,256 MiB (headroom 1,568 under the 13,824 cap). Screenshot:
+`docs/report/7.5-similar-incidents.png`.

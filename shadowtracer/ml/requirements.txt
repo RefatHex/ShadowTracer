@@ -10,3 +10,7 @@ pytest==9.1.1
 python-evtx==0.8.1
 river==0.26.1
 confluent-kafka==2.15.1
+# Phase 7.5 similar-incident retrieval. Licences: sentence-transformers Apache-2.0,
+# all-MiniLM-L6-v2 Apache-2.0, qdrant-client Apache-2.0 (Qdrant server Apache-2.0).
+sentence-transformers==3.3.1
+qdrant-client==1.12.1

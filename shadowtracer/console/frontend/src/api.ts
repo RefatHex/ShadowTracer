@@ -611,6 +611,25 @@ export interface GraphData {
   shared_nodes?: [string, number[]][]; incident_count?: number; campaign_actor?: string
 }
 
+// Phase 7.5: similar past incidents (by attack shape).
+export interface SimilarIncident {
+  incident_id: number
+  score: number
+  agent_id: string
+  correlation_basis: string | null
+  rule_groups: string[]
+  max_level: number
+  state: string
+  triage_status: string | null
+  priority: number | null
+  closed_at: string | null
+}
+
+export async function fetchSimilarIncidents(accessToken: string, incidentId: number): Promise<SimilarIncident[]> {
+  const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/similar`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<SimilarIncident[]>(resp)
+}
+
 export async function fetchIncidentGraph(accessToken: string, incidentId: number): Promise<GraphData> {
   const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/graph`, { headers: authHeaders(accessToken), credentials: 'include' })
   return handle<GraphData>(resp)

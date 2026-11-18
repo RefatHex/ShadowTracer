@@ -164,19 +164,48 @@ def anomaly_batch(engine, ch, tenant_list: list, limit: int = BATCH) -> dict:
     return {"incidents": len(incs), "with_score": scored}
 
 
+def _load_similar():
+    """Phase 7.5: load the embedding model + Qdrant index once. Returns (embedder, index,
+    internal_ranges) or None if 7.5 is disabled/unavailable - the enricher runs fine without it."""
+    if os.environ.get("ML_SIMILAR", "1") == "0" or not os.environ.get("QDRANT_URL"):
+        return None
+    try:
+        from . import similar
+        ir = [r.strip() for r in os.environ.get("INTERNAL_IP_RANGES", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16").split(",") if r.strip()]
+        emb, idx = similar.Embedder(), similar.QdrantIndex()
+        log.info("similar-incidents: model %s loaded, qdrant has %d vectors", emb.model_name, idx.count())
+        return emb, idx, ir
+    except Exception:  # noqa: BLE001 - never let 7.5 setup stop the core enricher
+        log.exception("similar-incidents setup failed; continuing without it")
+        return None
+
+
+def similar_batch(engine, ch, sim, tenant_list, limit=BATCH) -> dict:
+    from . import similar
+    emb, idx, ir = sim
+    r = similar.embed_batch(engine, ch, emb, idx, tenant_list, ir, limit=limit)
+    if r["indexed"]:
+        similar._mlflow_log(r)
+    return r
+
+
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     argv = argv if argv is not None else sys.argv[1:]
     engine, ch = db.engine(), db.clickhouse()
     models = Models([m for m in os.environ.get("ML_SERVED_MODELS", "incident-risk-dummy").split(",") if m])
     tl = tenants()
+    sim = _load_similar()
     if argv[:1] == ["once"]:
-        print(json.dumps({"supervised": enrich_batch(engine, ch, models, tl),
-                          "anomaly": anomaly_batch(engine, ch, tl)}, default=str))
+        out = {"supervised": enrich_batch(engine, ch, models, tl), "anomaly": anomaly_batch(engine, ch, tl)}
+        if sim:
+            out["similar"] = similar_batch(engine, ch, sim, tl)
+        print(json.dumps(out, default=str))
         return 0
     poll = float(os.environ.get("ML_POLL_SECONDS", "15"))
     label_every = float(os.environ.get("LABEL_INTERVAL_SECONDS", "300"))
-    last_label = 0.0
+    consistency_every = float(os.environ.get("ML_SIM_CONSISTENCY_SECONDS", "3600"))
+    last_label = last_consistency = 0.0
     while True:
         try:
             r = enrich_batch(engine, ch, models, tl)
@@ -185,11 +214,20 @@ def main(argv=None) -> int:
             a = anomaly_batch(engine, ch, tl)
             if a["incidents"]:
                 log.info("anomaly %s", a)
+            s = {"indexed": 0}
+            if sim:
+                s = similar_batch(engine, ch, sim, tl)
+                if s["indexed"]:
+                    log.info("similar %s", s)
+                if time.monotonic() - last_consistency > consistency_every:
+                    from . import similar
+                    log.info("similar consistency %s", json.dumps(similar.purge_consistency(engine, sim[1], tl)))
+                    last_consistency = time.monotonic()
             if time.monotonic() - last_label > label_every:
                 for t in tl:
                     log.info("labels %s", json.dumps(labels.run_all(engine, ch, t), default=str))
                 last_label = time.monotonic()
-            if r["incidents"] >= BATCH or a["incidents"] >= BATCH:
+            if r["incidents"] >= BATCH or a["incidents"] >= BATCH or s["indexed"] >= BATCH:
                 continue
         except Exception:  # noqa: BLE001 - keep the worker alive; the batch is retried
             log.exception("enrich batch failed")

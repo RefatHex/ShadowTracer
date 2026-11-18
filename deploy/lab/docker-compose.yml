@@ -65,6 +65,8 @@ x-console-backend-env: &console-backend-env
   WAZUH_API_ENDPOINTS: '{"${TEST_TENANT_KEY}":"https://shadowtracer-worker-test:55000"}'
   WAZUH_API_USER: ${WAZUH_API_USER:-wazuh-wui}
   WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD:-wazuh-wui}
+  # Phase 7.5: the Similar-past-incidents API queries Qdrant by the incident's stored vector.
+  QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   KAFKA_WRITER_GROUP: shadowtracer-writer
   # Phase 5.6 Item 1: Describe-only credential (no topic Read/Write) -
@@ -1035,14 +1037,28 @@ services:
 
   # Scores closed incidents with the "Production" stage of each served model; writes score
   # and reasons to the incident (never an action). Also labels incidents (ml_labels).
+  # Phase 7.5: vector store for similar-incident retrieval. Apache-2.0. Internal network only (no
+  # host port), persistent volume. Small collection (one 384-dim vector per closed incident).
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    hostname: qdrant
+    restart: unless-stopped
+    mem_limit: 384m
+    memswap_limit: 384m
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - lab
+
   ml-enricher:
     build:
       context: ../..
       dockerfile: deploy/lab/ml.Dockerfile
     image: shadowtracer-lab/ml:local
     restart: unless-stopped
-    mem_limit: 512m
-    memswap_limit: 512m
+    # Phase 7.5: +512m over the 7.0 baseline for CPU torch + the all-MiniLM-L6-v2 model (loaded once).
+    mem_limit: 1024m
+    memswap_limit: 1024m
     command: ["python", "-m", "shadowtracer_ml.enrich"]
     environment: &ml-env
       POSTGRES_HOST: postgres
@@ -1056,8 +1072,13 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       TEST_TENANT_KEY: ${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env}
       ML_SERVED_MODELS: ${ML_SERVED_MODELS:-incident-risk-dummy}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      SENTENCE_TRANSFORMERS_HOME: /opt/models
+      HF_HOME: /opt/models
     depends_on:
       mlflow:
+        condition: service_started
+      qdrant:
         condition: service_started
     networks:
       - lab
@@ -1359,6 +1380,7 @@ networks:
         - subnet: 172.28.0.0/24
 
 volumes:
+  qdrant-data:          # Phase 7.5 similar-incident vectors (persistent)
   mlflow-artifacts:
   ml-scorer-state:
   ml-drift-state:
