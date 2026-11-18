@@ -630,6 +630,23 @@ export async function fetchSimilarIncidents(accessToken: string, incidentId: num
   return handle<SimilarIncident[]>(resp)
 }
 
+// Phase 7.4: the XGBoost historical classifier's assessment of an incident (analyst+). Advisory hint.
+export interface ModelAssessment {
+  incident_id: number
+  model_version: string
+  predicted_class: string
+  probability: number
+  reasons: string[]
+  scored_at: string | null
+  advisory: boolean
+  experimental: boolean
+}
+
+export async function fetchModelAssessment(accessToken: string, incidentId: number): Promise<ModelAssessment | null> {
+  const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/model-assessment`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<ModelAssessment | null>(resp)
+}
+
 export async function fetchIncidentGraph(accessToken: string, incidentId: number): Promise<GraphData> {
   const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/graph`, { headers: authHeaders(accessToken), credentials: 'include' })
   return handle<GraphData>(resp)

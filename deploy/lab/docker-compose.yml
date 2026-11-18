@@ -1057,8 +1057,9 @@ services:
     image: shadowtracer-lab/ml:local
     restart: unless-stopped
     # Phase 7.5: +512m over the 7.0 baseline for CPU torch + the all-MiniLM-L6-v2 model (loaded once).
-    mem_limit: 1024m
-    memswap_limit: 1024m
+    # Phase 7.4: +256m for xgboost + shap (TreeExplainer) + numba, loaded when the classifier is served.
+    mem_limit: 1280m
+    memswap_limit: 1280m
     command: ["python", "-m", "shadowtracer_ml.enrich"]
     environment: &ml-env
       POSTGRES_HOST: postgres
@@ -1071,7 +1072,7 @@ services:
       CLICKHOUSE_DATABASE: shadowtracer
       MLFLOW_TRACKING_URI: http://mlflow:5000
       TEST_TENANT_KEY: ${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env}
-      ML_SERVED_MODELS: ${ML_SERVED_MODELS:-incident-risk-dummy}
+      ML_SERVED_MODELS: ${ML_SERVED_MODELS:-incident-risk-dummy,incident-classifier}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       SENTENCE_TRANSFORMERS_HOME: /opt/models
       HF_HOME: /opt/models

@@ -14,3 +14,7 @@ confluent-kafka==2.15.1
 # all-MiniLM-L6-v2 Apache-2.0, qdrant-client Apache-2.0 (Qdrant server Apache-2.0).
 sentence-transformers==3.3.1
 qdrant-client==1.12.1
+# Phase 7.4 historical classifier + explanations. Licences: xgboost Apache-2.0, shap MIT.
+# Model persisted as XGBoost native JSON/UBJ (never pickle); SHAP TreeExplainer for per-incident reasons.
+xgboost==2.1.4
+shap==0.48.0

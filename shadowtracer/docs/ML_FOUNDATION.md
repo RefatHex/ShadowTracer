@@ -479,3 +479,142 @@ checks: a repeated SSH brute force retrieves 5/5 earlier brute-force incidents a
 query → 404; embedding ~33-82 ms/incident; Qdrant survives a restart (830 vectors kept); running
 mem_limit 12,256 MiB (headroom 1,568 under the 13,824 cap). Screenshot:
 `docs/report/7.5-similar-incidents.png`.
+
+## 19. Phase 7.4 — XGBoost + SHAP historical classifier with explanations
+
+A supervised classifier that labels a **closed** incident attack-vs-benign with a probability and
+plain-language reasons, shown to analysts as an **advisory hint** at incident close.
+`shadowtracer_ml/classifier.py` trains it; `xgb_serving_model.py` serves it; `reasons.py` turns SHAP
+values into sentences. **It never triggers an action** — no suppression, auto-close or filtering.
+
+**Training.** Same data discipline as the 7.0 logreg (`evaluate.py`, reused wholesale): split by
+**time and group**, a **frozen/pinnable test set**, thresholds **and hyperparameters chosen on the
+validation split only**, class imbalance via `scale_pos_weight`. On top of that, 7.4 adds:
+- **fingerprint dedup across the split** — a replay re-run produces the same feature vector; those
+  near-duplicates are collapsed to one (earliest-closed kept) so the same shape can't sit in both
+  train and test. The count removed is reported and logged.
+- **two baselines** beaten on PR-AUC: **rules-only** (max rule level) and **rarity** (rare_pattern).
+- **bootstrap 95 % CIs** on every test metric (per-class precision/recall, macro-F1, PR-AUC).
+- a **SHAP TreeExplainer additivity check** (`sum(shap) + base == model margin`), max abs error
+  logged.
+
+The model is persisted as **XGBoost native JSON/UBJ** — never a pickle, so loading an untrusted model
+file cannot execute code. Registered in MLflow (`incident-classifier`) with the data/label snapshot
+hash, feature version, git commit, hyperparameters, metrics and a model card; promoted to the
+Production **stage** only if it clears the baseline+test-size gate (otherwise it is tagged
+`experimental` and only served for the hint when explicitly promoted with `--promote-experimental`).
+
+**Serving.** The ml-enricher loads it **by MLflow stage** (never a file path), refreshed every 5 min,
+and scores each incident **at close**, off the alert hot path. It stores model version + class +
+probability + SHAP reasons + the version's `experimental` flag into
+`incidents.ml_reasons.models["incident-classifier:<v>"]` — the same per-incident, tenant-scoped
+Postgres row the 7.0 score uses. **SHAP reasons carry no raw username, IP or hostname**: they can't,
+because no identifier is a model feature (features are counts / rates / flags only), so `reasons.py`
+is a closed vocabulary of phrases.
+
+**Scoring window + backfill.** The daemon's enrich window start is **config, not a hardcoded date**:
+`ML_SINCE` if set, else the **served model's MLflow registration time** (a model never auto-scores
+incidents that closed before it existed), else the 7.0-data fallback. Older incidents are picked up
+with a documented, idempotent backfill:
+
+```
+python -m shadowtracer_ml.enrich backfill --since 2026-11-06T00:00:00Z [--until <ISO>]
+```
+
+It re-scores every closed incident in the window with the current served models, paging by a
+`(closed_at, id)` keyset cursor, and **overwrites each incident by id + model version** — safe to
+re-run, no duplicate rows. (This is exactly how incident 394326, closed before the classifier's
+registration, was scored for the report.)
+
+API (analyst+): `GET /api/incidents/{id}/model-assessment` → class, probability, reasons, model
+version, **`experimental`**; cross-tenant id → 404. Console: a **Model assessment** section on the
+incident page carrying an **`experimental`** badge (from the served version's tag) next to *advisory
+hint*, with the likely class, P(attack) and the top reasons.
+
+**Results (TEST tenant, test set; thresholds + hyperparameters from validation only).**
+
+212 labelled incidents → **71 near-duplicate fingerprints removed** → 141 kept (39 benign, 102
+attack). SHAP additivity max abs error **1.2e-07**.
+
+**Headline — cross-source generalization COLLAPSES.** Train on two source families, test on the
+held-out third (`classifier.leave_one_source_out`): the model does **not** transfer. Every held-out
+source collapses (`collapsed: [atomic_linux, normal_activity, replay, ti_fp]`):
+
+| held-out source | test (benign/attack) | PR-AUC | macro-F1 | note |
+|---|---|---|---|---|
+| atomic_linux | 0 / 14 | — | 0.00 | held-out set single-class (all attack) |
+| normal_activity | 39 / 0 | — | 0.00 | held-out set single-class (all benign) |
+| replay | 1 / 88 | 0.982 | **0.011** | predicts ~everything benign — attack recall 0.0 |
+| ti_fp | 1 / 0 | — | 0.50 | n=1 |
+
+The root cause is **source/label collinearity**: each source family is almost single-class
+(atomic_linux≈attack, normal_activity≈benign, replay≈attack), so holding one out leaves a
+single-class test and strips the model of the only signal it had. Confirmed by SHAP — the top feature
+by mean |SHAP| is **`alerts_per_min` (1.25, a source proxy)**, 2× the next, with `duration_log`
+(another proxy) third:
+
+| rank | feature | mean \|SHAP\| | source proxy? |
+|---|---|---|---|
+| 1 | `alerts_per_min` | 1.25 | **yes (volume)** |
+| 2 | `g_windows` | 0.63 | no (attack shape) |
+| 3 | `duration_log` | 0.15 | **yes (duration)** |
+| 4 | `lvl_mid` | 0.13 | no |
+| 5 | `t_privilege-escalation` | 0.03 | no |
+
+So the model leans heavily on **how much/how long** (which tracks the recording harness) more than on
+attack shape. **The group-stratified CV below (PR-AUC 0.994) is therefore IN-DISTRIBUTION and
+OPTIMISTIC** — within the labelled set source and label are nearly collinear, so a high CV score
+mostly measures "can it separate the sources by volume," not "can it separate attack from benign in
+general." Treat 0.994 as an upper bound, not expected field performance. The model stays
+**experimental** and the promotion gate now also blocks on a cross-source collapse.
+
+The frozen **time-split test set is single-class** (23 benign, **0 attack**) — benign `normal_activity`
+incidents all close most recently, so the last groups in time are all benign. Attack-side metrics,
+PR-AUC and the baselines are therefore **undefined on the time-split**, and the model **cannot clear
+the promotion gate** (it is registered `experimental` and served only as a hint). Defined there:
+benign precision 1.00, benign recall 0.52 [0.35, 0.74], macro-F1 0.34 [0.26, 0.43].
+
+Because the time-split is degenerate on this data, a **group-stratified CV** (StratifiedGroupKFold,
+k=5 — groups are `source-family | run/dataset`, so both classes are in every fold's test slice and no
+run/replay near-duplicate spans folds) gives a leakage-controlled two-class read. **In-distribution,
+and optimistic (see the headline above) — indicative only, not the promotion gate.** 95 % bootstrap
+CIs:
+
+| metric (group-stratified CV) | model | 95 % CI | rules-only | rarity |
+|---|---|---|---|---|
+| PR-AUC | **0.994** | [0.981, 1.000] | 0.905 | 0.835 |
+| attack precision | 0.980 | [0.948, 1.000] | — | — |
+| attack recall | 0.971 | [0.935, 1.000] | — | — |
+| benign precision | 0.925 | [0.833, 1.000] | — | — |
+| benign recall | 0.949 | [0.868, 1.000] | — | — |
+| macro-F1 | 0.956 | [0.915, 0.990] | — | — |
+
+So within the labelled distribution the model beats both baselines (PR-AUC 0.994 > rules 0.905 >
+rarity 0.835), but that number is optimistic (headline above) and it **cannot be validated on the
+strict frozen time-split** — hence experimental.
+
+**Why incident 394326 scores only ~0.73 when in-distribution attacks score near 1.0 — it is out of
+distribution.** 394326 is a real SSH brute force with **128,532 alerts** (P(attack) 0.73 under the
+served v4; 0.56 under v3 — either way well short of the ~0.97 confidence the grouped CV gives
+in-distribution attacks). On the two features the model leans on most, it sits **beyond the entire
+training range** (`classifier.SOURCE_PROXY_FEATURES` check):
+
+| feature (model's #1 and #3) | 394326 | train min | train p95 | train max | in range? |
+|---|---|---|---|---|---|
+| `n_alerts_log` (volume) | **11.76** | 0.69 | 8.81 | 11.28 | **no — above max** |
+| `duration_log` | **6.80** | 0.00 | 5.06 | 6.09 | **no — above max** |
+| `alerts_per_min` (proxy) | 8 630 | 1.0 | 6 213 | 11 905 | at the top (p95–max) |
+
+Because the model's dominant signal is volume/duration and 394326 is larger and longer than anything
+it trained on, it is **extrapolating**, so it lands well below the near-1.0 scores it gives
+in-distribution attacks. This is the predicted behaviour of a model whose top features are source
+proxies — and the reason it is a hint, not a detector.
+
+**Limits.** The labelled set is dominated by one Linux agent and a handful of recorded Windows
+datasets; benign examples come from very few distinct fingerprints, so after dedup the **test set is
+small and the confidence intervals are wide** — the model is **experimental** and is shown only as a
+hint. Labels come from run windows and dataset agents (background noise in a window can be
+mislabelled). Not calibrated across tenants; trained on the TEST tenant only. Because it does not
+reliably clear the baselines on this thin data, it must never be used to filter, suppress or
+auto-close — it is an explanation aid, not a detector. Screenshot:
+`docs/report/7.4-model-assessment.png`.

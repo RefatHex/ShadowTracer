@@ -6,6 +6,10 @@ reads them to act. Runs the labeler every LABEL_INTERVAL_SECONDS.
 
   python -m shadowtracer_ml.enrich            # loop
   python -m shadowtracer_ml.enrich once       # one batch, prints what it did
+  python -m shadowtracer_ml.enrich backfill --since 2026-11-06T00:00:00Z [--until ...]
+                                              # re-score a closed window with the current served
+                                              # models (idempotent: overwrites each incident by id +
+                                              # model version, no duplicates - safe to re-run)
 """
 import collections
 import datetime as dt
@@ -24,8 +28,13 @@ BATCH = 200
 STAGE = "Production"
 
 
-# Only incidents closed after this are enriched: older test-tenant incidents are load-test traffic.
-SINCE = os.environ.get("ML_SINCE", "2026-11-06T11:25:00Z")   # 7.0 data start (first recorded run 11:28)
+# The default enrich window start (Phase 7.4 item 6): config, not a hardcoded date. ML_SINCE wins if
+# set; otherwise enrich_batch uses the SERVED MODEL's registration time (Models.since()) - a model
+# never scores incidents that closed before it existed; older ones are a deliberate `backfill`. This
+# fallback (7.0 data start) is used only before any model has loaded, and by anomaly/similar below,
+# which have no model-registration time of their own.
+SINCE_FALLBACK = "2026-11-06T11:25:00Z"   # 7.0 data start (first recorded run 11:28)
+SINCE = os.environ.get("ML_SINCE", SINCE_FALLBACK)
 
 
 def tenants(env=os.environ) -> list:
@@ -76,55 +85,113 @@ class Models:
 
     def __init__(self, names: list, refresh: float = 300.0):
         self.names, self.refresh, self.loaded, self.at = names, refresh, {}, 0.0
+        self.experimental: dict = {}   # key -> bool, from the model version's `experimental` tag (7.4 item 5)
+        self.registered_at = None      # earliest served-version creation time, ms epoch (7.4 item 6)
 
     def get(self) -> dict:
         if time.monotonic() - self.at > (self.refresh if self.loaded else 60.0):
             import mlflow
             client = mlflow.MlflowClient()
-            loaded = {}
+            loaded, experimental, registered = {}, {}, None
             for name in self.names:
                 try:
                     versions = client.get_latest_versions(name, stages=[STAGE])
                     if versions:
-                        v = versions[0].version
-                        key = f"{name}:{v}"
+                        mv = versions[0]
+                        key = f"{name}:{mv.version}"
                         loaded[key] = self.loaded.get(key) or mlflow.pyfunc.load_model(f"models:/{name}/{STAGE}")
+                        experimental[key] = (mv.tags or {}).get("experimental") == "true"
+                        if mv.creation_timestamp:
+                            registered = mv.creation_timestamp if registered is None else min(registered, mv.creation_timestamp)
                 except Exception:  # noqa: BLE001 - a missing/broken model leaves incidents unscored, never stops the worker
                     log.exception("loading %s/%s failed", name, STAGE)
-            self.loaded, self.at = loaded, time.monotonic()
+            self.loaded, self.experimental, self.registered_at, self.at = loaded, experimental, registered, time.monotonic()
         return self.loaded
 
+    def since(self) -> str:
+        """Default enrich window start (7.4 item 6): explicit ML_SINCE wins; else the earliest served
+        model's registration time (a model never auto-scores incidents that closed before it existed);
+        else the 7.0-data fallback before anything has loaded."""
+        if os.environ.get("ML_SINCE"):
+            return os.environ["ML_SINCE"]
+        if self.registered_at:
+            return dt.datetime.fromtimestamp(self.registered_at / 1000, dt.timezone.utc).isoformat()
+        return SINCE_FALLBACK
 
-def enrich_batch(engine, ch, models: Models, tenant_list: list, limit: int = BATCH) -> dict:
+
+_INCIDENT_COLS = (
+    "id, tenant_key, first_seen, last_seen, closed_at, alert_count, max_level, rule_ids, rule_groups, "
+    "source_ip_total, user_total, correlation_basis, rare_pattern_flag, prior_occurrences, ti_confidence")
+
+
+def _score_and_store(conn, ch, models: Models, served: dict, incs: list) -> list:
+    """Compute+store features, predict with every served model, and write one ml_reasons row per
+    incident. Shared by the daemon (enrich_batch) and the backfill tool. The UPDATE is keyed by
+    incident id and the models dict is keyed by name:version, so re-scoring the same incident with
+    the same model versions overwrites in place - idempotent, never duplicated (7.4 item 6)."""
+    feats = [incident_features(conn, ch, i) for i in incs]
+    now = dt.datetime.now(dt.timezone.utc)
+    store_features(ch, [features.to_row(i["tenant_key"], i["id"], i["closed_at"], f, now) for i, f in zip(incs, feats)])
+    X = features.model_input(feats)
+    outputs = {key: model.predict(X) for key, model in served.items()}
+    primary = next(iter(outputs))
+    for n, inc in enumerate(incs):
+        per_model = {}
+        for k, o in outputs.items():
+            entry = {"score": round(float(o["score"].iloc[n]), 4), "reasons": json.loads(o["reasons"].iloc[n])}
+            if "label" in o.columns:  # Phase 7.4 classifier: class + probability + experimental flag
+                entry["class"] = o["label"].iloc[n]
+                entry["prob"] = round(float(o["prob"].iloc[n]), 4)
+                entry["experimental"] = bool(models.experimental.get(k, False))   # 7.4 item 5: shown in the panel
+            per_model[k] = entry
+        conn.execute(text(
+            "UPDATE incidents SET ml_score = :s, ml_reasons = CAST(:r AS jsonb), ml_model = :m, ml_scored_at = now() "
+            "WHERE id = :i"),
+            {"s": per_model[primary]["score"], "m": primary, "i": inc["id"],
+             "r": json.dumps({"feature_version": features.FEATURE_VERSION, "models": per_model})})
+    return list(outputs)
+
+
+def enrich_batch(engine, ch, models: Models, tenant_list: list, limit: int = BATCH,
+                 since: str = None, until: str = None, rescore: bool = False, after=None) -> dict:
     served = models.get()
     if not served:
         return {"incidents": 0, "models": []}             # no Production model yet: leave incidents for later
+    conds = ["state = 'closed'", "tenant_key = ANY(:t)", "closed_at >= CAST(:since AS timestamptz)"]
+    params = {"t": tenant_list, "n": limit, "since": since or models.since()}
+    if not rescore:                                       # daemon: only unscored incidents
+        conds.append("ml_scored_at IS NULL")
+    if until:                                             # backfill: bounded window
+        conds.append("closed_at < CAST(:until AS timestamptz)"); params["until"] = until
+    if after:                                             # backfill: (closed_at, id) keyset cursor
+        conds.append("(closed_at, id) > (CAST(:acat AS timestamptz), :aid)")
+        params["acat"], params["aid"] = after
+    sql = (f"SELECT {_INCIDENT_COLS} FROM incidents WHERE " + " AND ".join(conds)
+           + " ORDER BY closed_at, id LIMIT :n FOR UPDATE SKIP LOCKED")
     with engine.begin() as conn:
-        incs = [dict(r._mapping) for r in conn.execute(text(
-            "SELECT id, tenant_key, first_seen, last_seen, closed_at, alert_count, max_level, rule_ids, rule_groups, "
-            "source_ip_total, user_total, correlation_basis, rare_pattern_flag, prior_occurrences, ti_confidence "
-            "FROM incidents WHERE state = 'closed' AND ml_scored_at IS NULL AND tenant_key = ANY(:t) "
-            "AND closed_at >= CAST(:since AS timestamptz) ORDER BY closed_at LIMIT :n FOR UPDATE SKIP LOCKED"),
-            {"t": tenant_list, "n": limit, "since": SINCE})]
+        incs = [dict(r._mapping) for r in conn.execute(text(sql), params)]
         if not incs:
             return {"incidents": 0}
-        feats = [incident_features(conn, ch, i) for i in incs]
-        now = dt.datetime.now(dt.timezone.utc)
-        store_features(ch, [features.to_row(i["tenant_key"], i["id"], i["closed_at"], f, now) for i, f in zip(incs, feats)])
-        X = features.model_input(feats)
-        outputs = {}
-        for key, model in served.items():
-            outputs[key] = model.predict(X)
-        primary = next(iter(outputs))
-        for n, inc in enumerate(incs):
-            per_model = {k: {"score": round(float(o["score"].iloc[n]), 4), "reasons": json.loads(o["reasons"].iloc[n])}
-                         for k, o in outputs.items()}
-            conn.execute(text(
-                "UPDATE incidents SET ml_score = :s, ml_reasons = CAST(:r AS jsonb), ml_model = :m, ml_scored_at = now() "
-                "WHERE id = :i"),
-                {"s": per_model[primary]["score"], "m": primary, "i": inc["id"],
-                 "r": json.dumps({"feature_version": features.FEATURE_VERSION, "models": per_model})})
-    return {"incidents": len(incs), "models": list(outputs), "first_id": incs[0]["id"]}
+        model_list = _score_and_store(conn, ch, models, served, incs)
+    return {"incidents": len(incs), "models": model_list, "first_id": incs[0]["id"],
+            "cursor": (incs[-1]["closed_at"], incs[-1]["id"])}
+
+
+def backfill(engine, ch, models: Models, tenant_list: list, since: str, until: str = None) -> dict:
+    """Re-score every closed incident in [since, until) with the current served models, paging by a
+    (closed_at, id) keyset cursor. Idempotent (overwrites by incident id + model version); a one-shot
+    operator tool for picking up a newly added/retrained model on older incidents the daemon window
+    skips. 7.4 item 6."""
+    if not models.get():
+        return {"backfilled": 0, "error": "no served model"}
+    total, cursor, batches = 0, None, 0
+    while True:
+        r = enrich_batch(engine, ch, models, tenant_list, since=since, until=until, rescore=True, after=cursor)
+        if not r["incidents"]:
+            break
+        total += r["incidents"]; cursor = r["cursor"]; batches += 1
+        log.info("backfill %s", {"scored_so_far": total, "through_closed_at": str(cursor[0]), "models": r["models"]})
+    return {"backfilled": total, "batches": batches, "since": since, "until": until}
 
 
 def anomaly_batch(engine, ch, tenant_list: list, limit: int = BATCH) -> dict:
@@ -201,6 +268,14 @@ def main(argv=None) -> int:
         if sim:
             out["similar"] = similar_batch(engine, ch, sim, tl)
         print(json.dumps(out, default=str))
+        return 0
+    if argv[:1] == ["backfill"]:
+        import argparse
+        ap = argparse.ArgumentParser(prog="enrich backfill")
+        ap.add_argument("--since", required=True, help="ISO-8601, inclusive")
+        ap.add_argument("--until", help="ISO-8601, exclusive (default: now)")
+        a = ap.parse_args(argv[1:])
+        print(json.dumps(backfill(engine, ch, models, tl, a.since, a.until), default=str))
         return 0
     poll = float(os.environ.get("ML_POLL_SECONDS", "15"))
     label_every = float(os.environ.get("LABEL_INTERVAL_SECONDS", "300"))
