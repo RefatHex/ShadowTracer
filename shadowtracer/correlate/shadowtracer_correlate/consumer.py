@@ -33,6 +33,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "ingest"))
 from shadowtracer_ingest.dead_letter import send_batch_to_dead_letter  # noqa: E402
+from shadowtracer_ingest.tenant_gate import ignore_unknown_tenant  # noqa: E402
 from shadowtracer_ingest.kafka_security import CONSUMER_PREFETCH_BOUNDS  # noqa: E402
 from shadowtracer_ingest.normalizer import normalize_alert  # noqa: E402
 from shadowtracer_ingest.retry import consumer_heartbeat  # noqa: E402
@@ -186,6 +187,7 @@ def run(
     # silent orphaned incidents - see tenants.py's own docstring for why
     # this is a periodically-refreshed cache, not a query per message.
     tenant_cache = TenantCache(engine)
+    ignored_tenants: set = set()   # Phase 7.4 Part A: non-registry tenants logged once, then ignored
     # Phase 5.6 closeout item 3: console-backend's /health/detail reads
     # this directly - see retry_state.py's own docstring.
     retry_component = f"correlator:{group_id}"
@@ -242,6 +244,14 @@ def run(
                 # the loop - it fails JSON parsing below and is dead-lettered.
                 raw_line = msg.value().decode("utf-8", errors="replace")
 
+                # Phase 7.4 Part A: a topic for a tenant not in the registry (offboarded, or a
+                # stray/test topic matching the pattern on a shared broker) is IGNORED - logged once,
+                # offset advanced (handled), never dead-lettered. Checked first, so only KNOWN tenants
+                # reach the mismatch/version/normalise checks below.
+                if ignore_unknown_tenant(tenant_cache, tenant_key, logger, ignored_tenants):
+                    metrics.incr("ignored_unknown_tenant")
+                    handled.append(msg)
+                    continue
                 # A header that's PRESENT but disagrees with the topic is the
                 # one thing a per-tenant ACL alone can't catch (Phase 5.6
                 # Item 1); a MISSING header makes no claim, so it's not an error.
@@ -251,9 +261,6 @@ def run(
                 # something newer produced it (Phase 5.6 Item 4, VERSIONING.md).
                 elif envelope_version_raw is not None and envelope_version_raw != str(ENVELOPE_VERSION):
                     error = f"unsupported_envelope_version: got {envelope_version_raw!r}, this correlator only understands {ENVELOPE_VERSION}"
-                # Phase 5C Step 0: a forged/stale/deleted tenant never creates incidents.
-                elif not tenant_cache.is_known(tenant_key or ""):
-                    error = "unknown_tenant"
                 else:
                     error = None
                     try:

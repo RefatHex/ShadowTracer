@@ -77,6 +77,28 @@ def _load_env() -> dict:
     return env
 
 
+# Without these, kafka_client_config_from_env() defaults to PLAINTEXT and every
+# consumer/producer this suite starts silently fails to reach the SASL_SSL broker
+# (the broker drops the connection at APIVERSION_QUERY). The suite then fails with
+# "no incident appeared" because nothing is ever consumed - nothing to do with the
+# code under test. The ingest conftest has carried this same fix since 2026-11-05
+# (its "23 tests + 8 errors" note); it was never mirrored here. setdefault so a CI
+# runner's own explicit values still win.
+def _kafka_env_defaults() -> None:
+    try:
+        vals = _load_env()
+    except OSError:
+        return
+    os.environ.setdefault("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+    os.environ.setdefault("KAFKA_SASL_USERNAME", "admin")
+    os.environ.setdefault("KAFKA_SASL_PASSWORD", vals.get("KAFKA_ADMIN_PASSWORD", ""))
+    os.environ.setdefault("KAFKA_SSL_CA_LOCATION",
+                          os.path.join(os.path.dirname(ENV_PATH), "kafka-certs", "ca.crt"))
+
+
+_kafka_env_defaults()
+
+
 def _refuse_if_pointed_at_lab_database(lab_postgres_db: str) -> None:
     """Hard guard, checked before any test runs (and statically by
     check-project.sh): if the test database name ever resolves to the

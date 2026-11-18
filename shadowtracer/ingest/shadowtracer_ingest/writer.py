@@ -47,6 +47,7 @@ from .metrics import Metrics
 from .normalizer import normalize_alert
 from .retry import retry_with_backoff, consumer_heartbeat
 from .retry_state import mark_stuck, clear_stuck
+from .tenant_gate import ignore_unknown_tenant
 from .shipper import ENVELOPE_VERSION
 from .tenants import TenantCache
 from .topics import ALERTS_TOPIC_PATTERN, tenant_from_alerts_topic
@@ -185,6 +186,7 @@ def run(
     # silent orphaned ClickHouse rows - see tenants.py's own docstring for
     # why this is a periodically-refreshed cache, not a query per message.
     tenant_cache = TenantCache(pg_engine)
+    ignored_tenants: set = set()   # Phase 7.4 Part A: non-registry tenants logged once, then ignored
     # Phase 5.6 closeout item 3: console-backend's /health/detail reads
     # this directly - see retry_state.py's own docstring. One small
     # closure per retry kind (both log AND record the stuck-state row)
@@ -305,10 +307,11 @@ def run(
                     # this now only ever fires for a tenant deleted AFTER
                     # its topic was created, not a forged claim (the
                     # mismatch check above already catches that).
-                    if not tenant_cache.is_known(topic_tenant or ""):
-                        metrics.incr("messages_failed")
-                        dead.setdefault(topic_tenant, []).append(
-                            (f"{msg_topic}:{partition}:{msg.offset()}", "unknown_tenant", raw_line))
+                    # Phase 7.4 Part A: a topic for a tenant not in the registry (offboarded, or a
+                    # stray/test topic matching the pattern on a shared broker) is IGNORED - logged
+                    # once, offset advanced by the batch commit below, never dead-lettered.
+                    if ignore_unknown_tenant(tenant_cache, topic_tenant, logger, ignored_tenants):
+                        metrics.incr("ignored_unknown_tenant")
                         continue
                     try:
                         ev = normalize_alert(raw_line, topic_tenant or "")

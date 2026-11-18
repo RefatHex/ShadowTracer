@@ -494,23 +494,64 @@ def test_dead_letter_kafka_failure_is_never_swallowed_offset_would_not_advance()
         assert "did not durably succeed" in str(exc)
 
 
-def test_writer_dead_letters_unknown_tenant_known_tenant_still_processes(
+def test_malformed_message_on_real_tenant_is_dead_lettered_exactly_once_no_reemit(
+    kafka_bootstrap, kafka_topic, kafka_tenant_key, ch_client, lab_env, database_url,
+):
+    """Phase 7.4 Part A regression: one malformed (unparseable) message on a REAL tenant's alerts
+    topic produces exactly ONE dead-letter entry (uniqExact over source_location - the identity
+    /health/detail counts by) and is never re-emitted to an alerts topic. Dead-lettering is terminal:
+    the writer only ever produces to the .dead-letter topic, never back to .alerts."""
+    import time
+    from confluent_kafka import Producer
+    from confluent_kafka.admin import AdminClient
+    from confluent_kafka import TopicPartition
+    marker = uuid.uuid4().hex[:8]
+    bad_value = f'{{not valid json {marker}'.encode()  # unparseable
+    tenant = kafka_tenant_key
+    # record the tenant's alerts-topic high watermark before, to prove 0 re-emit after
+    admin_c = Producer({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
+    stop_flag, thread, metrics = _start_writer(kafka_bootstrap, kafka_topic, lab_env, database_url)
+    try:
+        from confluent_kafka import Consumer
+        probe = Consumer({"bootstrap.servers": kafka_bootstrap, "group.id": f"probe-{marker}", **kafka_client_config_from_env()})
+        def alerts_hw():
+            md = probe.list_topics(kafka_topic, timeout=10).topics[kafka_topic]
+            return sum(probe.get_watermark_offsets(TopicPartition(kafka_topic, pp), timeout=5)[1] for pp in md.partitions)
+        hw_before = alerts_hw()
+        p = Producer({"bootstrap.servers": kafka_bootstrap, **kafka_client_config_from_env()})
+        p.produce(kafka_topic, value=bad_value,
+                  headers=[("tenant_id", tenant.encode()), ("source_manager", b"test"), ("source_file", b"alerts.json")])
+        p.flush(30)
+        deadline = time.monotonic() + 40
+        entries = 0
+        while time.monotonic() < deadline:
+            entries = ch_client.query(
+                f"SELECT uniqExact(source_location) FROM dead_letter_events WHERE tenant_id = '{tenant}'").result_rows[0][0]
+            if entries >= 1:
+                break
+            time.sleep(0.5)
+        assert entries == 1, f"exactly one dead-letter entry expected, got {entries}"
+        # the writer never re-emits to an alerts topic: its only produce target is .dead-letter.
+        # the alerts high watermark only moved by the 1 we produced (no re-emit by the writer).
+        assert alerts_hw() == hw_before + 1, "the writer must not re-emit to the alerts topic"
+        assert thread.is_alive()
+        probe.close()
+    finally:
+        stop_flag.set(); thread.join(timeout=5)
+        ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{tenant}'")
+
+
+def test_writer_ignores_unknown_tenant_known_tenant_still_processes(
     kafka_bootstrap, kafka_topic, kafka_tenant_key, ch_client, lab_env, real_alert_lines, pg_db, database_url,
 ):
-    """Phase 5C Step 0: a tenant_key with no backing tenants row must be
-    dead-lettered (error="unknown_tenant"), never stored - proven
-    alongside a real, flagged-as-test tenant (kafka_topic's own, already
-    with a real tenants row) whose otherwise-identical event still lands
-    normally, so this isn't just "the writer dead-letters everything
-    right now".
+    """Phase 7.4 Part A: a tenant_key whose topic matches the subscription pattern but which has NO
+    backing tenants row is IGNORED - logged once, its offset advanced, NEVER dead-lettered or stored
+    - proven alongside a real, flagged-as-test tenant (kafka_topic's own, already with a tenants row)
+    whose otherwise-identical event still lands normally.
 
-    Phase 5.6 Item 1: "unknown tenant" now means a topic exists (a real
-    producer ACL was granted for it) but its Postgres row doesn't - the
-    tenant_cache staleness race this item was originally written for,
-    not "no topic at all" (which isn't reachable: a message can't exist
-    without a provisioned topic to carry it). Needs its own topic,
-    created here with no matching tenants row, since kafka_topic's own
-    topic always has one by construction."""
+    Before 7.4 this was dead-lettered with error="unknown_tenant"; dead-lettering non-registry
+    tenants was the only thing that filled the dead-letter topics (nothing consumes them back), so an
+    offboarded/stray/test-fixture topic is now terminal-ignored instead."""
     import json
     from confluent_kafka.admin import AdminClient, NewTopic
     from shadowtracer_ingest.topics import alerts_topic_for_tenant, dead_letter_topic_for_tenant
@@ -547,18 +588,19 @@ def test_writer_dead_letters_unknown_tenant_known_tenant_still_processes(
         # 40s, not 20s - see test_writer_is_actually_running_and_draining_
         # not_just_callable's own comment on this exact margin.
         deadline = time.monotonic() + 40
-        known_count = dl_count = 0
+        known_count = 0
         while time.monotonic() < deadline:
             known_count = _count_alert_ids(ch_client, [known_event["id"]])
-            dl_count = ch_client.query(
-                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{unknown_tenant}' AND error = 'unknown_tenant'"
-            ).result_rows[0][0]
-            if known_count == 1 and dl_count == 1:
+            # the known event landing proves the writer drained past the ignored unknown-tenant one
+            if known_count == 1 and metrics.snapshot().get("ignored_unknown_tenant", 0) >= 1:
                 break
             time.sleep(0.5)
 
         assert known_count == 1, "the known (flagged-test) tenant's event must still land in ClickHouse"
-        assert dl_count == 1, "the unknown tenant's event must be dead-lettered with error=unknown_tenant"
+        assert metrics.snapshot().get("ignored_unknown_tenant", 0) >= 1, "the unknown tenant's event must be IGNORED (counted), not dead-lettered"
+        dl_count = ch_client.query(
+            f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{unknown_tenant}'").result_rows[0][0]
+        assert dl_count == 0, "the unknown tenant's event must NOT be dead-lettered (it is ignored)"
         assert _count_alert_ids(ch_client, [unknown_event["id"]]) == 0, "the unknown tenant's event must never be stored"
         assert thread.is_alive(), "writer must never crash on an unknown tenant"
     finally:
@@ -745,10 +787,11 @@ def test_a_brand_new_tenants_first_event_sent_right_away_is_stored_not_dead_lett
 
 def test_offboarded_tenant_message_does_not_stall_other_tenants(kafka_bootstrap, kafka_topic, ch_client, lab_env, real_alert_lines, database_url):
     """Tenant offboarding (docs/design/TENANCY.md §6): a message still in an
-    offboarded tenant's alerts topic - tenants row gone, dead-letter topic
-    deleted - must be recorded and skipped, while another tenant's alerts
-    keep landing. Before the fix the writer retried the dead-letter publish
-    forever and every partition it owned stopped."""
+    offboarded tenant's alerts topic (tenants row gone) is a non-registry
+    tenant, so as of Phase 7.4 Part A it is IGNORED - logged once, offset
+    advanced, NEVER dead-lettered (before 7.4 it was dead-lettered as
+    unknown_tenant) - while another tenant's alerts keep landing, which is the
+    real "does not stall other tenants" invariant."""
     import json
     from confluent_kafka.admin import AdminClient, NewTopic
     from shadowtracer_ingest.topics import alerts_topic_for_tenant
@@ -789,10 +832,12 @@ def test_offboarded_tenant_message_does_not_stall_other_tenants(kafka_bootstrap,
         thread.join(timeout=10)
 
         assert _count_alert_ids(ch_client, good_ids) == len(good_ids), "the other tenant's alerts must keep landing"
-        rows = ch_client.query("SELECT error FROM dead_letter_events WHERE tenant_id = {t:String}",
-                               parameters={"t": offboarded}).result_rows
-        assert rows and "unknown_tenant" in rows[0][0] and "tenant offboarded" in rows[0][0], rows
-        assert metrics.snapshot().get("dead_letter_topic_missing", 0) >= 1
+        # Offboarded tenant is non-registry: IGNORED (counted), never dead-lettered.
+        assert metrics.snapshot().get("ignored_unknown_tenant", 0) >= 1, \
+            "the offboarded tenant's message must be IGNORED (counted), not dead-lettered"
+        dl = ch_client.query("SELECT count() FROM dead_letter_events WHERE tenant_id = {t:String}",
+                             parameters={"t": offboarded}).result_rows[0][0]
+        assert dl == 0, "the offboarded tenant's message must NOT be dead-lettered (it is ignored)"
     finally:
         delete_topics_and_wait(admin, [off_topic])
         ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{offboarded}'")

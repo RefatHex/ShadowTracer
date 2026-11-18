@@ -465,18 +465,13 @@ def test_correlator_stays_up_when_dead_letter_clickhouse_insert_fails(
         )
 
 
-def test_correlator_dead_letters_unknown_tenant_known_tenant_still_processes(
+def test_correlator_ignores_unknown_tenant_known_tenant_still_processes(
     kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db, ch_client, lab_env,
 ):
-    """Phase 5C Step 0: a tenant_key with no backing tenants row must be
-    dead-lettered (error="unknown_tenant"), never create an incident -
-    proven alongside kafka_topic's own real, flagged-as-test tenant
-    whose otherwise-identical alert still lands normally, so this isn't
-    just "the correlator dead-letters everything right now".
-
-    Phase 5.6 Item 1: "unknown tenant" needs its own topic (a real
-    producer ACL was granted for it) with no matching tenants row -
-    kafka_topic's own topic always has one by construction."""
+    """Phase 7.4 Part A: a tenant_key whose topic matches the subscription pattern but which has NO
+    backing tenants row is IGNORED - logged once, offset advanced, NEVER dead-lettered, never creates
+    an incident - proven alongside kafka_topic's own real, flagged-as-test tenant whose identical
+    alert still lands. Before 7.4 it was dead-lettered with error="unknown_tenant"."""
     import clickhouse_connect
     from confluent_kafka.admin import AdminClient, NewTopic
 
@@ -511,20 +506,21 @@ def test_correlator_dead_letters_unknown_tenant_known_tenant_still_processes(
         _produce(kafka_bootstrap, unknown_topic, [_alert(unknown_agent, "9.9.9.9", f"{marker}.unknown")], tenant_key=unknown_tenant)
 
         deadline = time.monotonic() + 20
-        row = dl_count = None
+        row = None
         while time.monotonic() < deadline:
             row = db.execute(
                 select(incidents).where(incidents.c.tenant_key == known_tenant, incidents.c.agent_id == known_agent)
             ).mappings().first()
-            dl_count = poll_client.query(
-                f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{unknown_tenant}' AND error = 'unknown_tenant'"
-            ).result_rows[0][0]
-            if row is not None and row["alert_count"] == 1 and dl_count == 1:
+            # the known incident forming proves the correlator drained past the ignored unknown one
+            if row is not None and row["alert_count"] == 1 and metrics.snapshot().get("ignored_unknown_tenant", 0) >= 1:
                 break
             time.sleep(0.5)
 
         assert row is not None and row["alert_count"] == 1, "the known (flagged-test) tenant's alert must still create an incident"
-        assert dl_count == 1, "the unknown tenant's alert must be dead-lettered with error=unknown_tenant"
+        assert metrics.snapshot().get("ignored_unknown_tenant", 0) >= 1, "the unknown tenant's alert must be IGNORED (counted), not dead-lettered"
+        dl_count = poll_client.query(
+            f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{unknown_tenant}'").result_rows[0][0]
+        assert dl_count == 0, "the unknown tenant's alert must NOT be dead-lettered (it is ignored)"
         unknown_row = db.execute(
             select(incidents).where(incidents.c.tenant_key == unknown_tenant)
         ).mappings().first()
@@ -617,9 +613,11 @@ def test_correlator_dead_letters_unsupported_envelope_version_known_version_stil
 
 def test_offboarded_tenant_message_does_not_stall_other_tenants(kafka_bootstrap, kafka_topic, kafka_tenant_key, database_url, db, ch_client):
     """Tenant offboarding (docs/design/TENANCY.md §6), correlator side: a
-    message left in an offboarded tenant's alerts topic (tenants row gone,
-    dead-letter topic deleted) is recorded in ClickHouse and skipped; the
-    other tenant's alerts still become incidents."""
+    message left in an offboarded tenant's alerts topic (tenants row gone) is
+    a non-registry tenant, so as of Phase 7.4 Part A it is IGNORED - logged
+    once, offset advanced, NEVER dead-lettered (before 7.4 it was dead-lettered
+    with 'tenant offboarded'); the other tenant's alerts still become
+    incidents, which is the real "does not stall other tenants" invariant."""
     from confluent_kafka.admin import AdminClient, NewTopic
 
     marker = uuid.uuid4().hex[:8]
@@ -650,10 +648,12 @@ def test_offboarded_tenant_message_does_not_stall_other_tenants(kafka_bootstrap,
             stop_flag.set()
             thread.join(timeout=10)
         assert row is not None and row["alert_count"] == 3, "the other tenant's alerts must keep correlating"
-        rows = ch_client.query("SELECT error FROM dead_letter_events WHERE tenant_id = {t:String}",
-                               parameters={"t": offboarded}).result_rows
-        assert rows and "tenant offboarded" in rows[0][0], rows
-        assert metrics.snapshot().get("dead_letter_topic_missing", 0) >= 1
+        # Offboarded tenant is non-registry: IGNORED (counted), never dead-lettered.
+        assert metrics.snapshot().get("ignored_unknown_tenant", 0) >= 1, \
+            "the offboarded tenant's message must be IGNORED (counted), not dead-lettered"
+        dl = ch_client.query("SELECT count() FROM dead_letter_events WHERE tenant_id = {t:String}",
+                             parameters={"t": offboarded}).result_rows[0][0]
+        assert dl == 0, "the offboarded tenant's message must NOT be dead-lettered (it is ignored)"
     finally:
         delete_topics_and_wait(admin, [off_topic])
         ch_client.command(f"ALTER TABLE dead_letter_events DELETE WHERE tenant_id = '{offboarded}'")
