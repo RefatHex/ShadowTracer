@@ -248,8 +248,8 @@ def run(
                 # stray/test topic matching the pattern on a shared broker) is IGNORED - logged once,
                 # offset advanced (handled), never dead-lettered. Checked first, so only KNOWN tenants
                 # reach the mismatch/version/normalise checks below.
-                if ignore_unknown_tenant(tenant_cache, tenant_key, logger, ignored_tenants):
-                    metrics.incr("ignored_unknown_tenant")
+                if ignore_unknown_tenant(tenant_cache, tenant_key, logger, ignored_tenants,
+                                         metrics, msg.topic(), msg.offset()):
                     handled.append(msg)
                     continue
                 # A header that's PRESENT but disagrees with the topic is the

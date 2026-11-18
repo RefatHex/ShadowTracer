@@ -14,16 +14,35 @@ accepted; only a tenant the registry does not know is ignored.
 """
 
 
-def ignore_unknown_tenant(tenant_cache, tenant_key: str, logger, seen: set) -> bool:
+def ignore_unknown_tenant(tenant_cache, tenant_key: str, logger, seen: set, metrics, topic: str,
+                          offset) -> bool:
     """True iff `tenant_key` is not in the registry: the caller should skip the message (advance the
-    offset) and NOT dead-letter it. Logs once per tenant. False means the tenant is known - process
-    it normally."""
-    if tenant_cache.is_known(tenant_key or ""):
+    offset) and NOT dead-letter it. False means the tenant is known - process it normally.
+
+    Phase 7.4 Part A, data-safety (items 1b/1c): before ignoring a tenant we have not ignored
+    before, force ONE registry refresh (bypassing TenantCache's 1s rate limit). A new tenant's
+    `tenants` row is always committed before its topic exists, so a forced refresh always finds a
+    legitimately-new tenant; only offboarded/stray tenants survive it. And since ignoring advances
+    the offset (no dead-letter to replay later), a skip is recorded countably FIRST - a per-topic
+    counter plus a one-time log naming the topic and the offset where skipping began - so exactly
+    what was skipped is provable. The batch commit that advances past this message runs only after
+    this returns True, so the record is always written before the offset moves."""
+    tk = tenant_key or ""
+    if tenant_cache.is_known(tk):
         return False
-    if tenant_key not in seen:
-        seen.add(tenant_key)
+    first_time = tk not in seen
+    if first_time:
+        tenant_cache.force_refresh()      # item 1b: never drop a just-provisioned tenant's first event
+        if tenant_cache.is_known(tk):
+            return False
+    metrics.incr("ignored_unknown_tenant")             # global counter (dashboards / existing tests)
+    metrics.incr(f"ignored_unknown_tenant:{topic}")    # item 1c: per-topic count == size of skipped offset range
+    if first_time:
+        seen.add(tk)
         logger.warning(
-            "ignoring messages for non-registry tenant %r: the topic matched the subscription "
-            "pattern but the tenant is not in the registry (offboarded, or a stray/test topic on a "
-            "shared broker). Logged once; offset advanced; NOT dead-lettered.", tenant_key)
+            "ignoring messages for non-registry tenant %r: topic %s, skipping from offset %s "
+            "(matched the subscription pattern but the tenant is not in the registry after a forced "
+            "refresh - offboarded, or a stray/test topic on a shared broker). Logged once; count in "
+            "metric ignored_unknown_tenant:%s; offset advanced; NOT dead-lettered.",
+            tk, topic, offset, topic)
     return True

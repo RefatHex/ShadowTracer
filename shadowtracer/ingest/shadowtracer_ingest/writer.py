@@ -310,8 +310,8 @@ def run(
                     # Phase 7.4 Part A: a topic for a tenant not in the registry (offboarded, or a
                     # stray/test topic matching the pattern on a shared broker) is IGNORED - logged
                     # once, offset advanced by the batch commit below, never dead-lettered.
-                    if ignore_unknown_tenant(tenant_cache, topic_tenant, logger, ignored_tenants):
-                        metrics.incr("ignored_unknown_tenant")
+                    if ignore_unknown_tenant(tenant_cache, topic_tenant, logger, ignored_tenants,
+                                             metrics, msg_topic, msg.offset()):
                         continue
                     try:
                         ev = normalize_alert(raw_line, topic_tenant or "")

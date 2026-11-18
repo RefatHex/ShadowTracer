@@ -244,6 +244,45 @@ def kafka_bootstrap():
     return "127.0.0.1:9094"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _require_broker_round_trip(kafka_bootstrap):
+    """Phase 7.4 Part A (item 3): fail the WHOLE session LOUDLY if the test clients cannot reach the
+    broker or consume nothing - the exact silent failure that let the SASL_SSL/PLAINTEXT mismatch
+    pass as a vacuous green (CI only static-checks a draining test file exists; it never runs this
+    suite - see _kafka_env_defaults). Produces one probe message with the suite's own client config
+    and requires it back, so a consumer that can't actually consume stops the run instead of letting
+    every consume-based assertion below pass vacuously."""
+    from confluent_kafka import Consumer, Producer
+    cfg = kafka_client_config_from_env()
+    probe_topic = alerts_topic_for_tenant(f"test-probe-{uuid.uuid4().hex[:8]}")
+    admin = AdminClient({"bootstrap.servers": kafka_bootstrap, **cfg})
+    admin.create_topics([NewTopic(probe_topic, num_partitions=1, replication_factor=1)])[probe_topic].result(30)
+    try:
+        p = Producer({"bootstrap.servers": kafka_bootstrap, **cfg})
+        p.produce(probe_topic, value=b"probe")
+        if p.flush(15) != 0:
+            pytest.exit(f"broker guard: could not PRODUCE to {probe_topic} - the test clients cannot "
+                        f"reach the broker (PLAINTEXT against a SASL_SSL broker fails silently here; "
+                        f"check KAFKA_SECURITY_PROTOCOL/SASL env)", returncode=1)
+        c = Consumer({"bootstrap.servers": kafka_bootstrap, "group.id": f"probe-{uuid.uuid4().hex[:8]}",
+                      "auto.offset.reset": "earliest", **cfg})
+        c.subscribe([probe_topic])
+        deadline = time.monotonic() + 30
+        consumed = 0
+        while time.monotonic() < deadline and consumed == 0:
+            msg = c.poll(1.0)
+            if msg is not None and not msg.error():
+                consumed += 1
+        c.close()
+        if consumed == 0:
+            pytest.exit(f"broker guard: produced to {probe_topic} but CONSUMED NOTHING within 30s - "
+                        f"the test clients cannot consume, so every consume-based assertion in this "
+                        f"suite would be vacuous (see _kafka_env_defaults)", returncode=1)
+    finally:
+        delete_topics_and_wait(admin, [probe_topic])
+    yield
+
+
 @pytest.fixture
 def kafka_tenant_key(db):
     """Phase 5.6 Item 1: a fresh, random tenant per test - real tenants

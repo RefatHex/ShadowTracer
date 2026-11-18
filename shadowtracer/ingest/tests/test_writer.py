@@ -551,7 +551,15 @@ def test_writer_ignores_unknown_tenant_known_tenant_still_processes(
 
     Before 7.4 this was dead-lettered with error="unknown_tenant"; dead-lettering non-registry
     tenants was the only thing that filled the dead-letter topics (nothing consumes them back), so an
-    offboarded/stray/test-fixture topic is now terminal-ignored instead."""
+    offboarded/stray/test-fixture topic is now terminal-ignored instead.
+
+    This is the regression for the exact re-emit loop (replay_unknown_tenant_dead_letters.py's own
+    "Real incident" note): the operator replay tool re-produces every error="unknown_tenant" envelope
+    back onto that tenant's .alerts topic - a CONSUMED topic - where, if the tenant is still unknown,
+    it is dead-lettered again and the tool's own running consumer re-reads and replays it forever
+    (50,000+ round trips in one confirmed run). Asserting the unknown tenant yields ZERO dead-letter
+    entries proves the fodder the tool keys on (error="unknown_tenant") is never produced, so the loop
+    can no longer start."""
     import json
     from confluent_kafka.admin import AdminClient, NewTopic
     from shadowtracer_ingest.topics import alerts_topic_for_tenant, dead_letter_topic_for_tenant
@@ -742,6 +750,12 @@ def test_a_brand_new_tenants_first_event_sent_right_away_is_stored_not_dead_lett
     delay at all must still land normally, not get dead-lettered as
     unknown_tenant just because the cache hadn't seen it yet.
 
+    Phase 7.4 Part A (item 1): now that a non-registry tenant is IGNORED
+    (offset advanced, no dead-letter to replay), a rate-limited miss on a
+    just-provisioned tenant would SILENTLY DROP its first event. The gate
+    forces one registry refresh before ignoring, so this must land with
+    EXACTLY ZERO messages ignored - asserted below alongside the store.
+
     Phase 5.6 Item 1: needs its OWN topic, created WITHOUT a tenants row
     yet - kafka_topic's own tenant is never "brand new" by the time a
     test body runs (its tenants row is inserted at fixture setup, before
@@ -778,6 +792,9 @@ def test_a_brand_new_tenants_first_event_sent_right_away_is_stored_not_dead_lett
             f"SELECT count() FROM dead_letter_events WHERE tenant_id = '{tenant_key}' AND error = 'unknown_tenant'"
         ).result_rows[0][0]
         assert dl_count == 0, "must not have been dead-lettered as unknown_tenant on the way there"
+        assert metrics.snapshot().get("ignored_unknown_tenant", 0) == 0, (
+            "a just-provisioned tenant's first event must NOT be ignored (silently dropped): "
+            "the gate's forced refresh before ignoring must have found the new tenants row")
     finally:
         stop_flag.set()
         thread.join(timeout=5)

@@ -50,6 +50,17 @@ class TenantCache:
             self._known = set(rows)
             self._last_refresh = time.monotonic()
 
+    def force_refresh(self) -> None:
+        """Refresh NOW, bypassing the rate limit. Used once before terminal-ignoring a
+        message (tenant_gate.ignore_unknown_tenant, Phase 7.4 Part A): a genuinely new
+        tenant's row is always committed before its topic is created
+        (create-kafka-topics.sh runs after the INSERT - see TENANCY.md / verify-phase5b.sh),
+        so a forced refresh here always finds it. Without this, a miss rate-limited by some
+        OTHER tenant's refresh in the last second would ignore - and, now that ignoring
+        advances the offset instead of dead-lettering, silently drop - that new tenant's
+        first event."""
+        self._refresh()
+
     def is_known(self, tenant_key: str) -> bool:
         """A positive result from the cache is always trusted - never
         re-verified against Postgres - so a tenant deleted seconds ago
