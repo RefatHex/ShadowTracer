@@ -772,19 +772,27 @@ services:
     image: postgres:16-alpine
     hostname: postgres
     restart: unless-stopped
-    mem_limit: 320m
-    memswap_limit: 320m
-    # Phase 7.x OOM fix: the default config put shared_buffers at ~50% of the 320m limit, leaving
-    # almost nothing for connections -> PG was SIGKILLed under concurrent load (see memory:
-    # project_postgres_oom). Budget that fits 320m with margin (per-connection ~2.5 MiB idle):
-    #   shared_buffers 80m (25%) + 64 conns x 2.5m (160m) + maintenance 32m + wal/bg/misc ~20m
-    #   = ~292m, leaving ~28m for work_mem (4m) burst sorts. Connection DEMAND is bounded to <=64 by
-    #   the per-service pool caps (pool_size 3 + max_overflow 2 = 5 x 12 engines) + mlflow's capped
-    #   pool (3) = 63. Each service also sets statement_timeout so a runaway query can't pin memory.
+    mem_limit: 448m
+    memswap_limit: 448m
+    # Phase 7.x OOM fix, revised. At 320m the baseline-rate gate's docker-stats peak read 319/320 MiB
+    # with the ML services sharing the instance - but that is almost all RECLAIMABLE PAGE CACHE (PG
+    # caching its data files), not a real limit: no OOM/restart ever happened, because the kernel
+    # reclaims cache under pressure (see memory: project_postgres_oom). The OOM-relevant, NON-
+    # reclaimable working set is cgroup anon + slab + shmem (shmem = the pinned shared_buffers).
+    # Raised to 448m with shared_buffers at 25% so the cache figure isn't alarmingly near the cap.
+    # Non-reclaimable budget vs 448m, measured under an ML-working gate:
+    #   shmem/shared_buffers ~122m (25%) + backend anon ~67m (~20 conns) + slab ~70m = ~259m
+    #   -> ~189m free = ~42% headroom (>=20%). Reclaimable data-file cache uses the rest and is freed
+    #   under pressure. work_mem 4m, maintenance_work_mem 32m.
+    # Connections actually sharing this one Postgres: 14 app engines (console x2, correlate x2,
+    # closer x2, writer x2, ml x4, intel x2), each capped pool_size 3 + max_overflow 2 (<=5), plus
+    # MLflow's capped pool (2 + 1 overflow) on EACH of its two stores (tracking + registry) = 6.
+    # max_connections=64 is the hard server cap; observed peak ~30/64 at 100/s (pools never all max
+    # at once). Each service sets statement_timeout so a runaway query can't pin memory.
     command:
       - postgres
       - -c
-      - shared_buffers=80MB
+      - shared_buffers=112MB
       - -c
       - max_connections=64
       - -c

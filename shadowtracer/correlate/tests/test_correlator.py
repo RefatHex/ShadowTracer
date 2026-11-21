@@ -11,7 +11,7 @@ from shadowtracer_ingest.normalizer import NormalizedEvent  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from shadowtracer_correlate import correlator  # noqa: E402
 from shadowtracer_correlate.correlator import (  # noqa: E402
-    correlation_key_and_basis, process_event,
+    correlation_key_and_basis, process_batch, process_event,
 )
 
 from conftest import insert_tenant  # noqa: E402
@@ -315,6 +315,28 @@ def test_process_batch_matches_one_by_one_processing(db):
     assert snapshot(batched) == snapshot(one_by_one)
     incs, _ = snapshot(batched)
     assert [i[3][1] for i in incs] == [3, 1, 2], "a3+a1+a2 / b1 / a4+a5, the repeat and the replay counted once"
+
+
+def test_replay_same_batch_twice_adds_no_memberships(db):
+    """The hot path re-delivers whole batches after a consumer rebalance/retry
+    (at-least-once Kafka). Processing the identical batch again must add zero
+    memberships and change no alert_count: incident_alerts_identity_unique
+    (tenant_key, node, alert_id) + ON CONFLICT DO NOTHING. This is the gate's
+    "landed == delivered" guarantee at the source."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    insert_tenant(db, tenant)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    events = [_event(tenant=tenant, agent_id="a", src_ip="8.8.8.8", alert_id=f"b{i}",
+                     time=now + datetime.timedelta(seconds=i * 5)) for i in range(6)]
+
+    first = process_batch(db, events)
+    second = process_batch(db, events)                  # identical batch, replayed
+    # count once, after both (process_batch owns its own transaction)
+    members = db.execute(select(incident_alerts).where(incident_alerts.c.tenant_key == tenant)).all()
+
+    assert len(members) == 6, "two identical 6-alert batches must leave 6 memberships, not 12"
+    assert all(r.status == "duplicate" for r in second), "the replayed batch must report every alert as a duplicate"
+    assert all(a.incident_id == b.incident_id for a, b in zip(first, second))
 
 
 def test_replica_that_loses_the_race_for_a_new_incident_leaves_no_empty_incident(db, engine):

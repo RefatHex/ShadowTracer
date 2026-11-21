@@ -34,6 +34,7 @@ so the actual achieved rate (printed every 10s) is the real evidence for
 """
 
 import argparse
+import datetime
 import json
 import os
 import random
@@ -80,10 +81,18 @@ def mem_guard(sent: int) -> None:
         sys.exit(MEM_ABORT_EXIT)
 
 
-def tag_json_event(event: dict, run_id: str, seq: int) -> dict:
+def _now_wazuh_ts() -> str:
+    # Wazuh alert timestamp shape, e.g. 2026-10-16T03:01:16.084+0000 (ms + numeric offset).
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+0000"
+
+
+def tag_json_event(event: dict, run_id: str, seq: int, retime: bool = False) -> dict:
     """Returns a copy with agent identity rewritten to carry run_id - the
     one thing every cleanup query below keys on. Everything else (rule,
-    data, decoder, full_log) stays as sampled, for realistic variety."""
+    data, decoder, full_log) stays as sampled, for realistic variety.
+    retime=True stamps the alert timestamp = now so alert->row latency is
+    measurable on the kafka path (the corpus keeps its original Oct times
+    otherwise, which makes dateDiff(time, ingested_at) meaningless)."""
     event = dict(event)
     event["agent"] = dict(event.get("agent") or {})
     # Many distinct agents (--agents), not one: the Kafka key is agent.id, so a
@@ -91,6 +100,8 @@ def tag_json_event(event: dict, run_id: str, seq: int) -> dict:
     event["agent"]["id"] = f"load-{run_id}-{seq % AGENTS}"
     event["agent"]["name"] = event["agent"]["id"]
     event["id"] = f"load-{run_id}.{seq}"
+    if retime:
+        event["timestamp"] = _now_wazuh_ts()
     return event
 
 
@@ -119,7 +130,7 @@ def run_shipper(args, corpus):
     interval = 1.0 / args.rate
     with open(path, "a") as f:
         while time.time() - t0 < args.duration:
-            event = tag_json_event(random.choice(corpus), args.run_id, seq)
+            event = tag_json_event(random.choice(corpus), args.run_id, seq, retime=args.retime)
             f.write(json.dumps(event) + "\n")
             seq += 1
             sent_since_report += 1
@@ -164,7 +175,7 @@ def run_kafka(args, corpus):
     sent_since_report = 0
     interval = 1.0 / args.rate
     while time.time() - t0 < args.duration:
-        event = tag_json_event(random.choice(corpus), args.run_id, seq)
+        event = tag_json_event(random.choice(corpus), args.run_id, seq, retime=args.retime)
         key = event["agent"]["id"].encode()
         producer.produce(
             topic, key=key, value=json.dumps(event).encode(),
@@ -252,6 +263,9 @@ def main():
     p.add_argument("--protocol", choices=["udp", "tcp"], default="udp", help="syslog target: transport")
     p.add_argument("--fixture", default=FIXTURES_PATH, help="corpus file (default: the anonymised fixture)")
     p.add_argument("--seed", type=int, help="fix the sample sequence, e.g. to A/B two fixtures")
+    p.add_argument("--retime", action="store_true",
+                   help="stamp each alert's timestamp = now (JSON targets); default off keeps the "
+                        "corpus's original times. Use to measure alert->row latency on the kafka path.")
     p.add_argument("--agents", type=int, default=50,
                    help="shipper/kafka targets: distinct simulated agent identities (agent.id) to spread events over")
     args = p.parse_args()
