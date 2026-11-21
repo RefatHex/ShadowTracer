@@ -58,7 +58,7 @@ agents -> managers (analysisd: rules + CDB IOC lists = Wazuh-native TI matching,
         trainer (XGBoost / ARF checkpoints) -> MLflow registry
 
         ON DEMAND (analyst clicks)
-        graph API (NetworkX)   investigation agent (LangGraph + LLM, read-only tools)
+        graph API (NetworkX)   investigation agent (LLM + read-only tools)
 ```
 
 New services: `ti-sync`, `ti-matcher` (only if 6.0 shows it is needed), `ml-scorer`, `enrichment-worker`,
@@ -109,7 +109,7 @@ Rules:
 | 7.4 | XGBoost + SHAP: historical classifier with explanations | 7.0 | small |
 | 7.5 | Sentence Transformers + Qdrant: similar incidents | 7.0 | Qdrant ~300 MB, model ~100 MB |
 | 7.6 | NetworkX: event relationship graph | — | small |
-| 7.7 | LangGraph + LLM: investigation agent | 6.x, 7.5, 7.6 | LLM via API (local LLM too heavy for the lab) |
+| 7.7 | LLM investigation agent (no LangGraph; plain httpx) | 6.x, 7.5, 7.6 | local LLM (Gemma 4 E4B) over Ollama's OpenAI-compatible API on the host GPU |
 
 MLflow (component 9) is set up in 7.0 so every model from 7.1 onward is tracked and
 registered from the start.
@@ -301,9 +301,11 @@ measured; Qdrant restart keeps data.
 VERIFY: graph for a known lab attack shows the expected chain; caps respected on a
 large incident; response time measured; tenant isolation tested.
 
-### 7.7 LangGraph + LLM — investigation agent
+### 7.7 LLM investigation agent
 
-- Analyst-triggered, read-only. LangGraph workflow: plan -> call tools -> summarise.
+- Analyst-triggered, read-only. A **3-step deterministic workflow (gather → summarise → verify),
+  implemented without LangGraph** to fit the console's memory budget (plain `httpx` against the
+  OpenAI-compatible endpoint — see `OPTIMIZATION_BACKLOG.md` D25).
   Tools: query alerts for an incident, get similar incidents (7.5), get the graph
   (7.6), TI lookup (6.x), get model scores and SHAP reasons (7.1–7.4), ATT&CK info.
 - **Output:** an investigation summary with every claim linked to the tool result it
@@ -317,7 +319,7 @@ large incident; response time measured; tenant isolation tested.
   - Sending customer data to an external LLM is per-tenant opt-in, shown in the UI,
     and recorded in the audit log. Provider configurable (API or self-hosted).
   - Token and cost budget per tenant per day.
-- Licence: LangGraph (MIT); LLM provider terms recorded.
+- Licence: Gemma 4 E4B (Apache-2.0), Ollama (MIT); no LangGraph dependency. See `LICENSE_INVENTORY.md`.
 
 VERIFY: on 5 lab incidents, the summary's facts all trace to tool outputs (manual
 check, report the error count honestly); a prompt-injection string inside a log line

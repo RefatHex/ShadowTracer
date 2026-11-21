@@ -55,7 +55,16 @@ export function InvestigationPanel({ incidentId }: { incidentId: number }) {
     if (!session) return
     setRunning(true); setError(null)
     try {
-      setInv(await api.runInvestigation(session.accessToken, incidentId))
+      await api.runInvestigation(session.accessToken, incidentId)   // queues; returns {status:'running'}
+      // poll the background job until it reaches a terminal status
+      const deadline = Date.now() + 4 * 60 * 1000
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const latest = await api.fetchInvestigation(session.accessToken, incidentId)
+        if (latest) setInv(latest)
+        if (latest && latest.status !== 'running') return
+      }
+      setError('Investigation is taking longer than expected; check back shortly.')
     } catch (e) {
       setError((e as Error).message || 'Investigation failed.')
     } finally {
@@ -80,9 +89,9 @@ export function InvestigationPanel({ incidentId }: { incidentId: number }) {
       {inv === undefined && <p className="text-sm text-gray-400">Loading…</p>}
       {inv === null && !running && <p className="text-sm text-gray-400">No investigation yet. Click Investigate to generate one.</p>}
 
-      {inv?.status === 'llm_unavailable' && (
+      {inv && inv.status !== 'ok' && inv.status !== 'running' && (
         <p className="mb-3 rounded bg-amber-50 p-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-          {inv.message || 'The investigation model is unavailable.'} The evidence pack is shown below.
+          {inv.message || 'The investigation could not be completed.'} The evidence pack is shown below.
         </p>
       )}
 

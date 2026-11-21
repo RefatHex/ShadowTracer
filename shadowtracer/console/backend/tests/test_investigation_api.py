@@ -55,18 +55,19 @@ def test_investigate_happy_path_stores_and_verifies(client, db, tenant, monkeypa
     _tid, tkey = tenant
     inc = _make_incident(db, tkey, agent_id="002")
     _patch_llm(monkeypatch, FakeLLM())
+    # POST queues the run (202) and the background task completes before the TestClient call returns.
     r = client.post(f"/api/incidents/{inc}/investigate", headers=_hdr(client, db, tenant))
-    assert r.status_code == 200
-    body = r.json()
+    assert r.status_code == 202 and r.json()["status"] == "running"
+    # the stored result reflects the finished background job
+    g = client.get(f"/api/incidents/{inc}/investigation", headers=_hdr(client, db, tenant))
+    assert g.status_code == 200
+    body = g.json()
     assert body["status"] == "ok"
     assert body["model"] == "fake-model" and body["prompt_version"].startswith("7.7")
     assert any(e["id"] == "E1" for e in body["evidence"])           # evidence pack built in code
     assert body["sections"]["SUMMARY"]
     assert body["tool_calls"] == []                                  # no extra tools requested
     assert isinstance(body["unverified_count"], int)
-    # stored + retrievable
-    g = client.get(f"/api/incidents/{inc}/investigation", headers=_hdr(client, db, tenant))
-    assert g.status_code == 200 and g.json()["status"] == "ok"
 
 
 def test_investigate_cross_tenant_is_404(client, db, tenant, monkeypatch):
@@ -89,8 +90,10 @@ def test_investigate_llm_unavailable_returns_evidence_not_5xx(client, db, tenant
     inc = _make_incident(db, tkey, agent_id="002")
     _patch_llm(monkeypatch, FakeLLM(raise_unavailable=True))
     r = client.post(f"/api/incidents/{inc}/investigate", headers=_hdr(client, db, tenant))
-    assert r.status_code == 200                                     # NOT a 5xx
-    body = r.json()
+    assert r.status_code == 202                                     # queued; NEVER a 5xx
+    g = client.get(f"/api/incidents/{inc}/investigation", headers=_hdr(client, db, tenant))
+    assert g.status_code == 200
+    body = g.json()
     assert body["status"] == "llm_unavailable"
     assert body["evidence"] and any(e["id"] == "E1" for e in body["evidence"])  # evidence pack still shown
 
@@ -124,9 +127,10 @@ def test_injected_instruction_does_not_change_tools_and_is_data(client, db, tena
                    tool_calls=[{"function": {"name": "delete", "arguments": "{}"}}])
     _patch_llm(monkeypatch, fake)
     r = client.post(f"/api/incidents/{inc}/investigate", headers=_hdr(client, db, tenant))
-    assert r.status_code == 200
+    assert r.status_code == 202
+    g = client.get(f"/api/incidents/{inc}/investigation", headers=_hdr(client, db, tenant))
     # the agent only runs tools from its fixed read-only registry; 'delete' is unknown -> no effect
-    assert r.json()["tool_calls"] == [{"name": "delete", "args": {}}]   # requested, but never executed
+    assert g.json()["tool_calls"] == [{"name": "delete", "args": {}}]   # requested, but never executed
     # (verified by: 'delete' is not in _run_extra_tool, so nothing happened and the incident is intact)
     assert db.execute(text("SELECT state FROM incidents WHERE id = :i"), {"i": inc}).scalar() is not None
 
@@ -142,6 +146,25 @@ def test_settings_toggle_is_admin_only_and_audited(client, db, tenant, monkeypat
     assert r.status_code == 200 and r.json()["external_llm_enabled"] is True
     g = client.get("/api/investigation/settings", headers=_hdr(client, db, tenant))
     assert g.json()["external_llm_enabled"] is True
+
+
+class _TruncLLM:
+    """Fake client that simulates Ollama clamping an over-long prompt to the context window."""
+    model = "fake"
+    num_ctx = 8192
+
+    def chat(self, messages, tools=None, max_tokens=None):
+        return {"content": "SUMMARY: x [E1].", "tool_calls": None,
+                "usage": {"total_tokens": 9000, "prompt_tokens": 8192}}   # prompt_eval_count pinned at ctx
+
+
+def test_oversized_evidence_pack_fails_as_truncated():
+    # An evidence pack larger than the context must FAIL, not summarise on the clamped (partial) prompt.
+    from app.investigation.agent import run_llm
+    from app.investigation.llm import LLMPromptTruncated
+    evidence = [{"id": "E1", "title": "huge", "body": "A" * 40000}]      # ~10k tokens >> 8192 ctx
+    with pytest.raises(LLMPromptTruncated):
+        run_llm(_TruncLLM(), db=None, user=None, settings=None, incident_id=1, evidence=evidence, meta={})
 
 
 def test_verify_flags_hallucinated_facts_and_parses_multi_id_cites():

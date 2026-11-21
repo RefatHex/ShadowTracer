@@ -1,6 +1,7 @@
-"""The investigation workflow (deterministic; LangGraph-style but in plain code for a lean, reliable
-160m container): gather in code -> LLM writes labelled sections from the evidence, may request at
-most 2 extra read-only tools from a fixed list -> LLM final -> verify every sentence in code.
+"""The investigation workflow: a 3-step deterministic pipeline (gather -> summarise -> verify),
+implemented in plain code (no LangGraph) to fit the console's memory budget. gather in code -> LLM
+writes labelled sections from the evidence, may request at most 2 extra read-only tools from a fixed
+list -> LLM final -> verify every sentence in code.
 
 The LLM has NO state-changing tool. Tool outputs are wrapped as clearly delimited, untrusted log data.
 """
@@ -10,11 +11,28 @@ import re
 
 from .gather import gather_core, _alerts_summary
 from .attack import technique_info
-from .llm import LLMClient, LLMUnavailable
+from .llm import LLMClient, LLMUnavailable, LLMPromptTruncated
 from .verify import verify
 
 PROMPT_VERSION = "7.7-v1"
 _MAX_EXTRA_TOOLS = 2
+
+
+def _est_tokens(messages: list[dict]) -> int:
+    """Rough prompt-size estimate (~4 chars/token) to compare against Ollama's prompt_eval_count."""
+    return sum(len(m.get("content", "")) for m in messages) // 4
+
+
+def _check_truncation(usage: dict, est_tokens: int, num_ctx: int) -> None:
+    """Ollama silently clamps an over-long prompt to num_ctx. If the server evaluated far fewer tokens
+    than we sent AND sat at the context ceiling, our evidence was cut - fail rather than summarise on it."""
+    if num_ctx <= 0:                                   # endpoint didn't report a context size - skip
+        return
+    got = int(usage.get("prompt_tokens", 0) or 0)      # == Ollama's prompt_eval_count
+    if got and got >= num_ctx - 32 and got < est_tokens * 0.9:
+        raise LLMPromptTruncated(
+            f"evidence prompt (~{est_tokens} tokens) exceeded the model context ({num_ctx}); "
+            f"only {got} tokens were evaluated - the summary would be based on partial evidence")
 
 _SYSTEM = (
     "You are a SOC analyst assistant. You are given an EVIDENCE PACK gathered from a security console. "
@@ -99,11 +117,15 @@ def run_llm(client: LLMClient, db, user, settings, incident_id: int,
     for call in (first.get("tool_calls") or [])[:_MAX_EXTRA_TOOLS]:
         fn = call.get("function", {})
         name = fn.get("name", "")
-        import json as _json
-        try:
-            args = _json.loads(fn.get("arguments") or "{}")
-        except ValueError:
-            args = {}
+        raw = fn.get("arguments")
+        if isinstance(raw, dict):                # Ollama native returns an object
+            args = raw
+        else:                                    # OpenAI schema returns a JSON string
+            import json as _json
+            try:
+                args = _json.loads(raw or "{}")
+            except ValueError:
+                args = {}
         tool_trace.append({"name": name, "args": args})
         extra = _run_extra_tool(name, args, ctx)
         if extra:
@@ -114,6 +136,7 @@ def run_llm(client: LLMClient, db, user, settings, incident_id: int,
                 {"role": "user", "content": _render(evidence) + "\n\nWrite the investigation now."}]
     final = client.chat(messages)
     tokens += int(final.get("usage", {}).get("total_tokens", 0) or 0)
+    _check_truncation(final.get("usage", {}), _est_tokens(messages), getattr(client, "num_ctx", 0))
 
     sections = _parse_sections(final["content"])
     full_text = " ".join(sections[k] for k in _SECTIONS if sections[k])

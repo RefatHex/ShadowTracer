@@ -681,7 +681,8 @@ export async function fetchModelAssessment(accessToken: string, incidentId: numb
 export interface InvestigationEvidence { id: string; title: string; body: string }
 export interface InvestigationSentence { text: string; cites: string[]; verified: boolean; unsupported: string[] }
 export interface Investigation {
-  status: 'ok' | 'llm_unavailable'
+  status: 'running' | 'ok' | 'llm_unavailable' | 'evidence_too_large' | 'error'
+  id?: number
   sections?: Record<string, string>
   sentences?: InvestigationSentence[]
   evidence: InvestigationEvidence[]
@@ -701,6 +702,8 @@ export async function fetchInvestigation(accessToken: string, incidentId: number
   return handle<Investigation | null>(resp)
 }
 
+// Queue an investigation. Returns immediately with { status: 'running' }; poll fetchInvestigation
+// until status !== 'running' (the ~19 s agent runs in the background on the server).
 export async function runInvestigation(accessToken: string, incidentId: number): Promise<Investigation> {
   const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/investigate`, { method: 'POST', headers: authHeaders(accessToken), credentials: 'include' })
   return handle<Investigation>(resp)

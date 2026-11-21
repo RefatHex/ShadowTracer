@@ -84,13 +84,16 @@ class Settings:
     # its endpoints return 503; set KEY_ENCRYPTION_KEY to enable. Never logged.
     key_encryption_key: bytes | None = None
     # Phase 7.7: local LLM for the investigation agent. Default = Ollama (gemma4:e4b) on the
-    # host, reached over its OpenAI-compatible API. llm_api_key is NEVER logged. num_ctx is kept
-    # at the model's loaded context (4096) so the evidence pack always fits. Budgets are per tenant.
-    llm_base_url: str = "http://host.docker.internal:11434/v1"
+    # host, reached over its NATIVE /api/chat endpoint (the only one that honours a per-request
+    # num_ctx; the OpenAI /v1 shim ignores it and loads at 4096). num_ctx is set explicitly (8192)
+    # with headroom over the bounded evidence pack; the agent fails the run if Ollama reports the
+    # prompt was truncated (see investigation/agent.py). A base_url ending in /v1 switches the client
+    # to the OpenAI schema for an external provider. llm_api_key is NEVER logged. Budgets per tenant.
+    llm_base_url: str = "http://host.docker.internal:11434"
     llm_model: str = "gemma4:e4b"
     llm_api_key: str | None = None
     llm_timeout_seconds: int = 120
-    llm_num_ctx: int = 4096
+    llm_num_ctx: int = 8192
     llm_max_tokens: int = 900
     investigation_daily_limit: int = 50          # investigations per tenant per UTC day
     investigation_token_daily_limit: int = 300000  # LLM tokens per tenant per UTC day
@@ -159,11 +162,11 @@ def load_settings() -> Settings:
         cors_allow_origins=cors_origins,
         clickhouse_hosts=clickhouse_hosts,
         key_encryption_key=key_encryption_key,
-        llm_base_url=os.environ.get("LLM_BASE_URL", "http://host.docker.internal:11434/v1"),
+        llm_base_url=os.environ.get("LLM_BASE_URL", "http://host.docker.internal:11434"),
         llm_model=os.environ.get("LLM_MODEL", "gemma4:e4b"),
         llm_api_key=(_env_or_file("LLM_API_KEY") or None),
         llm_timeout_seconds=int(os.environ.get("LLM_TIMEOUT_SECONDS", "120")),
-        llm_num_ctx=int(os.environ.get("LLM_NUM_CTX", "4096")),
+        llm_num_ctx=int(os.environ.get("LLM_NUM_CTX", "8192")),
         llm_max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "900")),
         investigation_daily_limit=int(os.environ.get("INVESTIGATION_DAILY_LIMIT", "50")),
         investigation_token_daily_limit=int(os.environ.get("INVESTIGATION_TOKEN_DAILY_LIMIT", "300000")),
