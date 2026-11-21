@@ -354,3 +354,88 @@ Set up in 7.0, used by 7.1–7.5:
 | Model lifecycle | MLflow registry screenshots |
 | Throughput impact | per-phase gate results |
 | Limitations and future work | null results, `OPTIMIZATION_BACKLOG.md` |
+
+---
+
+## 8. Phase 8 — On-prem deployment (plan only, no code)
+
+Banks install ShadowTracer on their own servers/VMs, inside their own network. **One deployment = one
+tenant by default**: the installer creates that single tenant, and the tenant-management UI is hidden in
+single-tenant mode (no tenant switcher, no create-tenant screen). Multi-tenant stays available and is
+turned on explicitly for a bank's own subsidiaries/environments (prod vs DR, retail vs corporate) and
+for the MSSP case where one operator runs many banks. Nothing here is built in this phase; it is the
+shape of the work and what each piece must prove.
+
+### 8.0 Single-tenant vs multi-tenant mode
+
+- A deployment-time mode flag. Single-tenant (default): installer provisions one tenant, the console
+  hides tenant UI, and all data/queries are still tenant-scoped underneath (the isolation code does not
+  change — only the UI and provisioning differ). Multi-tenant: today's behaviour, tenant switcher shown.
+- Switching single → multi later must be non-destructive (the existing tenant keeps its id and data).
+
+VERIFY: a single-tenant install shows no tenant UI and every API path is still tenant-scoped (a crafted
+cross-tenant request on a second, manually added tenant is refused); flipping to multi-tenant preserves
+the original tenant's incidents and keys.
+
+### 8.1 Install bundle + sizing guide (item a)
+
+- One signed, versioned bundle (compose/images or packages) that installs the whole stack on a fresh
+  host with a single command and a config file; pinned image digests, no pull from the public internet
+  at run time.
+- Sizing guide derived from `THROUGHPUT_BASELINE.md`: events/s → CPU, RAM, disk/day (ClickHouse, Kafka,
+  Postgres), and the single-partition-per-manager caveat, with a small/medium/large reference spec.
+
+VERIFY: a from-scratch install on a clean VM comes up healthy (smoke test passes) with no external
+network; the sizing guide's predicted disk/day for a given rate matches a measured 10-minute run within
+the baseline's stated margin.
+
+### 8.2 Air-gapped mode: signed offline bundles (item b)
+
+- No host can reach the internet. TI feeds, detection rules, and software updates arrive as **signed
+  offline bundles** carried in; the product verifies the signature (and a monotonic version/sequence to
+  block rollback) before applying, and refuses an unsigned or downgraded bundle.
+- A bundle builder runs on a connected machine (vendor or the bank's own DMZ box) and produces the
+  verifiable artifact; import is one audited admin action.
+
+VERIFY: a tampered or downgraded bundle is refused with a clear audit entry; a valid TI bundle imported
+offline produces the same IOC matches as the online feed for a known test IOC; no process makes an
+outbound connection during normal operation (egress monitored during a soak).
+
+### 8.3 Local licence key by agent count (item c)
+
+- Offline licence key (signed, no phone-home) encoding max agent count and expiry. Enforcement is a
+  **soft limit**: over-count warns loudly in the console and audit log, never drops events or blocks
+  detection (a security product must not fail closed on licensing).
+- Grace handling for expiry (warn, then read-only admin), clock-tamper resistance within reason.
+
+VERIFY: an expired/over-count key warns but never drops an alert or stops correlation; a forged key is
+rejected; agent-count is measured from actually-reporting agents, not registrations.
+
+### 8.4 No external calls by default (item d)
+
+- Default config makes **no outbound calls**: VirusTotal off, any cloud LLM off, TI set to offline-bundle
+  mode. Each external integration is individually opt-in, shown in the UI, and audited when enabled.
+- **Local LLM supported** for the 7.7 investigation agent (self-hosted model endpoint on the bank's
+  network); the agent works fully offline against it, with the same per-tenant opt-in and cost/token
+  budget.
+
+VERIFY: a default install generates zero outbound connections under load (egress capture is empty);
+enabling VirusTotal/cloud-LLM flips a visible setting and writes an audit entry; the investigation agent
+produces a traced summary against a local LLM endpoint with no internet.
+
+### 8.5 Operations: backup/restore, upgrade, HA, remote support (item e)
+
+- **Backup/restore**: one documented, tested procedure covering Postgres, ClickHouse and MLflow (and
+  Kafka offsets) to a consistent point; restore onto a clean host reproduces incidents and models.
+- **Upgrade without data loss**: versioned schema/online-model migrations (Alembic + the signed online
+  checkpoints), forward-only, with a rollback path; upgrade is tested on a populated instance.
+- **HA option**: documented multi-node topology (already-replicated ClickHouse, Postgres primary+standby,
+  Kafka) as an optional tier, not required for the single-node default.
+- **Bank-controlled remote support**: no standing vendor access; support sessions are bank-initiated,
+  time-boxed, scoped, and fully audited (break-glass), with an air-gapped diagnostic bundle as the
+  default channel.
+
+VERIFY: backup → restore on a clean host reproduces a known incident and the Production online model
+(signature still verifies); an upgrade across one schema + one online-model version keeps all incidents
+and verdicts (counts match before/after); a support session is impossible without an explicit
+bank-issued, expiring grant, and every action in it appears in the audit log.

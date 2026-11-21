@@ -661,7 +661,10 @@ by test-admin, reviewed by report-analyst@test.lab)* — **not** real production
 **Results — a demonstration of the learning loop, NOT an accuracy claim** (2026-11-21). The 2-class
 prequential evaluation (predict-then-learn, time order) runs over **32 labels (18 ART attack + 14 benign
 test)**. With so few labels and a near-perfect source/label split it shows the *mechanics* of online
-learning beating the rules baseline, not field accuracy.
+learning beating the rules baseline, not field accuracy. **In this 32-label stream label source and
+class coincide — every attack comes from ART, every benign from normal runs — so the 2-class result
+demonstrates the learning loop, not attack detection; the leave-one-source-out collapse below confirms
+it.**
 
 | metric (prequential, predict-then-learn, n=32) | online ARF | rules-only (max level ≥ 10) |
 |---|---|---|
