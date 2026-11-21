@@ -1094,6 +1094,9 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       TEST_TENANT_KEY: ${TEST_TENANT_KEY:?set TEST_TENANT_KEY in deploy/lab/.env}
       ML_SERVED_MODELS: ${ML_SERVED_MODELS:-incident-risk-dummy,incident-classifier}
+      # Phase 7.3: HMAC key for the online model's signed checkpoints. Unset -> the online model is
+      # simply not served (no unsigned pickle is ever loaded). Keep this secret out of git (.env).
+      ONLINE_MODEL_SECRET: ${ONLINE_MODEL_SECRET:-}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       SENTENCE_TRANSFORMERS_HOME: /opt/models
       HF_HOME: /opt/models

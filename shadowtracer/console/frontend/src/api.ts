@@ -661,6 +661,15 @@ export interface ModelAssessment {
   scored_at: string | null
   advisory: boolean
   experimental: boolean
+  online: OnlineAssessment | null
+}
+
+// Phase 7.3: the River ARF online model's row (no SHAP reasons).
+export interface OnlineAssessment {
+  model_version: string
+  predicted_class: string
+  probability: number
+  experimental: boolean
 }
 
 export async function fetchModelAssessment(accessToken: string, incidentId: number): Promise<ModelAssessment | null> {

@@ -618,3 +618,92 @@ mislabelled). Not calibrated across tenants; trained on the TEST tenant only. Be
 reliably clear the baselines on this thin data, it must never be used to filter, suppress or
 auto-close — it is an explanation aid, not a detector. Screenshot:
 `docs/report/7.4-model-assessment.png`.
+
+
+## 20. Phase 7.3 — River Adaptive Random Forest online classifier
+
+An **online** counterpart to the 7.4 XGBoost model (`shadowtracer_ml/online.py`). Same features
+(`features.py`, shared), scored at incident close in the ml-enricher, **off the hot path**. Stored and
+shown exactly like 7.4 — class, probability, model version, `experimental` — as a **second "Online
+model (River ARF)" row** in the console's Model assessment panel. **Advisory only**: never suppresses,
+auto-closes or blocks.
+
+**What it learns from.** `learn_one` is called **only on LABELLED incidents** — analyst verdicts
+(`origin=analyst_verdict`) and ART attack runs (`origin=attack_window`). It **never** learns from an
+unlabelled incident or from its own predictions. Guard-rails, all enforced:
+- **Audit.** Every learn is recorded in `online_learn_log` (analyst, time, incident, label, checkpoint
+  version) before the offset of truth moves.
+- **Four-eyes on verdicts.** A triage verdict becomes a label only after a *different* account approves
+  the review. `labels review --approve … --by <reviewer>` refuses unless `<reviewer>` resolves to a real
+  **`analyst`/`admin` user in that tenant** *and* is **not** the account that created the verdict
+  (`labels.check_reviewer` → `four_eyes_ok` + role check; a bogus email, a `viewer`, or the creator is
+  refused). See **Limits** for what `--by` does and does not authenticate.
+- **Per-analyst rate cap.** At most `ONLINE_LEARN_CAP_PER_ANALYST_PER_HOUR` (default 20) analyst-verdict
+  incidents learned per analyst per rolling hour, so one analyst can't flood the model. ART runs are not
+  capped.
+- **Signed checkpoints, never an unsigned pickle load.** River state is a pickle, so each checkpoint is
+  **HMAC-SHA256 signed** with `ONLINE_MODEL_SECRET` and the signature is **verified before
+  `pickle.loads` ever runs** — a tampered blob or signature, or a wrong/absent key, is **refused**
+  (`load_checkpoint_bytes`). No secret → the online model is simply not served. Checkpoints are versioned
+  in MLflow (`incident-online`, Production stage, always tagged `experimental`); the last
+  `KEEP_CHECKPOINTS` (5) are kept.
+- **One-command rollback.** `online rollback` promotes the previous checkpoint to Production and flags
+  the rolled-back batch in `online_learn_log` so the reverted model never re-learns a bad verdict batch.
+
+**The benign labels used here are TEST labels, not real analyst verdicts.** ART gives 18 attack labels
+(all one class). To exercise the two-class learning loop, up to **14 ground-truth-benign test labels**
+were created: `false_positive` verdicts raised by **test-admin** on 14 incidents that sit inside
+recorded **normal-activity run windows** (routine `adduser`/`sudo`/`syscheck`/`dpkg` activity, agent
+001, no attack-run overlap), then **reviewed and approved by a separate operator account**
+(`report-analyst@test.lab`, four-eyes). They are recorded as *ground-truth-benign test labels (created
+by test-admin, reviewed by report-analyst@test.lab)* — **not** real production analyst decisions.
+
+**Results — a demonstration of the learning loop, NOT an accuracy claim** (2026-11-21). The 2-class
+prequential evaluation (predict-then-learn, time order) runs over **32 labels (18 ART attack + 14 benign
+test)**. With so few labels and a near-perfect source/label split it shows the *mechanics* of online
+learning beating the rules baseline, not field accuracy.
+
+| metric (prequential, predict-then-learn, n=32) | online ARF | rules-only (max level ≥ 10) |
+|---|---|---|
+| attack precision / recall | 0.75 / 0.50 | — / 0.00 |
+| benign precision / recall | 0.55 / 0.79 | 0.44 / 1.00 |
+| macro-F1 | **0.624** | 0.304 |
+
+The rules-only baseline (flag attack iff an alert reached level ≥ 10) calls *everything* benign here and
+scores 0 on attack — the ARF's 0.624 macro-F1 is the learning loop earning its keep on this stream. (The
+7.4 XGBoost model is a batch classifier, not an online predict-then-learn one, so it has no comparable
+prequential number — see §19 for its leave-one-source-out results.)
+
+**Leave-one-source-out collapses, as expected and reported.** The two source families are each
+single-class on this data (`analyst` = 14 benign, `atomic_linux` = 18 attack), so holding one out leaves
+a single-class training stream — `leave_one_source_out` reports both folds `skipped` / `collapsed`
+rather than a misleading score. Honest limitation of the tiny label set, not a bug.
+
+**The verdicts measurably reshaped the model (learning-loop demonstration).** Before the benign verdicts,
+the attack-only checkpoint (v1) predicted `P(attack)=1.0` for *every* incident. After folding in the 14
+approved benign verdicts (v2, Production), on the same incidents:
+
+| incident | v1 (attack-only) P(attack) | v2 (after verdicts) P(attack) |
+|---|---|---|
+| benign 482815 (normal-activity window) | 1.00 | **0.39** → *likely benign* |
+| attack 482932 (ART run) | 1.00 | 0.80 → *still attack* |
+
+**Restart parity (signed-checkpoint reload).** Reloading v2 from its HMAC-verified MLflow checkpoint (a
+cold restart) reproduces distinct, non-degenerate probabilities — attack 482932 → `P(attack)=0.80`,
+benign 482815 → `P(attack)=0.39` (differ, neither pinned at 1.0). **Rollback** was exercised end to end:
+`online rollback` moved Production v2 → v1 in one command and flagged the 14 learn rows so the reverted
+model won't re-learn them; v2 was then restored as the live checkpoint.
+
+**Memory headroom.** The online ARF adds a single small River forest to ml-enricher; steady-state
+≈ 475 MiB / 1280 MiB limit (37 %, ~800 MiB headroom) with the online model served.
+
+**Limits.**
+- Tiny, source-segregated label set; benign examples are hand-made test labels on the TEST tenant only;
+  not calibrated across tenants. Experimental, advisory, a hint — never a detector.
+- **`--by` names the reviewer but does not *authenticate* them.** The `labels review --approve --by
+  <email>` CLI trusts whoever has shell access: it checks `<email>` is a real analyst/admin ≠ the verdict
+  creator (four-eyes on *identity*), but anyone on the host can pass any analyst's email. Real
+  four-eyes **authentication** needs approval from the console with the reviewer's own logged-in session
+  (the triage/review API already authenticates the caller). Tracked in `OPTIMIZATION_BACKLOG.md`.
+
+Screenshot: `docs/report/7.3-online-model.png`.

@@ -22,10 +22,12 @@ def _other_tenant_incident(db):
 
 
 def _set_assessment(db, incident_id, cls="attack", prob=0.87, reasons=("raised by: the highest alert severity",),
-                    experimental=True):
-    payload = {"feature_version": "f1", "models": {
-        "incident-classifier:3": {"score": prob, "prob": prob, "class": cls, "reasons": list(reasons),
-                                  "experimental": experimental}}}
+                    experimental=True, online=True):
+    models = {"incident-classifier:3": {"score": prob, "prob": prob, "class": cls, "reasons": list(reasons),
+                                        "experimental": experimental}}
+    if online:   # 7.3: the online ARF row
+        models["incident-online:2"] = {"score": 0.61, "prob": 0.61, "class": "attack", "experimental": True}
+    payload = {"feature_version": "f1", "models": models}
     db.execute(text("UPDATE incidents SET ml_reasons = CAST(:r AS jsonb), ml_scored_at = now() WHERE id = :i"),
                {"r": json.dumps(payload), "i": incident_id})
     db.commit()
@@ -42,6 +44,10 @@ def test_model_assessment_happy_path(client, db, tenant):
     assert body["model_version"] == "incident-classifier:3" and body["advisory"] is True
     assert body["experimental"] is True   # 7.4 item 5: surfaced from the stored entry for the panel badge
     assert body["reasons"] and body["reasons"][0].startswith("raised by:")
+    # 7.3: the online ARF model's second row
+    assert body["online"] is not None
+    assert body["online"]["model_version"] == "incident-online:2"
+    assert body["online"]["predicted_class"] == "attack" and body["online"]["experimental"] is True
 
 
 def test_model_assessment_not_scored_returns_null(client, db, tenant):

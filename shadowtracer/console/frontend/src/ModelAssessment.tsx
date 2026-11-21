@@ -62,6 +62,27 @@ export function ModelAssessment({ incidentId }: { incidentId: number }) {
               ))}
             </ul>
           )}
+          {item.online && (
+            <div className="mt-3 border-t border-gray-100 pt-3 dark:border-gray-700">
+              <div className="mb-1 flex items-center gap-2">
+                <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Online model (River ARF)</span>
+                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                  experimental
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className={`rounded px-2 py-0.5 text-sm font-semibold ${item.online.predicted_class === 'attack'
+                  ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300'
+                  : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'}`}>
+                  {item.online.predicted_class === 'attack' ? 'Likely attack' : 'Likely benign'}
+                </span>
+                <span className="font-mono text-sm text-gray-600 dark:text-gray-300">
+                  P(attack) {(item.online.probability * 100).toFixed(0)}%
+                </span>
+                <span className="text-xs text-gray-400">{item.online.model_version}</span>
+              </div>
+            </div>
+          )}
           <p className="mt-3 text-xs text-gray-400">
             Advisory only — this assessment never filters, suppresses or auto-closes an incident.
           </p>

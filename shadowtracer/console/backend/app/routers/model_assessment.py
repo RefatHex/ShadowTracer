@@ -14,6 +14,15 @@ from ..rbac import ANALYST_OR_ABOVE, CurrentUser
 router = APIRouter(prefix="/api", tags=["model-assessment"])
 
 MODEL_PREFIX = "incident-classifier"   # must match shadowtracer_ml.classifier.MODEL_NAME
+ONLINE_PREFIX = "incident-online"      # must match shadowtracer_ml.online.MODEL_NAME
+
+
+class OnlineAssessment(BaseModel):
+    # Phase 7.3: the River ARF online model's row (no SHAP reasons - it is not a tree model).
+    model_version: str                 # "incident-online:<version>"
+    predicted_class: str               # "attack" | "benign"
+    probability: float                 # P(attack), 0..1
+    experimental: bool = True          # always experimental
 
 
 class ModelAssessment(BaseModel):
@@ -25,6 +34,7 @@ class ModelAssessment(BaseModel):
     scored_at: str | None
     advisory: bool = True              # always: the model never triggers an action
     experimental: bool = False         # 7.4 item 5: from the served model version's `experimental` tag
+    online: OnlineAssessment | None = None   # 7.3: second "Online model" row, when the ARF has scored it
 
 
 @router.get("/incidents/{incident_id}/model-assessment", response_model=ModelAssessment | None)
@@ -41,8 +51,15 @@ def model_assessment(incident_id: int, db: Session = Depends(get_db),
     if entry is None:
         return None   # not scored by the classifier yet (not served, or closed before it was promoted)
     key, v = entry
+    online_entry = next(((k, o) for k, o in models.items() if k.split(":", 1)[0] == ONLINE_PREFIX and "class" in o), None)
+    online = None
+    if online_entry is not None:
+        ok, ov = online_entry
+        online = OnlineAssessment(model_version=ok, predicted_class=ov["class"],
+                                  probability=float(ov.get("prob", ov.get("score", 0.0))),
+                                  experimental=bool(ov.get("experimental", True)))
     return ModelAssessment(
         incident_id=incident_id, model_version=key, predicted_class=v["class"],
         probability=float(v.get("prob", v.get("score", 0.0))), reasons=list(v.get("reasons") or []),
-        experimental=bool(v.get("experimental", False)),
+        experimental=bool(v.get("experimental", False)), online=online,
         scored_at=row["ml_scored_at"].isoformat() if row["ml_scored_at"] else None)

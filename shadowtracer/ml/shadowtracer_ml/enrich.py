@@ -119,16 +119,62 @@ class Models:
         return SINCE_FALLBACK
 
 
+class OnlineServer:
+    """Phase 7.3: the live River ARF model. One in-memory model that both SERVES (predict at incident
+    close) and LEARNS (online, only from labelled incidents), checkpointed (HMAC-signed) to MLflow
+    periodically. Disabled unless ONLINE_MODEL_SECRET is set (no key -> no signed checkpoints)."""
+
+    def __init__(self, train_every: float = None):
+        from . import online
+        self._online = online
+        self.enabled = bool(os.environ.get("ONLINE_MODEL_SECRET"))
+        self.model = None
+        self.version = None
+        self.trained_at = 0.0
+        self.train_every = train_every if train_every is not None else float(os.environ.get("ONLINE_TRAIN_SECONDS", "300"))
+
+    def load(self) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.model, self.version = self._online.load_production()
+            log.info("online model loaded (version %s)", self.version)
+        except Exception:  # noqa: BLE001 - a missing/tampered checkpoint must not stop enrichment
+            log.exception("online model load failed - online row disabled until next load")
+            self.model = None
+
+    def predict_entry(self, feats: dict):
+        if not self.enabled or self.model is None:
+            return None
+        label, prob = self._online.predict(self.model, feats)
+        return {"score": prob, "prob": prob, "class": label, "experimental": True}
+
+    def maybe_train(self, engine, ch, tenant_list: list) -> None:
+        if not self.enabled or self.model is None:
+            return
+        if time.monotonic() - self.trained_at < self.train_every:
+            return
+        self.trained_at = time.monotonic()
+        for t in tenant_list:
+            res = self._online.learn_new(engine, ch, t, self.model, log=log)
+            batch = res.pop("batch")
+            if batch:   # save the checkpoint, THEN audit the batch against that version
+                self.version = self._online.save_checkpoint(self.model, {"n_learned_batch": len(batch)})
+                self._online.record_learned(engine, t, batch, self.version)
+                log.info("online checkpoint %s", {"version": self.version, **res})
+
+
 _INCIDENT_COLS = (
     "id, tenant_key, first_seen, last_seen, closed_at, alert_count, max_level, rule_ids, rule_groups, "
     "source_ip_total, user_total, correlation_basis, rare_pattern_flag, prior_occurrences, ti_confidence")
 
 
-def _score_and_store(conn, ch, models: Models, served: dict, incs: list) -> list:
+def _score_and_store(conn, ch, models: Models, served: dict, incs: list, online_server=None) -> list:
     """Compute+store features, predict with every served model, and write one ml_reasons row per
     incident. Shared by the daemon (enrich_batch) and the backfill tool. The UPDATE is keyed by
     incident id and the models dict is keyed by name:version, so re-scoring the same incident with
-    the same model versions overwrites in place - idempotent, never duplicated (7.4 item 6)."""
+    the same model versions overwrites in place - idempotent, never duplicated (7.4 item 6).
+    Phase 7.3: also records the online ARF model's class/prob as a second entry, when served."""
     feats = [incident_features(conn, ch, i) for i in incs]
     now = dt.datetime.now(dt.timezone.utc)
     store_features(ch, [features.to_row(i["tenant_key"], i["id"], i["closed_at"], f, now) for i, f in zip(incs, feats)])
@@ -144,6 +190,10 @@ def _score_and_store(conn, ch, models: Models, served: dict, incs: list) -> list
                 entry["prob"] = round(float(o["prob"].iloc[n]), 4)
                 entry["experimental"] = bool(models.experimental.get(k, False))   # 7.4 item 5: shown in the panel
             per_model[k] = entry
+        if online_server is not None:   # Phase 7.3: online ARF row (advisory, experimental)
+            oe = online_server.predict_entry(feats[n])
+            if oe:
+                per_model[f"incident-online:{online_server.version}"] = oe
         conn.execute(text(
             "UPDATE incidents SET ml_score = :s, ml_reasons = CAST(:r AS jsonb), ml_model = :m, ml_scored_at = now() "
             "WHERE id = :i"),
@@ -153,7 +203,7 @@ def _score_and_store(conn, ch, models: Models, served: dict, incs: list) -> list
 
 
 def enrich_batch(engine, ch, models: Models, tenant_list: list, limit: int = BATCH,
-                 since: str = None, until: str = None, rescore: bool = False, after=None) -> dict:
+                 since: str = None, until: str = None, rescore: bool = False, after=None, online_server=None) -> dict:
     served = models.get()
     if not served:
         return {"incidents": 0, "models": []}             # no Production model yet: leave incidents for later
@@ -172,12 +222,12 @@ def enrich_batch(engine, ch, models: Models, tenant_list: list, limit: int = BAT
         incs = [dict(r._mapping) for r in conn.execute(text(sql), params)]
         if not incs:
             return {"incidents": 0}
-        model_list = _score_and_store(conn, ch, models, served, incs)
+        model_list = _score_and_store(conn, ch, models, served, incs, online_server=online_server)
     return {"incidents": len(incs), "models": model_list, "first_id": incs[0]["id"],
             "cursor": (incs[-1]["closed_at"], incs[-1]["id"])}
 
 
-def backfill(engine, ch, models: Models, tenant_list: list, since: str, until: str = None) -> dict:
+def backfill(engine, ch, models: Models, tenant_list: list, since: str, until: str = None, online_server=None) -> dict:
     """Re-score every closed incident in [since, until) with the current served models, paging by a
     (closed_at, id) keyset cursor. Idempotent (overwrites by incident id + model version); a one-shot
     operator tool for picking up a newly added/retrained model on older incidents the daemon window
@@ -186,7 +236,8 @@ def backfill(engine, ch, models: Models, tenant_list: list, since: str, until: s
         return {"backfilled": 0, "error": "no served model"}
     total, cursor, batches = 0, None, 0
     while True:
-        r = enrich_batch(engine, ch, models, tenant_list, since=since, until=until, rescore=True, after=cursor)
+        r = enrich_batch(engine, ch, models, tenant_list, since=since, until=until, rescore=True, after=cursor,
+                         online_server=online_server)
         if not r["incidents"]:
             break
         total += r["incidents"]; cursor = r["cursor"]; batches += 1
@@ -263,8 +314,12 @@ def main(argv=None) -> int:
     models = Models([m for m in os.environ.get("ML_SERVED_MODELS", "incident-risk-dummy").split(",") if m])
     tl = tenants()
     sim = _load_similar()
+    online_server = OnlineServer()
+    online_server.load()
     if argv[:1] == ["once"]:
-        out = {"supervised": enrich_batch(engine, ch, models, tl), "anomaly": anomaly_batch(engine, ch, tl)}
+        online_server.maybe_train(engine, ch, tl)
+        out = {"supervised": enrich_batch(engine, ch, models, tl, online_server=online_server),
+               "anomaly": anomaly_batch(engine, ch, tl)}
         if sim:
             out["similar"] = similar_batch(engine, ch, sim, tl)
         print(json.dumps(out, default=str))
@@ -275,7 +330,7 @@ def main(argv=None) -> int:
         ap.add_argument("--since", required=True, help="ISO-8601, inclusive")
         ap.add_argument("--until", help="ISO-8601, exclusive (default: now)")
         a = ap.parse_args(argv[1:])
-        print(json.dumps(backfill(engine, ch, models, tl, a.since, a.until), default=str))
+        print(json.dumps(backfill(engine, ch, models, tl, a.since, a.until, online_server=online_server), default=str))
         return 0
     poll = float(os.environ.get("ML_POLL_SECONDS", "15"))
     label_every = float(os.environ.get("LABEL_INTERVAL_SECONDS", "300"))
@@ -283,7 +338,8 @@ def main(argv=None) -> int:
     last_label = last_consistency = 0.0
     while True:
         try:
-            r = enrich_batch(engine, ch, models, tl)
+            online_server.maybe_train(engine, ch, tl)   # Phase 7.3: learn new labelled incidents, checkpoint
+            r = enrich_batch(engine, ch, models, tl, online_server=online_server)
             if r["incidents"]:
                 log.info("enriched %s", r)
             a = anomaly_batch(engine, ch, tl)

@@ -132,15 +132,58 @@ def label_runs(engine, ch, tenant: str) -> dict:
 def collect_verdicts(engine, tenant: str) -> int:
     """Audited triage verdicts from analyst/admin users -> ml_verdict_reviews (pending review)."""
     with engine.begin() as conn:
+        # audit_log.actor is the user_id (triage endpoint writes str(current_user.user_id)), NOT the
+        # email - joining on email collected nothing, so analyst verdicts never became labels. Join on
+        # the id and store the email as `analyst` (readable audit + the online model's per-analyst cap).
         return conn.execute(text("""
             INSERT INTO ml_verdict_reviews (incident_id, tenant_key, verdict, analyst, analyst_role, audit_id)
-            SELECT CAST(a.target AS integer), t.tenant_key, split_part(a.action, ':', 2), a.actor, u.role, a.id
+            SELECT CAST(a.target AS integer), t.tenant_key, split_part(a.action, ':', 2), u.email, u.role, a.id
             FROM audit_log a JOIN tenants t ON t.id = a.tenant_id
-            JOIN users u ON u.tenant_id = a.tenant_id AND u.email = a.actor
+            JOIN users u ON u.tenant_id = a.tenant_id AND CAST(u.id AS text) = a.actor
             JOIN incidents i ON i.id = CAST(a.target AS integer) AND i.tenant_key = t.tenant_key
             WHERE t.tenant_key = :t AND a.outcome = 'success' AND u.role = ANY(:roles)
               AND a.action IN ('incident_triage:escalate', 'incident_triage:false_positive') AND a.target ~ '^[0-9]+$'
             ON CONFLICT (incident_id, analyst, verdict) DO NOTHING"""), {"t": tenant, "roles": list(ANALYST_ROLES)}).rowcount
+
+
+def four_eyes_ok(creator_analyst: str, reviewer: str) -> bool:
+    """Four-eyes: a verdict must be reviewed by a DIFFERENT, non-empty account than the one that
+    created it. A verdict feeds the online model's learning, so one account can't both make and
+    approve it (the guard-rail against a single analyst poisoning the model)."""
+    return bool(reviewer) and reviewer != creator_analyst
+
+
+def check_reviewer(creator_analyst: str, reviewer: str, reviewer_role) -> None:
+    """Raise ValueError unless `reviewer` may approve: a DIFFERENT account than the creator (four-eyes)
+    AND a real analyst/admin user (reviewer_role is None when the account doesn't exist in the tenant
+    or isn't analyst+). Stops an arbitrary string - or a viewer, or a non-user - from approving a
+    verdict that trains the model."""
+    if not four_eyes_ok(creator_analyst, reviewer):
+        raise ValueError(f"four-eyes - reviewer {reviewer!r} is the same account that created this verdict; "
+                         f"a different reviewer must approve it")
+    if reviewer_role not in ANALYST_ROLES:
+        raise ValueError(f"reviewer {reviewer!r} is not an analyst/admin user in this tenant "
+                         f"(role={reviewer_role!r}); only an analyst+ account may approve a verdict")
+
+
+def review_approve(engine, tenant: str, review_id: int, by: str, reject: bool = False) -> dict:
+    """Approve (or reject) one verdict review as `by`. Raises ValueError if the review is missing, if
+    `by` is the account that created the verdict (four-eyes), or if `by` is not a real analyst/admin
+    user in this tenant."""
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT analyst FROM ml_verdict_reviews WHERE id = :id AND tenant_key = :t"),
+            {"id": review_id, "t": tenant}).first()
+        if row is None:
+            raise ValueError(f"no verdict review with id {review_id} for this tenant")
+        reviewer_role = conn.execute(text(
+            "SELECT u.role FROM users u JOIN tenants t ON t.id = u.tenant_id "
+            "WHERE t.tenant_key = :t AND u.email = :by"), {"t": tenant, "by": by}).scalar()
+        check_reviewer(row.analyst, by, reviewer_role)
+        conn.execute(text(
+            "UPDATE ml_verdict_reviews SET approved = :ok, reviewed_by = :by, reviewed_at = now() "
+            "WHERE id = :id AND tenant_key = :t"), {"ok": not reject, "by": by, "id": review_id, "t": tenant})
+    return {"review": review_id, "approved": not reject, "by": by, "role": reviewer_role}
 
 
 def label_verdicts(engine, tenant: str) -> int:
@@ -240,10 +283,10 @@ def main(argv=None) -> int:
     else:
         if not a.by:
             p.error("--by is required to approve or reject")
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE ml_verdict_reviews SET approved=:ok, reviewed_by=:by, reviewed_at=now() "
-                              "WHERE id=:id AND tenant_key=:t AND analyst <> :by"),
-                         {"ok": not a.reject, "by": a.by, "id": a.approve, "t": tenant})
+        try:
+            print(json.dumps(review_approve(engine, tenant, a.approve, a.by, reject=a.reject)))
+        except ValueError as e:
+            sys.exit(f"refused: {e}")
     return 0
 
 
