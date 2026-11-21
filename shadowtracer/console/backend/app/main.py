@@ -21,6 +21,7 @@ from .routers import similar as similar_router
 from .routers import paid_sources as paid_sources_router
 from .routers import vulnerabilities as vulnerabilities_router
 from .routers import ti as ti_router
+from .routers import investigation as investigation_router
 from .security_headers import SecurityHeadersMiddleware, install_generic_error_handler
 
 
@@ -60,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(vulnerabilities_router.router)
     app.include_router(live_router.router)
     app.include_router(campaigns_router.router)
+    app.include_router(investigation_router.router)
     app.include_router(similar_router.router)
     app.include_router(model_assessment_router.router)
 

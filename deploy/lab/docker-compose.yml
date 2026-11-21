@@ -64,6 +64,12 @@ x-console-backend-env: &console-backend-env
   # set WAZUH_API_PASSWORD in deploy/lab/.env to override the lab default.
   WAZUH_API_ENDPOINTS: '{"${TEST_TENANT_KEY}":"https://shadowtracer-worker-test:55000"}'
   WAZUH_API_USER: ${WAZUH_API_USER:-wazuh-wui}
+  # Phase 7.7: investigation agent LLM (OpenAI-compatible). Default = local Ollama on the host GPU;
+  # host.docker.internal is the Windows host. LLM_API_KEY is optional and NEVER logged. External
+  # providers are a per-tenant admin opt-in (off by default).
+  LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+  LLM_MODEL: ${LLM_MODEL:-gemma4:e4b}
+  LLM_API_KEY: ${LLM_API_KEY:-}
   WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD:-wazuh-wui}
   # Phase 7.5: the Similar-past-incidents API queries Qdrant by the incident's stored vector.
   QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}

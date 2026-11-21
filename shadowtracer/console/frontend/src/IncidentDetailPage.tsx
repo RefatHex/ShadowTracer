@@ -7,6 +7,7 @@ import { IpReputation } from './IpReputation'
 import { GraphView } from './GraphView'
 import { SimilarIncidents } from './SimilarIncidents'
 import { ModelAssessment } from './ModelAssessment'
+import { InvestigationPanel } from './InvestigationPanel'
 
 // Every field below - including alert.message, which is fully
 // attacker-controlled (see AlertRow.tsx/AlertRow.test.tsx) - is rendered
@@ -205,6 +206,8 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
       <TiSection matches={incident.ti_matches ?? []} onChanged={() => void load()} />
 
       <ModelAssessment incidentId={incident.id} />
+
+      <InvestigationPanel incidentId={incident.id} />
 
       <SimilarIncidents incidentId={incident.id} />
 

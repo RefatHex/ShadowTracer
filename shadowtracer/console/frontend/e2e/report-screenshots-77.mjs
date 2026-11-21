@@ -1,25 +1,32 @@
-// Phase 6.6 report screenshot of the running lab console vulnerability view (not a test suite).
-// usage: ST_URL=https://localhost:8443 ANALYST_EMAIL=.. ANALYST_PASSWORD=.. \
-//        OUT=../../docs/report node e2e/report-screenshots-77.mjs
+// Phase 7.7: screenshot of the "AI investigation" panel on an incident page - the AI-generated summary
+// with clickable evidence ids, the "AI-generated, check the evidence" label, and the evidence list.
+// usage: ST_URL=.. ADMIN_EMAIL=.. ADMIN_PASSWORD=.. INCIDENT_ID=.. OUT=../../docs/report node e2e/report-screenshots-77.mjs
 import { chromium } from '@playwright/test'
 const env = process.env
 const out = (name) => `${env.OUT}/${name}`
 
 const browser = await chromium.launch()
 try {
-  const page = await (await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1400, height: 1000 } })).newPage()
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1400, height: 1400 } })
+  const page = await ctx.newPage()
+
   await page.goto(env.ST_URL)
-  await page.fill('#email', env.ANALYST_EMAIL)
-  await page.fill('#password', env.ANALYST_PASSWORD)
+  await page.waitForSelector('#email', { timeout: 60000 })
+  await page.fill('#email', env.ADMIN_EMAIL)
+  await page.fill('#password', env.ADMIN_PASSWORD)
   await page.click('button[type=submit]')
   await page.waitForSelector('nav', { timeout: 60000 })
-  await page.getByRole('button', { name: 'Vulnerabilities' }).click()
-  await page.waitForFunction(() => /\d+ CVEs/.test(document.body.innerText), { timeout: 60000 })
-  await page.getByText(/\d+ CVEs/).first().click()   // expand the host's CVE table
-  await page.waitForFunction(() => /CVE-/.test(document.body.innerText), { timeout: 60000 })
-  await page.waitForTimeout(800)
-  await page.screenshot({ path: out('6.6-vulnerabilities.png'), fullPage: false })
-  console.log('vuln screenshot written to', env.OUT)
+
+  await page.goto(`${env.ST_URL}/#/incidents/${env.INCIDENT_ID}`)
+  await page.waitForSelector('text=AI investigation', { timeout: 60000 })
+  // the panel loads the stored investigation on mount; wait for the SUMMARY section to render
+  await page.waitForSelector('text=SUMMARY', { timeout: 60000 })
+  await page.waitForTimeout(600)
+
+  const panel = page.locator('section', { has: page.getByRole('heading', { name: 'AI investigation' }) })
+  await panel.scrollIntoViewIfNeeded()
+  await panel.screenshot({ path: out('7.7-investigation.png') })
+  console.log('wrote', out('7.7-investigation.png'))
 } finally {
   await browser.close()
 }

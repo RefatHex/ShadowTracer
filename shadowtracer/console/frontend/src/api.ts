@@ -677,6 +677,35 @@ export async function fetchModelAssessment(accessToken: string, incidentId: numb
   return handle<ModelAssessment | null>(resp)
 }
 
+// Phase 7.7: LLM investigation agent (read-only, advisory, AI-generated).
+export interface InvestigationEvidence { id: string; title: string; body: string }
+export interface InvestigationSentence { text: string; cites: string[]; verified: boolean; unsupported: string[] }
+export interface Investigation {
+  status: 'ok' | 'llm_unavailable'
+  sections?: Record<string, string>
+  sentences?: InvestigationSentence[]
+  evidence: InvestigationEvidence[]
+  tool_calls?: { name: string; args: Record<string, unknown> }[]
+  unverified_count?: number
+  model?: string
+  prompt_version?: string
+  tokens?: number
+  latency_ms?: number
+  created_by?: string
+  created_at?: string
+  message?: string
+}
+
+export async function fetchInvestigation(accessToken: string, incidentId: number): Promise<Investigation | null> {
+  const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/investigation`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<Investigation | null>(resp)
+}
+
+export async function runInvestigation(accessToken: string, incidentId: number): Promise<Investigation> {
+  const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/investigate`, { method: 'POST', headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<Investigation>(resp)
+}
+
 export async function fetchIncidentGraph(accessToken: string, incidentId: number): Promise<GraphData> {
   const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/graph`, { headers: authHeaders(accessToken), credentials: 'include' })
   return handle<GraphData>(resp)
