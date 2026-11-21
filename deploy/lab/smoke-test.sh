@@ -224,10 +224,18 @@ if [ -z "${TEST_TENANT_ADMIN_EMAIL:-}" ] || [ -z "${TEST_TENANT_ADMIN_PASSWORD:-
     echo "SKIP: end-to-end alert test (set TEST_TENANT_ADMIN_EMAIL/PASSWORD in .env - create that user first with: cd ../../shadowtracer/console/backend && python cli.py create-admin --tenant shadowtracer-lab-test --email <email>)"
 else
     echo "--- end-to-end: login, SSH brute force, alert through the API ---"
-    login_resp="$(curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/auth/login \
-        -X POST -H "Content-Type: application/json" \
-        -d "{\"email\":\"$TEST_TENANT_ADMIN_EMAIL\",\"password\":\"$TEST_TENANT_ADMIN_PASSWORD\"}")"
-    access_token="$(echo "$login_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)"
+    # Caddy now health-checks the backend replicas and retries around a restarting one, so an empty
+    # 502 should not happen here anymore. Keep a small retry as a belt-and-suspenders: a transient
+    # (e.g. a replica recreated by `compose up -d` a moment earlier) must not fail the smoke test.
+    access_token=""
+    for attempt in 1 2 3; do
+        login_resp="$(curl -sk --resolve localhost:8443:127.0.0.1 https://localhost:8443/auth/login \
+            -X POST -H "Content-Type: application/json" \
+            -d "{\"email\":\"$TEST_TENANT_ADMIN_EMAIL\",\"password\":\"$TEST_TENANT_ADMIN_PASSWORD\"}")"
+        access_token="$(echo "$login_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)"
+        [ -n "$access_token" ] && break
+        sleep 2
+    done
 
     if [ -z "$access_token" ]; then
         echo "FAIL: could not log in as $TEST_TENANT_ADMIN_EMAIL ($login_resp)"

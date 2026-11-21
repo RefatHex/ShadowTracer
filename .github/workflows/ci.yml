@@ -1,10 +1,11 @@
 name: ShadowTracer CI
 
+# Phase 7.x: MANUAL ONLY (workflow_dispatch). This workflow was failing on every push/PR (the
+# recursive Wazuh-submodule checkout + agent build on a clean runner), and we don't want it burning
+# Actions minutes automatically. It no longer runs on push/pull_request - trigger it by hand from the
+# Actions tab if ever needed. The test suites we actually run live in run-ci.sh (the local CI).
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   check-project:

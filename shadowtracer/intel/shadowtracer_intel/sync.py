@@ -431,7 +431,8 @@ def _vt_loop(engine, interval: float) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    engine = create_engine(database_url(), pool_pre_ping=True)
+    engine = create_engine(database_url(), pool_pre_ping=True, pool_size=3, max_overflow=2, pool_timeout=30,
+                           connect_args={"options": "-c statement_timeout=30000"})  # bounded pool + timeout (7.x OOM fix)
     import threading
     threading.Thread(target=_vt_loop, args=(engine, float(os.environ.get("TI_VT_INTERVAL_SECONDS", "10"))),
                      daemon=True, name="vt-worker").start()

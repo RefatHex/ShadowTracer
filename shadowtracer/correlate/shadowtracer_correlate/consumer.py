@@ -165,7 +165,10 @@ def run(
     # topic_pattern only ever narrows this in tests (their own topics, never the lab's).
     consumer.subscribe([topic_pattern])
 
-    engine = create_engine(database_url, pool_pre_ping=True)
+    # Phase 7.x: bounded pool + statement_timeout so total PG connections stay within the lowered
+    # max_connections and no runaway query can pin Postgres memory (see project_postgres_oom).
+    engine = create_engine(database_url, pool_pre_ping=True, pool_size=3, max_overflow=2, pool_timeout=30,
+                           connect_args={"options": "-c statement_timeout=30000"})
     profiler = BatchProfiler(engine)  # no-op unless SHADOWTRACER_PROFILE_BATCHES=1
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     # Same tuning as the consumer above, same reason - confirmed for

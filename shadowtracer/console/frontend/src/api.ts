@@ -29,6 +29,17 @@ export interface AlertsPage {
   next_cursor: string | null
 }
 
+// Keyset cursor for paging an incident's alerts (large incidents aren't loaded all at once).
+export interface AlertCursor {
+  after_time: string
+  after_id: number
+}
+
+export interface IncidentAlertPage {
+  alerts: Alert[]
+  next: AlertCursor | null
+}
+
 export interface IncidentSummary {
   id: number
   agent_id: string
@@ -78,7 +89,8 @@ export interface IncidentDetail extends IncidentSummary {
   users: string[]
   user_total: number
   closed_at: string | null
-  alerts: Alert[]
+  alerts: Alert[]              // first page only; total is alert_count
+  alerts_next: AlertCursor | null   // cursor for fetchIncidentAlerts, null if all alerts fit one page
   ti_confidence?: number | null
   priority?: number
   ti_matches?: TiMatch[]
@@ -421,6 +433,15 @@ export async function fetchIncidentDetail(accessToken: string, id: number): Prom
     headers: authHeaders(accessToken), credentials: 'include',
   })
   return handle<IncidentDetail>(resp)
+}
+
+// Next keyset page of a large incident's alerts.
+export async function fetchIncidentAlerts(accessToken: string, id: number, cursor: AlertCursor): Promise<IncidentAlertPage> {
+  const q = new URLSearchParams({ after_time: cursor.after_time, after_id: String(cursor.after_id) })
+  const resp = await fetch(`${API_BASE}/api/incidents/${id}/alerts?${q}`, {
+    headers: authHeaders(accessToken), credentials: 'include',
+  })
+  return handle<IncidentAlertPage>(resp)
 }
 
 export async function triageIncident(accessToken: string, id: number, action: TriageAction): Promise<TriageResponse> {

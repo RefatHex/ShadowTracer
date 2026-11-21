@@ -11,7 +11,8 @@ def database_url(env=os.environ) -> str:
 
 
 def engine(env=os.environ):
-    return create_engine(database_url(env), pool_pre_ping=True)
+    return create_engine(database_url(env), pool_pre_ping=True, pool_size=3, max_overflow=2, pool_timeout=30,
+                         connect_args={"options": "-c statement_timeout=30000"})  # bounded pool + timeout (7.x OOM fix)
 
 
 def clickhouse(env=os.environ):

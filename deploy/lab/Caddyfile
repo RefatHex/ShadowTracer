@@ -11,21 +11,46 @@
 # certificate matching TLS ClientHello" / "no certificate available for
 # '<container-ip>'"). An explicit hostname lets Caddy issue and cache one
 # real certificate for that name at startup, matching CORS_ALLOW_ORIGINS.
-localhost:8443 {
-    tls internal
+# Phase 7.x: proxy to the two backend replicas WITH health checks, so a replica that is
+# restarting (a deploy, a crash) is taken out of rotation instead of serving 502s, and a request
+# that lands on a just-failed replica is retried on the other within lb_try_duration. This is the
+# real-world fix for the flaky "empty 502" the smoke login hit during `compose up -d` - any real
+# user would hit the same 502 during a deploy. (health_uri /health/ready is unauthenticated.)
+(backend) {
+	reverse_proxy console-backend-1:8000 console-backend-2:8000 {
+		lb_policy round_robin
+		# retry a request on the other replica for up to this long if the first pick fails to respond
+		lb_try_duration 5s
+		lb_try_interval 250ms
+		# active: poll each replica every 2s; stop routing to one that is not ready (200 from
+		# /health/ready). A short interval keeps the window where a just-restarted replica is still in
+		# rotation small.
+		health_uri /health/ready
+		health_interval 2s
+		health_timeout 2s
+		health_status 200
+		# passive: the FIRST failed response ejects a replica from rotation for 10s (so even before the
+		# next active probe, a replica that just started failing is taken out).
+		fail_duration 10s
+		max_fails 1
+	}
+}
 
-    handle /auth/* {
-        reverse_proxy console-backend-1:8000 console-backend-2:8000
-    }
-    handle /api/* {
-        reverse_proxy console-backend-1:8000 console-backend-2:8000
-    }
-    handle /health* {
-        reverse_proxy console-backend-1:8000 console-backend-2:8000
-    }
-    handle {
-        root * /srv/frontend
-        try_files {path} /index.html
-        file_server
-    }
+localhost:8443 {
+	tls internal
+
+	handle /auth/* {
+		import backend
+	}
+	handle /api/* {
+		import backend
+	}
+	handle /health* {
+		import backend
+	}
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
 }

@@ -24,6 +24,11 @@ router = APIRouter(prefix="/api", tags=["incidents"])
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
+# A hard cap on how many of an incident's alerts any one request loads into memory. A real incident
+# can have >100k alerts (e.g. an SSH brute force); loading them all OOM-killed the 160 MiB console
+# worker (a 502). The detail endpoint returns the first page; the rest come from /incidents/{id}/alerts
+# by keyset cursor (alert_time, id). No endpoint ever materialises more than this many alert rows.
+ALERT_PAGE_SIZE = 200
 
 ALERT_COLUMNS = [
     "time", "cluster_node", "alert_id", "agent_id", "agent_name",
@@ -120,6 +125,17 @@ class IncidentAlert(BaseModel):
     message: str
 
 
+class AlertCursor(BaseModel):
+    # Keyset position for paging an incident's alerts: everything after (alert_time, id).
+    after_time: datetime.datetime
+    after_id: int
+
+
+class AlertPage(BaseModel):
+    alerts: list[IncidentAlert]
+    next: AlertCursor | None = None   # null = last page
+
+
 class DriftEvent(BaseModel):
     # Phase 7.2: advisory behaviour-drift note for this incident's agent.
     metric: str
@@ -138,7 +154,8 @@ class IncidentDetail(IncidentSummary):
     users: list[str]
     user_total: int
     closed_at: datetime.datetime | None
-    alerts: list[IncidentAlert]
+    alerts: list[IncidentAlert]           # first page only (<= ALERT_PAGE_SIZE); total is alert_count
+    alerts_next: AlertCursor | None = None   # cursor for /incidents/{id}/alerts, null if all alerts fit one page
     ti_matches: list[TiMatch] = []
     drift_events: list[DriftEvent] = []
 
@@ -281,33 +298,9 @@ def get_incident(
     if row is None:
         raise HTTPException(status_code=404, detail="incident not found")
 
-    memberships = db.execute(
-        select(incident_alerts.c.node, incident_alerts.c.alert_id)
-        .where(incident_alerts.c.incident_id == incident_id)
-    ).all()
-
-    alerts: list[IncidentAlert] = []
-    if memberships:
-        ch_client = _get_ch_client(settings)
-        try:
-            # Alert content is never duplicated into Postgres (Step 2:
-            # "incidents never delete or hide alerts" - ClickHouse stays
-            # the one source of truth) - fetched here by the exact
-            # (node, alert_id) pairs this incident's membership rows name.
-            # LIMIT 1 BY: an alert inserted twice (a writer replay) shows once
-            # even before ReplacingMergeTree merges the copies.
-            pairs = ", ".join(f"('{node}', '{alert_id}')" for node, alert_id in memberships)
-            query = f"""
-                SELECT {', '.join(ALERT_COLUMNS)}
-                FROM events
-                WHERE tenant_id = {{tenant_id:String}} AND (cluster_node, alert_id) IN ({pairs})
-                ORDER BY time ASC
-                LIMIT 1 BY cluster_node, alert_id
-            """
-            result = ch_client.query(query, parameters={"tenant_id": current_user.tenant_key})
-            alerts = [IncidentAlert(**dict(zip(ALERT_COLUMNS, r))) for r in result.result_rows]
-        finally:
-            ch_client.close()
+    # Only the FIRST page of alerts (keyset on alert_time, id). A large incident can have >100k
+    # alerts; loading them all OOM-killed this worker. The rest come from /incidents/{id}/alerts.
+    page = _alert_page(db, settings, incident_id, current_user.tenant_key)
 
     # Phase 6.4: every value below comes from feeds or alerts - rendered as text only.
     rows = db.execute(text(
@@ -331,7 +324,65 @@ def get_incident(
         "WHERE tenant_key = :t AND entity_type = 'agent' AND entity = :a ORDER BY window_start DESC LIMIT 5"),
         {"t": current_user.tenant_key, "a": row["agent_id"]}).mappings().all()
     drift_events = [DriftEvent(**d) for d in drift]
-    return IncidentDetail(**row, alerts=alerts, ti_matches=ti_matches, drift_events=drift_events)
+    return IncidentDetail(**row, alerts=page.alerts, alerts_next=page.next,
+                          ti_matches=ti_matches, drift_events=drift_events)
+
+
+def _alert_page(db: Session, settings: Settings, incident_id: int, tenant_key: str,
+                after_time: datetime.datetime | None = None, after_id: int | None = None,
+                limit: int = ALERT_PAGE_SIZE) -> AlertPage:
+    """One keyset page of an incident's alerts, ordered by (alert_time, id). Loads at most `limit`
+    membership rows from Postgres and fetches exactly those alerts' content from ClickHouse - the
+    IN-list is bounded by `limit`, never the whole incident. `next` is null on the last page."""
+    rows = db.execute(text(
+        "SELECT node, alert_id, alert_time, id FROM incident_alerts "
+        "WHERE incident_id = :i AND tenant_key = :t "
+        "AND (CAST(:after_time AS timestamptz) IS NULL OR (alert_time, id) > (CAST(:after_time AS timestamptz), :after_id)) "
+        "ORDER BY alert_time, id LIMIT :lim"),
+        {"i": incident_id, "t": tenant_key, "after_time": after_time, "after_id": after_id, "lim": limit}).all()
+    if not rows:
+        return AlertPage(alerts=[], next=None)
+    # Bounded IN-list: at most `limit` (<=200) pairs. node/alert_id are internal ids from our own
+    # membership table, not user input (same trust as the former query). LIMIT 1 BY dedups a replay.
+    pairs = ", ".join(f"('{r.node}', '{r.alert_id}')" for r in rows)
+    ch_client = _get_ch_client(settings)
+    try:
+        result = ch_client.query(
+            f"SELECT {', '.join(ALERT_COLUMNS)} FROM events "
+            f"WHERE tenant_id = {{tenant_id:String}} AND (cluster_node, alert_id) IN ({pairs}) "
+            f"LIMIT 1 BY cluster_node, alert_id",
+            parameters={"tenant_id": tenant_key})
+    finally:
+        ch_client.close()
+    by_key = {(d["cluster_node"], d["alert_id"]): d
+              for d in (dict(zip(ALERT_COLUMNS, r)) for r in result.result_rows)}
+    # Emit in the Postgres keyset order; an alert whose content aged out of ClickHouse retention is
+    # skipped (not an error) rather than breaking the page.
+    alerts = [IncidentAlert(**by_key[(r.node, r.alert_id)]) for r in rows if (r.node, r.alert_id) in by_key]
+    nxt = AlertCursor(after_time=rows[-1].alert_time, after_id=rows[-1].id) if len(rows) == limit else None
+    return AlertPage(alerts=alerts, next=nxt)
+
+
+@router.get("/incidents/{incident_id}/alerts", response_model=AlertPage)
+def get_incident_alerts(
+    incident_id: int,
+    after_time: datetime.datetime | None = None,
+    after_id: int | None = None,
+    limit: int = Query(ALERT_PAGE_SIZE, ge=1, le=ALERT_PAGE_SIZE),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(ALL_ROLES),
+):
+    """Keyset page of an incident's alerts (tenant-scoped; cross-tenant -> 404). The UI pages through
+    a large incident with this instead of the detail endpoint ever loading every alert."""
+    exists = db.execute(
+        select(incidents.c.id).where(incidents.c.id == incident_id, incidents.c.tenant_key == current_user.tenant_key)
+    ).first()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="incident not found")
+    if (after_time is None) != (after_id is None):
+        raise HTTPException(status_code=422, detail="after_time and after_id must be given together")
+    return _alert_page(db, settings, incident_id, current_user.tenant_key, after_time, after_id, limit)
 
 
 @router.post("/incidents/{incident_id}/triage", response_model=TriageResponse)

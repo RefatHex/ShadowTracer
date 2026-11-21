@@ -139,6 +139,50 @@ def test_incident_list_and_detail_include_real_clickhouse_alert_content(client, 
     assert body["id"] == incident_id
     assert len(body["alerts"]) == 1
     assert body["alerts"][0]["message"] == f"real-alert-{marker}"
+    assert body["alerts_next"] is None   # one alert fits a single page
+
+
+def test_incident_detail_alerts_are_paginated_not_all_loaded(client, db, ch_client, tenant):
+    """A large incident must NOT load every alert (that OOM-killed the worker -> 502). The detail
+    endpoint returns the first ALERT_PAGE_SIZE (200) with a keyset cursor; /alerts pages the rest."""
+    tenant_id, tenant_key = tenant
+    marker = uuid.uuid4().hex[:8]
+    base = datetime.datetime.now(datetime.timezone.utc)
+    incident_id = _make_incident(db, tenant_key, agent_id=f"big-{marker}", alert_count=205)
+
+    alert_rows, ch_rows = [], []
+    for i in range(205):
+        t = base + datetime.timedelta(seconds=i)
+        aid = f"pg-{marker}-{i:04d}"
+        alert_rows.append(dict(incident_id=incident_id, tenant_key=tenant_key, node="testnode", alert_id=aid, alert_time=t))
+        ch_rows.append(_event_row(tenant_key, aid, t, message=f"msg-{i}"))
+    db.execute(incident_alerts.insert(), alert_rows)
+    db.commit()
+    ch_client.insert("events", ch_rows, column_names=COLUMNS)
+
+    token = _token_for(client, db, tenant_id, f"viewer-{marker}@example.com")
+    hdr = {"Authorization": f"Bearer {token}"}
+
+    body = client.get(f"/api/incidents/{incident_id}", headers=hdr).json()
+    assert len(body["alerts"]) == 200                    # first page only, never all 205
+    assert body["alerts_next"] is not None
+    assert body["alerts"][0]["message"] == "msg-0"       # keyset order: earliest first
+
+    cur = body["alerts_next"]
+    page2 = client.get(f"/api/incidents/{incident_id}/alerts",
+                       params={"after_time": cur["after_time"], "after_id": cur["after_id"]}, headers=hdr)
+    assert page2.status_code == 200
+    p2 = page2.json()
+    assert len(p2["alerts"]) == 5                         # remaining 5
+    assert p2["next"] is None                             # last page
+    assert p2["alerts"][0]["message"] == "msg-200"
+
+    # cross-tenant incident id -> 404, never another tenant's alerts
+    other_key = f"other-{marker}"
+    db.execute(tenants.insert().values(name=f"other-{marker}", tenant_key=other_key))
+    db.commit()
+    other_id = _make_incident(db, other_key, agent_id="x")
+    assert client.get(f"/api/incidents/{other_id}/alerts", headers=hdr).status_code == 404
 
 
 def test_viewer_cannot_triage_gets_403(client, db, tenant):

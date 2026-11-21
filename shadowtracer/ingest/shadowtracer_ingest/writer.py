@@ -181,7 +181,8 @@ def run(
         "allow.auto.create.topics": False,
         **kafka_client_config,
     })
-    pg_engine = create_engine(database_url, pool_pre_ping=True)
+    pg_engine = create_engine(database_url, pool_pre_ping=True, pool_size=3, max_overflow=2, pool_timeout=30,
+                              connect_args={"options": "-c statement_timeout=30000"})  # bounded pool + timeout (7.x OOM fix)
     # Phase 5C Step 0: a forged/stale/deleted tenant_key must never create
     # silent orphaned ClickHouse rows - see tenants.py's own docstring for
     # why this is a periodically-refreshed cache, not a query per message.

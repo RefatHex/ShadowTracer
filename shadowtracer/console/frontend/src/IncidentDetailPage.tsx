@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from './AuthContext'
 import * as api from './api'
-import type { IncidentDetail, TriageAction } from './api'
+import type { IncidentDetail, TriageAction, Alert, AlertCursor } from './api'
 import { TiSection } from './TiSection'
 import { IpReputation } from './IpReputation'
 import { GraphView } from './GraphView'
@@ -15,6 +15,9 @@ import { ModelAssessment } from './ModelAssessment'
 export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number; onBack: () => void }) {
   const { session } = useAuth()
   const [incident, setIncident] = useState<IncidentDetail | null>(null)
+  const [alerts, setAlerts] = useState<Alert[]>([])
+  const [alertCursor, setAlertCursor] = useState<AlertCursor | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [comment, setComment] = useState('')
   const [actionMessage, setActionMessage] = useState<string | null>(null)
@@ -24,10 +27,25 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
   async function load() {
     if (!session) return
     try {
-      setIncident(await api.fetchIncidentDetail(session.accessToken, incidentId))
+      const d = await api.fetchIncidentDetail(session.accessToken, incidentId)
+      setIncident(d)
+      setAlerts(d.alerts)            // first page; the rest load on demand (large incidents aren't loaded at once)
+      setAlertCursor(d.alerts_next)
       setError(null)
     } catch {
       setError('Could not load this incident.')
+    }
+  }
+
+  async function loadMoreAlerts() {
+    if (!session || !alertCursor) return
+    setLoadingMore(true)
+    try {
+      const page = await api.fetchIncidentAlerts(session.accessToken, incidentId, alertCursor)
+      setAlerts((prev) => [...prev, ...page.alerts])
+      setAlertCursor(page.next)
+    } finally {
+      setLoadingMore(false)
     }
   }
 
@@ -192,7 +210,12 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
 
       <GraphView kind="incident" id={incident.id} />
 
-      <h2 className="mb-2 mt-6 text-sm font-semibold text-gray-700 dark:text-gray-300">Alerts in this incident</h2>
+      <h2 className="mb-2 mt-6 text-sm font-semibold text-gray-700 dark:text-gray-300">
+        Alerts in this incident
+        <span className="ml-2 font-normal text-xs text-gray-400">
+          showing {alerts.length.toLocaleString()} of {incident.alert_count.toLocaleString()}
+        </span>
+      </h2>
       <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
         <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
           <thead className="bg-gray-50 dark:bg-gray-900">
@@ -204,7 +227,7 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
             </tr>
           </thead>
           <tbody>
-            {incident.alerts.map((alert) => (
+            {alerts.map((alert) => (
               <tr key={alert.alert_id} className="border-b border-gray-200 dark:border-gray-700">
                 <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-500">{alert.time}</td>
                 <td className="px-3 py-2 text-sm font-mono text-xs">{alert.rule_id}</td>
@@ -215,6 +238,17 @@ export function IncidentDetailPage({ incidentId, onBack }: { incidentId: number;
           </tbody>
         </table>
       </div>
+      {alertCursor && (
+        <div className="mt-2">
+          <button
+            onClick={() => void loadMoreAlerts()}
+            disabled={loadingMore}
+            className="rounded border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+          >
+            {loadingMore ? 'Loading…' : `Load more (${(incident.alert_count - alerts.length).toLocaleString()} remaining)`}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

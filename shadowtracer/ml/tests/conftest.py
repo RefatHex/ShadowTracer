@@ -1,4 +1,8 @@
 import os as _os, sys as _sys
+# shadowtracer_ml itself (this package's parent) AND shadowtracer_ingest - without the first, a bare
+# `pytest` (no `python -m`, no PYTHONPATH) fails every module with "No module named 'shadowtracer_ml'".
+# Mirrors ingest/correlate conftests; pytest.ini's `pythonpath = .` is the belt to this suspenders.
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..'))
 _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..', '..', 'ingest'))
 import datetime as dt
 

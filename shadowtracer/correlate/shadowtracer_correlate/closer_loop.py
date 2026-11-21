@@ -31,7 +31,8 @@ def run(
 ):
     from sqlalchemy import create_engine
 
-    engine = create_engine(database_url, pool_pre_ping=True)
+    engine = create_engine(database_url, pool_pre_ping=True, pool_size=3, max_overflow=2, pool_timeout=30,
+                           connect_args={"options": "-c statement_timeout=30000"})  # bounded pool + timeout (7.x OOM fix)
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
 
     if started_flag is not None:

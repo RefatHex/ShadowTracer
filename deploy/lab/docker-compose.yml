@@ -774,6 +774,23 @@ services:
     restart: unless-stopped
     mem_limit: 320m
     memswap_limit: 320m
+    # Phase 7.x OOM fix: the default config put shared_buffers at ~50% of the 320m limit, leaving
+    # almost nothing for connections -> PG was SIGKILLed under concurrent load (see memory:
+    # project_postgres_oom). Budget that fits 320m with margin (per-connection ~2.5 MiB idle):
+    #   shared_buffers 80m (25%) + 64 conns x 2.5m (160m) + maintenance 32m + wal/bg/misc ~20m
+    #   = ~292m, leaving ~28m for work_mem (4m) burst sorts. Connection DEMAND is bounded to <=64 by
+    #   the per-service pool caps (pool_size 3 + max_overflow 2 = 5 x 12 engines) + mlflow's capped
+    #   pool (3) = 63. Each service also sets statement_timeout so a runaway query can't pin memory.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=80MB
+      - -c
+      - max_connections=64
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - work_mem=4MB
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in deploy/lab/.env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/lab/.env}
@@ -1027,6 +1044,10 @@ services:
       # MLflow 3 also starts a job runner (huey consumer) for its GenAI features: not needed
       # here, and with it the server was OOM-killed at 512m (2026-11-06).
       MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+      # Phase 7.x: cap MLflow's own Postgres pool so it fits the lowered max_connections budget
+      # (default is 5 + 10 overflow = up to 15; here 2 persistent + 1 overflow = 3).
+      MLFLOW_SQLALCHEMYSTORE_POOL_SIZE: "2"
+      MLFLOW_SQLALCHEMYSTORE_MAX_OVERFLOW: "1"
     volumes:
       - mlflow-artifacts:/mlartifacts
     depends_on:
