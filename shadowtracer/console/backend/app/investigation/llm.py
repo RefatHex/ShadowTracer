@@ -24,7 +24,7 @@ class LLMPromptTruncated(RuntimeError):
 
 class LLMClient:
     def __init__(self, base_url: str, model: str, api_key: str | None,
-                 timeout_seconds: int, num_ctx: int, max_tokens: int):
+                 timeout_seconds: int, num_ctx: int, max_tokens: int, keep_alive: str = "30m"):
         self._base = base_url.rstrip("/")
         self._openai = self._base.endswith("/v1")   # /v1 -> OpenAI schema (external); else Ollama native
         self._model = model
@@ -32,6 +32,7 @@ class LLMClient:
         self._timeout = timeout_seconds
         self._num_ctx = num_ctx
         self._max_tokens = max_tokens
+        self._keep_alive = keep_alive               # keep the model resident between calls (native only)
 
     @property
     def model(self) -> str:
@@ -55,6 +56,15 @@ class LLMClient:
         except httpx.HTTPError:
             return False
 
+    def warmup(self) -> bool:
+        """Best-effort: load the model into VRAM with the SAME options real calls use (num_ctx,
+        keep_alive), so the first investigation doesn't pay the cold load_duration. False if down."""
+        try:
+            self.chat([{"role": "user", "content": "ok"}], max_tokens=1)
+            return True
+        except LLMUnavailable:
+            return False
+
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              max_tokens: int | None = None) -> dict:
         """-> {"content": str, "tool_calls": list|None, "usage": {prompt_tokens,...}}. Raises LLMUnavailable.
@@ -70,7 +80,10 @@ class LLMClient:
                 body["tool_choice"] = "auto"
         else:                                           # Ollama native - honours num_ctx per request
             url = f"{self._base}/api/chat"
+            # IDENTICAL options on every local call + keep_alive, so Ollama never reloads the model
+            # between the two passes of one investigation (a changed num_ctx/options forces a reload).
             body = {"model": self._model, "messages": messages, "stream": False,
+                    "keep_alive": self._keep_alive,
                     "options": {"temperature": 0.1, "num_ctx": self._num_ctx, "num_predict": mt}}
             if tools:
                 body["tools"] = tools

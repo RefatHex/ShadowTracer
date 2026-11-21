@@ -1,29 +1,29 @@
 # Investigation sample — incident 394326 (large-128k)
 
 - model: `gemma4:e4b` · prompt_version: `7.7-v1`
-- latency: 21800 ms · tokens: 3089 · num_ctx: 8192
+- latency: 10550 ms · tokens: 3269 · num_ctx: 8192
 - claims (sentences): 5 · verified: 5 · unverified: 0
 - tool calls requested: none
 
 ## Summary (LLM, cited)
 
-**SUMMARY:** Incident 394326 is a closed incident with a triage status of new, involving authentication failures [E1].
+**SUMMARY:** Incident 394326 is a high-priority alert [E1] related to numerous failed authentication attempts [E2].
 
-**TIMELINE:** The incident first appeared on 2026-11-06 09:04:29.603000+00:00 and was last seen on 2026-11-06 09:19:23.164000+00:00 [E1].
+**TIMELINE:** The incident first appeared on 2026-11-06 09:04:29.603000+00:00 [E1] and was last seen on 2026-11-06 09:19:23.164000+00:00 [E1].
 
 **TECHNIQUES:** The incident involves T1110.001 Password Guessing and T1021.004 SSH [E1, E6, E7].
 
-**NEXT_STEPS:** Review the relationship graph involving 5000 alerts across 2 nodes [E5].
+**NEXT_STEPS:** Review the 128532 alerts [E1] and the top rule 5710 "sshd: Attempt to login using a non-exist" [E2].
 
-**CONFIDENCE:** Medium, because the model assessment indicates an attack probability of P=0.73 [E3].
+**CONFIDENCE:** Medium, because the incident is based on failed login attempts [E2].
 
 ## Per-sentence verification
 
-- [OK ] cites=['E1'] — Incident 394326 is a closed incident with a triage status of new, involving authentication failures [E1].
-- [OK ] cites=['E1'] — The incident first appeared on 2026-11-06 09:04:29.603000+00:00 and was last seen on 2026-11-06 09:19:23.164000+00:00 [E1].
+- [OK ] cites=['E1', 'E2'] — Incident 394326 is a high-priority alert [E1] related to numerous failed authentication attempts [E2].
+- [OK ] cites=['E1', 'E1'] — The incident first appeared on 2026-11-06 09:04:29.603000+00:00 [E1] and was last seen on 2026-11-06 09:19:23.164000+00:00 [E1].
 - [OK ] cites=['E1', 'E6', 'E7'] — The incident involves T1110.001 Password Guessing and T1021.004 SSH [E1, E6, E7].
-- [OK ] cites=['E5'] — Review the relationship graph involving 5000 alerts across 2 nodes [E5].
-- [OK ] cites=['E3'] — Medium, because the model assessment indicates an attack probability of P=0.73 [E3].
+- [OK ] cites=['E1', 'E2'] — Review the 128532 alerts [E1] and the top rule 5710 "sshd: Attempt to login using a non-exist" [E2].
+- [OK ] cites=['E2'] — Medium, because the incident is based on failed login attempts [E2].
 
 ## Evidence pack (gathered in code; what the LLM was given)
 

@@ -65,6 +65,23 @@ def create_app() -> FastAPI:
     app.include_router(similar_router.router)
     app.include_router(model_assessment_router.router)
 
+    @app.on_event("startup")
+    def _warm_llm() -> None:
+        # Best-effort: load the investigation model into VRAM at startup (same options real calls use)
+        # so the first investigation doesn't pay the cold load_duration. Non-blocking; a down LLM is fine.
+        import threading
+        from .investigation.llm import LLMClient
+
+        def _go():
+            try:
+                LLMClient(base_url=settings.llm_base_url, model=settings.llm_model,
+                          api_key=settings.llm_api_key, timeout_seconds=settings.llm_timeout_seconds,
+                          num_ctx=settings.llm_num_ctx, max_tokens=settings.llm_max_tokens,
+                          keep_alive=settings.llm_keep_alive).warmup()
+            except Exception:                        # noqa: BLE001 - warm-up is advisory, never fatal
+                pass
+        threading.Thread(target=_go, daemon=True).start()
+
     return app
 
 

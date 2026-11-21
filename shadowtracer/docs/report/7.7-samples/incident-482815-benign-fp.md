@@ -1,29 +1,23 @@
 # Investigation sample — incident 482815 (benign-fp)
 
 - model: `gemma4:e4b` · prompt_version: `7.7-v1`
-- latency: 22656 ms · tokens: 3602 · num_ctx: 8192
-- claims (sentences): 5 · verified: 5 · unverified: 0
+- latency: 11337 ms · tokens: 3664 · num_ctx: 8192
+- claims (sentences): 3 · verified: 2 · unverified: 1
 - tool calls requested: none
 
 ## Summary (LLM, cited)
 
-**SUMMARY:** Incident 482815 involved 7 alerts on agent 001, which was triaged as a false_positive [E1].
+**SUMMARY:** Incident 482815 involved 7 alerts [E1], including integrity checksum changes, file additions, and file deletions [E2], correlating to techniques like T1070.004, T1485, and T1565.001 [E1].
 
-**TIMELINE:** The incident began on 2026-11-06 11:29:00.225000+00:00 and ended on 2026-11-06 11:30:40.740000+00:00 [E1].
+**TIMELINE:** The incident began on 2026-11-06 11:29:00.225000+00:00 [E1] and concluded on 2026-11-06 11:30:40.740000+00:00 [E1].
 
-**TECHNIQUES:** The incident correlated to T1070.004, T1485, and T1565.001, which relate to File Deletion, Data Destruction, and Stored Data Manipulation, respectively [E1, E6, E7, E8].
-
-**NEXT_STEPS:** Review the specific alerts, including rule 550 "Integrity checksum changed." x4, rule 503 "ShadowTracer agent started." x1, rule 554 "File added to the system." x1, and rule 553 "File deleted." x1 [E2].
-
-**CONFIDENCE:** Medium, because the historical classifier suggests an attack (P=0.73) while the incident was triaged as a false_positive [E3, E1].
+**TECHNIQUES:** The incident involves T1070.004 (File Deletion) which is a defense-evasion tactic [E
 
 ## Per-sentence verification
 
-- [OK ] cites=['E1'] — Incident 482815 involved 7 alerts on agent 001, which was triaged as a false_positive [E1].
-- [OK ] cites=['E1'] — The incident began on 2026-11-06 11:29:00.225000+00:00 and ended on 2026-11-06 11:30:40.740000+00:00 [E1].
-- [OK ] cites=['E1', 'E6', 'E7', 'E8'] — The incident correlated to T1070.004, T1485, and T1565.001, which relate to File Deletion, Data Destruction, and Stored Data Manipulation, respectively [E1, E6, E7, E8].
-- [OK ] cites=['E2'] — Review the specific alerts, including rule 550 "Integrity checksum changed." x4, rule 503 "ShadowTracer agent started." x1, rule 554 "File added to the system." x1, and rule 553 "File deleted." x1 [E2].
-- [OK ] cites=['E3', 'E1'] — Medium, because the historical classifier suggests an attack (P=0.73) while the incident was triaged as a false_positive [E3, E1].
+- [OK ] cites=['E1', 'E2', 'E1'] — Incident 482815 involved 7 alerts [E1], including integrity checksum changes, file additions, and file deletions [E2], correlating to techniques like T1070.004, T1485, and T1565.001 [E1].
+- [OK ] cites=['E1', 'E1'] — The incident began on 2026-11-06 11:29:00.225000+00:00 [E1] and concluded on 2026-11-06 11:30:40.740000+00:00 [E1].
+- [UNVERIFIED] cites=[] — The incident involves T1070.004 (File Deletion) which is a defense-evasion tactic [E  (missing from cited evidence: ['004', 'T1070.004'])
 
 ## Evidence pack (gathered in code; what the LLM was given)
 

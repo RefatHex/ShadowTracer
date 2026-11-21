@@ -70,6 +70,20 @@ def test_investigate_happy_path_stores_and_verifies(client, db, tenant, monkeypa
     assert isinstance(body["unverified_count"], int)
 
 
+def test_investigate_empty_summary_has_its_own_status(client, db, tenant, monkeypatch):
+    # The small model sometimes returns no usable text -> status 'empty_summary' (NOT 'ok'), and the
+    # evidence pack is still shown so the analyst isn't left with a blank panel.
+    _tid, tkey = tenant
+    inc = _make_incident(db, tkey, agent_id="002")
+    _patch_llm(monkeypatch, FakeLLM(content="   "))     # whitespace -> parses to empty sections
+    r = client.post(f"/api/incidents/{inc}/investigate", headers=_hdr(client, db, tenant))
+    assert r.status_code == 202
+    g = client.get(f"/api/incidents/{inc}/investigation", headers=_hdr(client, db, tenant)).json()
+    assert g["status"] == "empty_summary"
+    assert g["message"] and "no summary" in g["message"].lower()
+    assert g["evidence"] and any(e["id"] == "E1" for e in g["evidence"])   # evidence pack still shown
+
+
 def test_investigate_cross_tenant_is_404(client, db, tenant, monkeypatch):
     other = _other_tenant_incident(db)
     _patch_llm(monkeypatch, FakeLLM())

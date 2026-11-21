@@ -1,20 +1,23 @@
 # Investigation sample — incident 907 (ti-cve)
 
 - model: `gemma4:e4b` · prompt_version: `7.7-v1`
-- latency: 31088 ms · tokens: 3294 · num_ctx: 8192
-- claims (sentences): 2 · verified: 2 · unverified: 0
+- latency: 11499 ms · tokens: 3374 · num_ctx: 8192
+- claims (sentences): 3 · verified: 3 · unverified: 0
 - tool calls requested: none
 
 ## Summary (LLM, cited)
 
-**SUMMARY:** Incident 907 is an alert with a priority of 7 and a total of 209 alerts [E1, E2].
+**SUMMARY:** Incident 907 is an alert with a priority of 7 and an alert count of 209 [E1, E2].
 
-**TIMELINE:** The incident was first seen on 2026-10-10 07:22:13.330000+00:00 [E1] and last seen on 2026-1
+**TIMELINE:** The incident was first seen on 2026-10-10 07:22:13.330000+00:00 [E1] and last seen on 2026-10-10 07:22:31.659000+00:00 [E1].
+
+**TECHNIQUES:** The alerts are primarily based on rule
 
 ## Per-sentence verification
 
-- [OK ] cites=['E1', 'E2'] — Incident 907 is an alert with a priority of 7 and a total of 209 alerts [E1, E2].
-- [OK ] cites=['E1'] — The incident was first seen on 2026-10-10 07:22:13.330000+00:00 [E1] and last seen on 2026-1
+- [OK ] cites=['E1', 'E2'] — Incident 907 is an alert with a priority of 7 and an alert count of 209 [E1, E2].
+- [OK ] cites=['E1', 'E1'] — The incident was first seen on 2026-10-10 07:22:13.330000+00:00 [E1] and last seen on 2026-10-10 07:22:31.659000+00:00 [E1].
+- [OK ] cites=[] — The alerts are primarily based on rule
 
 ## Evidence pack (gathered in code; what the LLM was given)
 

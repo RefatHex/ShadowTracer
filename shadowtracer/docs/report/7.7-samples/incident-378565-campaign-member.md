@@ -1,7 +1,7 @@
 # Investigation sample — incident 378565 (campaign-member)
 
 - model: `gemma4:e4b` · prompt_version: `7.7-v1`
-- latency: 23506 ms · tokens: 2894 · num_ctx: 8192
+- latency: 11342 ms · tokens: 2894 · num_ctx: 8192
 - claims (sentences): 0 · verified: 0 · unverified: 0
 - tool calls requested: none
 

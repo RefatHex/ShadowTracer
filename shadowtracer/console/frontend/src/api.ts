@@ -681,7 +681,7 @@ export async function fetchModelAssessment(accessToken: string, incidentId: numb
 export interface InvestigationEvidence { id: string; title: string; body: string }
 export interface InvestigationSentence { text: string; cites: string[]; verified: boolean; unsupported: string[] }
 export interface Investigation {
-  status: 'running' | 'ok' | 'llm_unavailable' | 'evidence_too_large' | 'error'
+  status: 'running' | 'ok' | 'empty_summary' | 'llm_unavailable' | 'evidence_too_large' | 'error'
   id?: number
   sections?: Record<string, string>
   sentences?: InvestigationSentence[]

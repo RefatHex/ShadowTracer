@@ -38,7 +38,7 @@ router = APIRouter(prefix="/api", tags=["investigation"])
 def _client(settings: Settings) -> LLMClient:
     return LLMClient(base_url=settings.llm_base_url, model=settings.llm_model, api_key=settings.llm_api_key,
                      timeout_seconds=settings.llm_timeout_seconds, num_ctx=settings.llm_num_ctx,
-                     max_tokens=settings.llm_max_tokens)
+                     max_tokens=settings.llm_max_tokens, keep_alive=settings.llm_keep_alive)
 
 
 def _run_job(session_factory, settings: Settings, user: CurrentUser, incident_id: int, row_id: int) -> None:
@@ -54,7 +54,12 @@ def _run_job(session_factory, settings: Settings, user: CurrentUser, incident_id
         t0 = time.monotonic()
         try:
             result = run_llm(_client(settings), db, user, settings, incident_id, evidence, meta)
-            status, latency_ms, tokens = "ok", int((time.monotonic() - t0) * 1000), result["tokens"]
+            latency_ms, tokens = int((time.monotonic() - t0) * 1000), result["tokens"]
+            if any((result.get("sections") or {}).values()):
+                status = "ok"
+            else:                                    # model produced no usable text - evidence still shown
+                status = "empty_summary"
+                message = "The model returned no summary. The evidence pack is shown below."
         except LLMUnavailable:
             status = "llm_unavailable"
             message = ("The investigation model is unavailable. The evidence pack is shown; "
