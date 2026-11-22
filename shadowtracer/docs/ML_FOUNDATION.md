@@ -774,8 +774,9 @@ is already warm. After the fix `load_duration` is ~0 on every pass and the real 
 
 **Results (5 lab-test incidents, 2026-11-22; warm, `max_tokens`=2000; full packs saved under
 `docs/report/7.7-samples/`).** Each investigation makes **two LLM passes** (a tools pass, then the final
-write) ≈ 2 × ~6.5 s. Latency **p50 13.4 s / p95 14.8 s**, ~**3,000–4,100 tokens** each; every pass ended
-on `done_reason=stop` (no `length`). Verified = sentences whose facts (IPs/technique-ids/numbers) all
+write) ≈ 2 × ~6.5 s. Latency **p50 13.4 s / p95 14.8 s**, ~**3,000–4,100 tokens** each; `done_reason` is
+checked on **both** passes — if either ends on `length` the run is marked `truncated`. Across the 5
+samples every pass ended on `done_reason=stop` (no `length`). Verified = sentences whose facts (IPs/technique-ids/numbers) all
 appear in the cited evidence:
 
 | incident | kind | claims | verified | latency | tokens |
@@ -787,8 +788,11 @@ appear in the cited evidence:
 | 482815 | benign (normal-activity FP) | 5 | 5 | 13.4 s | 3,921 |
 
 All five now produce the full 5 sections (378565 no longer comes back empty with the 2000-token cap).
-The verify step backed **24 of 25 cited facts** (one sentence on 378565 flagged **unverified**, shown
-as such in the UI — verify working as intended). A run that still returns no text is given its own
+The verify step backed **24 of 25 cited facts**. The one flagged **unverified** (shown as such in the
+UI — verify working as intended) is on 378565: *"The incident suggests Brute Force (T1110) due to the
+repeated 'sshd failure' alerts [E2]."* — the cited evidence `E2` shows the `sshd` failure alerts but
+never the ATT&CK id `T1110`, so the model's technique label is correct but not literally supported by
+what it cited, and verify holds it to the citation. A run that still returns no text is given its own
 **`empty_summary`** status (not `ok`), and one whose output is cut off at `max_tokens` is given
 **`truncated`** — in both cases the evidence pack is still shown. (Two earlier verify false-positives —
 multi-id citations `[E1, E3]` and sentence-splitting inside IPs — were fixed earlier; they are

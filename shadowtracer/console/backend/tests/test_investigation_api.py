@@ -15,7 +15,8 @@ from app.investigation import verify as verifymod
 class FakeLLM:
     model = "fake-model"
 
-    def __init__(self, content=None, raise_unavailable=False, tool_calls=None, done_reason="stop"):
+    def __init__(self, content=None, raise_unavailable=False, tool_calls=None, done_reason="stop",
+                 first_done_reason=None):
         self._content = content or (
             "SUMMARY: Incident has 70 alerts correlated by source IP [E1].\n"
             "TIMELINE: Activity across one window [E1].\n"
@@ -25,6 +26,7 @@ class FakeLLM:
         self._raise = raise_unavailable
         self._tool_calls = tool_calls
         self._done_reason = done_reason
+        self._first_done_reason = first_done_reason   # done_reason for the tools (first) pass; falls back to done_reason
 
     def health(self):
         return not self._raise
@@ -33,8 +35,9 @@ class FakeLLM:
         if self._raise:
             raise LLMUnavailable("fake endpoint down")
         tc = self._tool_calls if tools else None      # only offer tool calls on the first (tools) pass
+        dr = self._first_done_reason if (tools and self._first_done_reason) else self._done_reason
         return {"content": self._content, "tool_calls": tc, "usage": {"total_tokens": 1234},
-                "done_reason": self._done_reason}
+                "done_reason": dr}
 
 
 def _hdr(client, db, tenant, role="analyst"):
@@ -98,6 +101,19 @@ def test_investigate_truncated_output_status(client, db, tenant, monkeypatch):
     assert g["status"] == "truncated"
     assert g["message"] and "cut off" in g["message"].lower()
     assert g["sections"]["SUMMARY"]                      # partial summary still shown
+
+
+def test_investigate_truncated_on_first_pass(client, db, tenant, monkeypatch):
+    # Truncation on pass 1 (the tools pass) must also mark the run 'truncated', even when the final
+    # pass stops cleanly -- otherwise a cut-off intermediate step passes as 'ok'.
+    _tid, tkey = tenant
+    inc = _make_incident(db, tkey, agent_id="002")
+    _patch_llm(monkeypatch, FakeLLM(done_reason="stop", first_done_reason="length"))
+    r = client.post(f"/api/incidents/{inc}/investigate", headers=_hdr(client, db, tenant))
+    assert r.status_code == 202
+    g = client.get(f"/api/incidents/{inc}/investigation", headers=_hdr(client, db, tenant)).json()
+    assert g["status"] == "truncated"
+    assert g["message"] and "cut off" in g["message"].lower()
 
 
 def test_investigate_cross_tenant_is_404(client, db, tenant, monkeypatch):

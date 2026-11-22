@@ -114,6 +114,7 @@ def run_llm(client: LLMClient, db, user, settings, incident_id: int,
 
     first = client.chat(messages, tools=_EXTRA_TOOL_SPECS)
     tokens += int(first.get("usage", {}).get("total_tokens", 0) or 0)
+    truncated = first.get("done_reason") == "length"
     for call in (first.get("tool_calls") or [])[:_MAX_EXTRA_TOOLS]:
         fn = call.get("function", {})
         name = fn.get("name", "")
@@ -136,6 +137,7 @@ def run_llm(client: LLMClient, db, user, settings, incident_id: int,
                 {"role": "user", "content": _render(evidence) + "\n\nWrite the investigation now."}]
     final = client.chat(messages)
     tokens += int(final.get("usage", {}).get("total_tokens", 0) or 0)
+    truncated = truncated or final.get("done_reason") == "length"
     _check_truncation(final.get("usage", {}), _est_tokens(messages), getattr(client, "num_ctx", 0))
 
     sections = _parse_sections(final["content"])
@@ -151,5 +153,5 @@ def run_llm(client: LLMClient, db, user, settings, incident_id: int,
         "model": client.model,
         "prompt_version": PROMPT_VERSION,
         "tokens": tokens,
-        "done_reason": final.get("done_reason"),     # "length" -> output was cut off at max_tokens
+        "done_reason": "length" if truncated else final.get("done_reason"),  # "length" if ANY pass was cut off at max_tokens
     }
