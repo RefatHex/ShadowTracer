@@ -269,7 +269,31 @@ one AR client) and runs as its own process.
 - **Tests**: `test_soar_approvals.py` (8), `test_soar_expiry_playbooks.py` (4). Console suite
   217 green; CI floor 205→217.
 
-**Still to come (per the agreed staging):** (d) disable_account / collect_evidence /
-quarantine_file · (e) notifiers (email/webhook/Slack/Discord/Telegram) · (f) metrics. Console
-pages + live lab VERIFY (incl. re-enrolling agent-ubuntu-1 with NET_ADMIN into the test
-tenant) follow after (f). Windows netsh/route-null stay plan-only.
+## 9. Build log — commit (d): disable_account / quarantine_file / collect_evidence
+
+Three new containment action types, each a ShadowTracer AR script keyed on an apply/reverse
+verb in `extra_args` (so the API drives both directions), wired through the same approval/undo
+pipeline.
+
+- **AR scripts** (`intel/active_response/`): `shadowtracer-disable-account`
+  (`usermod -L/-U` + expiry; POSIX-name validated; refuses root/service accounts),
+  `shadowtracer-quarantine` (move into a 0600 quarantine store with a sha256+path manifest /
+  restore; refuses a path outside a FIM-monitored root), `shadowtracer-collect-evidence`
+  (read-only snapshot of processes/connections/recent logins → a log the agent ships back,
+  attached to the incident; no reverse). All no-shell, args-as-list.
+- **Dispatch** (`actions.py`): `ACTION_SCRIPTS` maps each type → (script, apply verb, reverse
+  verb); `apply_action`/`reverse_action` dispatch by type; `REVERSIBLE =
+  {block_ip, disable_account, quarantine_file}` (collect_evidence is read-only).
+- **Approvals** (`approvals.py`): approve/undo dispatch by action type; RBAC already requires
+  **admin** for disable_account/quarantine_file, analyst+ for block_ip and the read-only
+  collect_evidence; undo on an irreversible action is refused (409). Only `block_ip` gets a
+  timed auto-expiry — account-disable/quarantine persist until undone.
+- **Tests**: +4 approval tests (admin-gated approve/undo for disable_account & quarantine,
+  read-only collect_evidence) +2 dispatch-map tests. Console suite 223 green; CI floor
+  217→223.
+
+The three scripts deploy onto agents (like `shadowtracer-fw-drop`) at live-VERIFY time.
+
+**Still to come (per the agreed staging):** (e) notifiers (email/webhook/Slack/Discord/
+Telegram) · (f) metrics. Console pages + live lab VERIFY (incl. re-enrolling agent-ubuntu-1
+with NET_ADMIN into the test tenant) follow after (f). Windows netsh/route-null stay plan-only.

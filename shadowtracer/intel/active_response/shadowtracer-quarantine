@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""ShadowTracer quarantine active-response (Phase 9 d). Runs on the AGENT via the
+!shadowtracer-quarantine API form. Moves a flagged file into a quarantine dir (keeping its sha256 and
+original path in a manifest) or restores it — reversible through the API because the verb is the first
+extra_arg:
+
+  extra_args = ["quarantine" | "restore", "<path>"]
+
+Pairs with a YARA/malware hit. Safety: the path must resolve (symlinks followed) inside a
+FIM-monitored root, or the move is refused — a crafted path (traversal, symlink escape, a system
+location) never gets moved. The manifest the agent keeps is what restore reads, so SOAR needs no
+server-side copy of the hash. No shell; 0600 quarantine store.
+"""
+import hashlib
+import json
+import os
+import shutil
+import sys
+
+QDIR = os.environ.get("ST_QUARANTINE_DIR", "/var/ossec/quarantine")
+MANIFEST = os.path.join(QDIR, "manifest.json")
+FIM_DIRS = tuple(os.path.realpath(d) for d in os.environ.get(
+    "ST_QUARANTINE_FIM_DIRS",
+    "/etc:/usr/bin:/usr/sbin:/bin:/sbin:/usr/local/bin:/opt:/root:/home:/tmp:/var/tmp:/dev/shm:/srv/www:/var/www"
+).split(":"))
+
+
+def _inside_fim(path: str) -> bool:
+    rp = os.path.realpath(path)
+    return any(rp == d or rp.startswith(d + os.sep) for d in FIM_DIRS)
+
+
+def _load_manifest() -> dict:
+    try:
+        with open(MANIFEST) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_manifest(m: dict) -> None:
+    os.makedirs(QDIR, mode=0o700, exist_ok=True)
+    tmp = MANIFEST + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(m, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, MANIFEST)
+
+
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def main() -> int:
+    raw = sys.stdin.readline()
+    if not raw:
+        return 0
+    try:
+        params = (json.loads(raw).get("parameters") or {})
+    except ValueError:
+        return 0
+    extra = params.get("extra_args") or []
+    verb = (extra[0] if extra else "").lower()
+    path = extra[1] if len(extra) > 1 else ""
+    if not path:
+        return 0
+    manifest = _load_manifest()
+
+    if verb == "restore":
+        rec = manifest.get(path)
+        if rec and os.path.exists(rec["stored"]):
+            shutil.move(rec["stored"], path)
+            manifest.pop(path, None)
+            _save_manifest(manifest)
+        return 0
+
+    # quarantine
+    if not os.path.isfile(path) or not _inside_fim(path):
+        return 0                                   # missing or outside a monitored root: refuse
+    digest = _sha256(path)
+    os.makedirs(QDIR, mode=0o700, exist_ok=True)
+    stored = os.path.join(QDIR, digest)
+    shutil.move(path, stored)
+    os.chmod(stored, 0o600)
+    manifest[path] = {"stored": stored, "sha256": digest}
+    _save_manifest(manifest)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

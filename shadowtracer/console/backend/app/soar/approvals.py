@@ -75,7 +75,7 @@ def approve(db, tenant_key: str, tenant_id: int | None, action: dict, approver: 
 
     now = _now()
     try:
-        actions.apply_block(base, action["agent_id"], action["target"])
+        actions.apply_action(action["action_type"], base, action["agent_id"], action["target"])
     except wazuh_api.WazuhApiError as e:
         db.execute(soar_actions.update().where(soar_actions.c.id == action["id"]).values(
             status="failed", error=str(e), approved_by=approver, reason=reason, updated_at=now))
@@ -83,7 +83,10 @@ def approve(db, tenant_key: str, tenant_id: int | None, action: dict, approver: 
                            f"{action['action_type']}:{action['target']}", "failed")
         raise ApprovalError(502, f"dispatch failed: {e}")
 
-    expires = now + datetime.timedelta(seconds=action["block_seconds"] or 3600)
+    # Only an IP block is auto-timed; account-disable / quarantine persist until undone, and
+    # collect_evidence is instantaneous. (So the worker's expiry sweep only ever reverses block_ip.)
+    expires = (now + datetime.timedelta(seconds=action["block_seconds"] or 3600)
+               if action["action_type"] == "block_ip" else None)
     db.execute(soar_actions.update().where(soar_actions.c.id == action["id"]).values(
         status="executed", approved_by=approver, reason=reason, executed_by=approver,
         executed_at=now, block_expires_at=expires, updated_at=now))
@@ -105,16 +108,18 @@ def deny(db, tenant_key: str, tenant_id: int | None, action: dict, approver: str
 
 
 def undo(db, tenant_key: str, tenant_id: int | None, action: dict, actor: str, role: str) -> dict:
-    """Reverse an executed block (one click). admin-approved action types also need admin to undo."""
+    """Reverse an executed action (one click). admin-approved action types also need admin to undo."""
     if action["status"] != "executed":
         raise ApprovalError(409, f"action is {action['status']}, nothing to undo")
+    if action["action_type"] not in actions.REVERSIBLE:
+        raise ApprovalError(409, f"{action['action_type']} is not reversible")
     if action["action_type"] in ADMIN_ACTIONS and role != "admin":
         raise ApprovalError(403, f"undoing {action['action_type']} needs admin")
     base = wazuh_api.endpoints().get(tenant_key)
     if not base:
         raise ApprovalError(503, "no manager API endpoint configured for this tenant")
     now = _now()
-    actions.reverse_block(base, action["agent_id"], action["target"])
+    actions.reverse_action(action["action_type"], base, action["agent_id"], action["target"])
     db.execute(soar_actions.update().where(soar_actions.c.id == action["id"]).values(
         status="undone", undone_at=now, updated_at=now))
     audit.append_entry(db, actor, tenant_id, "soar.undone",

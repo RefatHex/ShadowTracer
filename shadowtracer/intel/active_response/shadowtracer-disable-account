@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""ShadowTracer disable-account active-response (Phase 9 d). Runs on the AGENT (manager -> execd ->
+agent) via the !shadowtracer-disable-account API form. Locks or unlocks a LOCAL account, reversible
+through the API (undo re-enables) because the verb is taken from the first extra_arg:
+
+  extra_args = ["disable" | "enable", "<username>"]
+
+The username is validated (POSIX name charset only, no shell) and a small built-in allowlist of
+system/critical accounts (root and the service users) is refused outright — SOAR's own allowlist is
+the primary guard, this is defence in depth on the agent. Uses `usermod -L/-U` + expiry, no shell.
+"""
+import json
+import re
+import subprocess
+import sys
+
+USERMOD = "/usr/sbin/usermod"
+PASSWD = "/usr/bin/passwd"
+NEVER_TOUCH = {"root", "daemon", "bin", "sys", "sync", "wazuh", "ossec", "sshd", "systemd-network"}
+NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+
+def main() -> int:
+    raw = sys.stdin.readline()
+    if not raw:
+        return 0
+    try:
+        params = (json.loads(raw).get("parameters") or {})
+    except ValueError:
+        return 0
+    extra = params.get("extra_args") or []
+    verb = (extra[0] if extra else "").lower()
+    user = extra[1] if len(extra) > 1 else ""
+    if not NAME_RE.match(user) or user in NEVER_TOUCH:
+        return 0                                   # invalid or protected account: refuse
+    if verb == "enable":
+        subprocess.run([USERMOD, "-U", user], capture_output=True)
+        subprocess.run([USERMOD, "-e", "", user], capture_output=True)   # clear expiry
+    elif verb == "disable":
+        subprocess.run([USERMOD, "-L", user], capture_output=True)
+        subprocess.run([USERMOD, "-e", "1970-01-02", user], capture_output=True)  # also expire
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

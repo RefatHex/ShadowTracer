@@ -13,10 +13,10 @@ from test_incidents_api import _token_for, app_settings, client, tenant  # noqa:
 @pytest.fixture(autouse=True)
 def _mock_dispatch(monkeypatch):
     calls = []
-    monkeypatch.setattr(approvals.actions, "apply_block",
-                        lambda base, agent, ip: calls.append(("add", base, agent, ip)))
-    monkeypatch.setattr(approvals.actions, "reverse_block",
-                        lambda base, agent, ip: calls.append(("del", base, agent, ip)))
+    monkeypatch.setattr(approvals.actions, "apply_action",
+                        lambda at, base, agent, tgt: calls.append(("add", at, base, agent, tgt)))
+    monkeypatch.setattr(approvals.actions, "reverse_action",
+                        lambda at, base, agent, tgt: calls.append(("del", at, base, agent, tgt)))
     return calls
 
 
@@ -53,7 +53,7 @@ def test_approve_executes_block_and_audits(client, db, tenant, monkeypatch, _moc
                     headers=_hdr(client, db, tenant))
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "executed" and r.json()["block_expires_at"]
-    assert _mock_dispatch[0][0] == "add" and _mock_dispatch[0][3] == "8.8.8.8"
+    assert _mock_dispatch[0][0] == "add" and _mock_dispatch[0][1] == "block_ip" and _mock_dispatch[0][4] == "8.8.8.8"
     aud = db.execute(text("SELECT count(*) FROM audit_log WHERE action='soar.executed'")).scalar()
     assert aud == 1
 
@@ -129,3 +129,47 @@ def test_pending_queue_lists_requested(client, db, tenant, monkeypatch):
     _requested_action(db, tk)
     r = client.get("/api/soar/approvals", headers=_hdr(client, db, tenant))
     assert r.status_code == 200 and len(r.json()["pending"]) == 1
+
+
+# --- Phase 9 (d): disable_account / quarantine_file need admin; collect_evidence is read-only ---
+
+def test_disable_account_needs_admin(client, db, tenant, monkeypatch):
+    tid, tk = tenant
+    _endpoint(monkeypatch, tk)
+    aid = _requested_action(db, tk, action_type="disable_account", target="mallory")
+    r = client.post(f"/api/soar/approvals/{aid}/approve", json={"reason": "x"},
+                    headers=_hdr(client, db, tenant, role="analyst"))
+    assert r.status_code == 403 and "admin" in r.json()["detail"]
+
+
+def test_admin_approves_and_undoes_disable_account(client, db, tenant, monkeypatch, _mock_dispatch):
+    tid, tk = tenant
+    _endpoint(monkeypatch, tk)
+    aid = _requested_action(db, tk, action_type="disable_account", target="mallory")
+    h = _hdr(client, db, tenant, role="admin")
+    r = client.post(f"/api/soar/approvals/{aid}/approve", json={"reason": "compromised"}, headers=h)
+    assert r.status_code == 200 and r.json()["status"] == "executed"
+    assert _mock_dispatch[0][:2] == ("add", "disable_account") and _mock_dispatch[0][4] == "mallory"
+    r = client.post(f"/api/soar/actions/{aid}/undo", headers=h)
+    assert r.status_code == 200 and r.json()["status"] == "undone"
+    assert _mock_dispatch[-1][:2] == ("del", "disable_account")
+
+
+def test_admin_approves_quarantine_file(client, db, tenant, monkeypatch, _mock_dispatch):
+    tid, tk = tenant
+    _endpoint(monkeypatch, tk)
+    aid = _requested_action(db, tk, action_type="quarantine_file", target="/tmp/evil")
+    r = client.post(f"/api/soar/approvals/{aid}/approve", json={"reason": "yara hit"},
+                    headers=_hdr(client, db, tenant, role="admin"))
+    assert r.status_code == 200 and _mock_dispatch[0][1] == "quarantine_file"
+
+
+def test_collect_evidence_runs_for_analyst_and_undo_refused(client, db, tenant, monkeypatch, _mock_dispatch):
+    tid, tk = tenant
+    _endpoint(monkeypatch, tk)
+    aid = _requested_action(db, tk, action_type="collect_evidence", target="host-snapshot")
+    h = _hdr(client, db, tenant, role="analyst")                 # read-only: analyst may run it
+    r = client.post(f"/api/soar/approvals/{aid}/approve", json={"reason": "triage"}, headers=h)
+    assert r.status_code == 200 and r.json()["status"] == "executed"
+    r = client.post(f"/api/soar/actions/{aid}/undo", headers=h)
+    assert r.status_code == 409 and "not reversible" in r.json()["detail"]

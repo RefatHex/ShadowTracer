@@ -214,6 +214,8 @@ def expire_stale(db, now: datetime.datetime, *, reverse_fn=actions.reverse_block
         WHERE status = 'executed' AND block_expires_at IS NOT NULL AND block_expires_at < :now
     """), {"now": now}).mappings().all()
     for a in due:
+        if a["action_type"] not in actions.REVERSIBLE:   # only timed, reversible actions are swept
+            continue
         base = base_url_fn(a["tenant_key"])
         if not base:
             continue
