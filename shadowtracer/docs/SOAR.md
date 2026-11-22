@@ -1,0 +1,233 @@
+# SOAR — incident-level automated response (Phase 9)
+
+Status: **research + design (report before coding)**. Host isolation and Windows
+actions are plan-only until the VMs exist. This document records what our tree
+already gives us, proves the one hard dependency (a timed Wazuh active-response
+block driven from the manager API), and sets the design against the industry
+references before any SOAR code is written.
+
+---
+
+## 1. Wazuh active response (AR) in our 4.14.8 tree
+
+### Shipped scripts
+Built from `src/active-response/` (`src/Makefile`, `active_response_programs`),
+installed on every agent under `/var/ossec/active-response/bin/`. Confirmed
+present on `agent-ubuntu-1`:
+
+| script | action | timeout_allowed | notes |
+|---|---|---|---|
+| `firewall-drop` (built from `default-firewall-drop`) | iptables/nft `INPUT -s <ip> -j DROP` | yes | Linux. Our primary block. |
+| `firewalld-drop` | firewalld rich-rule drop | yes | Linux (firewalld hosts). |
+| `host-deny` | append `<ip>` to `/etc/hosts.deny` | yes | Linux, no NET_ADMIN needed. |
+| `route-null` | null-route the IP | yes | Linux. |
+| `ip-customblock` | user-supplied block command | yes | Linux. |
+| `disable-account` | lock a local account | yes | Linux. |
+| `netsh.exe`, `route-null.exe` | Windows firewall / null route | yes | **plan-only** until the Windows VM exists. |
+| `restart-wazuh`, `kaspersky`, `wazuh-slack` | (not used by SOAR) | — | — |
+
+### Stateful timeout + reverse action
+Commands declared `<timeout_allowed>yes</timeout_allowed>` support an
+`add` → (timeout) → `delete` lifecycle. The script is **stateful**: on `add` it
+first emits a `check_keys` request (its active key = the srcip) and waits for
+execd to answer `continue` (apply) or `abort` (key is in the ignore list / already
+acted). `delete` reverses the same key. This `delete` path is exactly what our
+**undo** and **timed expiry** will invoke.
+
+### `repeated_offenders`
+Configured on the `<active-response>` block (`src/os_execd/`); escalates the block
+duration for an IP that re-offends within a window. **Linux agents only** — Windows
+execd does not honour it. Where unsupported (Windows, later) SOAR owns its own
+escalation schedule (design §E).
+
+### Custom AR JSON input / `check_keys`
+AR scripts read a JSON message on stdin:
+`{"version":1,"origin":{…},"command":"add|delete|continue","parameters":{"extra_args":[…],"alert":{"data":{"srcip":"…"}},"program":"…"}}`.
+`check_keys` lets the script refuse keys execd marks ignored — a second, agent-side
+allowlist beneath our own (design §F).
+
+### Manager API active-response call (incl. `!script`)
+`PUT /active-response?agents_list=<id>` → `framework/wazuh/core/active_response.py`
+`create_message()`. The `command` is validated against `ar.conf` (only commands
+wired to an `<active-response>` rule block appear there) **unless it starts with
+`!`**, which runs the named script directly and bypasses that check. Our tree's
+`ar.conf` only lists `restart-wazuh0` and `shadowtracer-yara-scan0`, so SOAR calls
+the **`!firewall-drop`** custom form — the same form we'll use for every
+containment script.
+
+### Proof — timed firewall-drop on a lab Linux victim via the API
+Manager API `https://127.0.0.1:55000` (wazuh-wui). Target IP `203.0.113.50`
+(RFC5737 documentation range — never a real host).
+
+**(a) API dispatch path** — `PUT /active-response?agents_list=001` with
+`{"command":"!firewall-drop","arguments":[],"alert":{"data":{"srcip":"203.0.113.50"}}}`:
+```
+{"data": {"affected_items": ["001"], "total_affected_items": 1, ...}, "error": 0}
+```
+Agent `active-responses.log`:
+```
+firewall-drop: {…"command":"check_keys","parameters":{"keys":["203.0.113.50"]}}
+firewall-drop: {…"command":"continue"…"program":"active-response/bin/firewall-drop"}
+firewall-drop: Ended
+```
+So manager API → execd → agent → script ran with the correct srcip and honoured
+the `check_keys` handshake.
+
+**(b) Block + reverse on real netfilter** — driving the binary as root inside the
+NET_ADMIN-capable agent, feeding the exact manager JSON (`add`+`continue`, then
+`delete`+`continue`):
+```
+=== ADD + continue ===  → iptables: -A INPUT -s 203.0.113.50/32 -j DROP
+=== DELETE + continue === → iptables: (no rule)
+```
+Block applied, reverse removed it. **The full timed firewall-drop is proven**:
+API dispatch ✓, stateful check_keys ✓, iptables DROP ✓, reverse ✓.
+
+**Lab gap for a single-command end-to-end (VERIFY phase, not a Phase 9 blocker):**
+the only agent with `NET_ADMIN` + working iptables is `agent-ubuntu-1`, which
+carries a **stale key (060)** the manager never registered (pre-existing lab drift
+from a reset); the registered+active agents `001/002/003` lack `NET_ADMIN`. A
+one-line compose fix (grant `NET_ADMIN` to a registered agent and reprovision its
+key) gives a registered+capable victim for the live VERIFY run. Chosen not to do it
+now to avoid disrupting the owner's running lab during the research phase.
+
+**"Timed":** our SOAR layer owns expiry regardless (safety rail §F: every block
+timed, automatic expiry), scheduling the `delete` we proved above; Wazuh's own
+`<timeout>` is a belt-and-braces second timer where a rule-wired block is used.
+
+---
+
+## 2. Wazuh integrator — shippable integrations and reuse
+
+`integrations/` ships `slack.py`, `pagerduty.py`, `shuffle.py`, `virustotal.py`,
+`maltiverse.py` (the `wazuh-integratord` scripts). For SOAR notifications:
+
+- **Slack** — reuse `integrations/slack.py`'s webhook POST shape; we drive it from
+  the SOAR notifier (not integratord) so delivery, retry, throttling and redaction
+  are under our control and audited.
+- **Shuffle** — reuse as an **optional outbound webhook only** (design: no embedded
+  Shuffle/Tracecat/n8n code).
+- **PagerDuty** — available; not in the Phase 9 channel set (email/webhook/Slack/
+  Discord/Telegram), left as future.
+- **Discord, Telegram** — no shipped integrator; implemented in the SOAR notifier
+  (Discord channel webhook; Telegram Bot API `sendMessage` to a chat id).
+
+Integratord runs on the manager off alerts — wrong layer for incident-level,
+tenant-scoped, audited SOAR notifications. We reuse the **payload shapes**, not the
+integratord runtime.
+
+---
+
+## 3. Incident open/update events for a worker
+
+**No incident Kafka topic exists.** Kafka carries per-tenant *alert* topics only
+(`shadowtracer.t.<key>.alerts`, `ingest/shadowtracer_ingest/topics.py`); the
+correlator consumes those and writes **incident state to Postgres**
+(`correlate/shadowtracer_correlate/models.py` → `incidents`). Incidents carry
+`state` (`open`/`closed`), `triage_status`, `updated_at`, `created_at`, plus every
+signal SOAR needs: `rule_ids`, `rule_groups`, `mitre_ids`, `source_ips`,
+`source_ip_total`, `users`, `agent_id`, `fingerprint_key`, `ti_confidence`,
+`ml_score`/`ml_anomaly_score`, `priority`.
+
+**SOAR worker source of truth = Postgres, polled** on `updated_at > watermark`
+(cheap, indexed, no new infra, no hot-path coupling). This is its own worker
+process; nothing runs on the alert hot path (constraint: "Nothing on the hot path").
+
+---
+
+## 4. Reusable pieces (build on, don't rebuild)
+
+| need | reuse | where |
+|---|---|---|
+| audit log | hash-chained append-only `audit_log` + `append_entry()` / `verify_chain()` | `console/backend/app/audit.py` |
+| roles | `RequireRole` deps: `ADMIN_ONLY`, `ANALYST_OR_ABOVE`, `ALL_ROLES` | `console/backend/app/rbac.py` |
+| tenant registry | `tenants` table + per-tenant `tenant_key` scoping everywhere | `models.py`, `ingest/.../tenants.py` |
+| TI facts | incident `ti_confidence` (ti-matcher) + per-source IOC confidence | `intel/shadowtracer_intel/{store,feeds,matcher}.py` |
+| campaigns / fingerprints | `campaigns`, `campaign_incidents`, `fingerprints`, `fingerprint_verdicts` | `correlate/.../models.py` |
+| asset data from agents | `agent_role_tags` (`role_tag`, `os_family`) — asset grouping + OS capability | `models.py` |
+| secrets | envelope-sealed secrets (AES-256-GCM, KEK) — pattern for notifier secrets, **but Phase 9 keeps notifier secrets in `.env` only** | `console/backend/app/secrets_crypto.py` |
+| Wazuh API client | token cache + `_request` + `endpoints()` (tenant→manager URL) | `console/backend/app/wazuh_api.py` (extend with `run_command`) |
+
+`agent_role_tags.os_family` already tells SOAR which block script an agent supports
+(firewall-drop vs firewalld-drop vs host-deny); `role_tag` is the handle for the
+`full|approval|none` automation groups (design §B).
+
+---
+
+## 5. Design — approach and why native
+
+Mapped to the industry references, then why we build on Wazuh AR rather than adopt a
+SOAR platform.
+
+- **Microsoft Defender automation levels** (full / semi-automated with
+  approval variants / no-automation) → our **per-asset-group `full | approval | none`**
+  (§B), default `approval`. Defender's *attack disruption* keeps the containment
+  decision with the system or a person and excludes break-glass accounts → our
+  **allowlist + kill switch + confidence gate** (§F). Defender's "full automation
+  removes more malware" is a vendor claim; we don't take it on faith — autonomy is
+  **earned per playbook on measured shadow precision** (§D), not switched on by policy.
+- **Google SecOps action classes** (enrichment / notification / containment) → our
+  **enrichment (always auto) / escalation (notify) / containment (gated)** split (§A).
+- **Tines guardrails** (change control: peer review before live, requester ≠ approver,
+  audit every change, tier approval by risk to avoid fatigue) → our **four-eyes
+  approvals** (approver ≠ playbook owner, §G), **mode-per-step** `shadow|approval|auto`
+  so only consequential steps gate (§E), and **every request/approve/execute/undo/
+  expire in the hash-chained audit log** (§F).
+- **Shuffle / Tracecat / Cortex** (open SOAR engines) → not adopted; Shuffle is an
+  **optional outbound webhook only**. We don't embed a workflow engine.
+
+**Why native.** Containment here *is* Wazuh active response — the agents, the
+manager API, the stateful timeout/reverse, `repeated_offenders` and `check_keys`
+already exist and are proven above. A bolt-on SOAR platform would duplicate the
+agent fleet's capability map, re-auth to the same manager API, and add a second
+audit trail and secret store next to the ones we already run hash-chained and
+tenant-scoped. The incremental SOAR logic we actually need — confidence gate,
+earned autonomy, safety rails, approvals, playbooks — is **policy around a
+dispatch primitive we already have**, so it lives as one tenant-scoped worker +
+console pages on our existing Postgres/RBAC/audit spine.
+
+**Memory headroom.** The SOAR worker is a single poller (no model, no PyTorch); it
+reads Postgres and POSTs to the manager API / webhooks. Budget it like the other
+light workers (`ml-drift`, `closer`) at a ~128–176 MB mem_limit. Headroom to be
+reported with real figures once the worker runs.
+
+---
+
+## 6. Build log — commit (a): worker + block_ip + gate + rails + audit
+
+Backend, no console/live-VERIFY yet (those are a follow-up). Lives in the console-backend
+package (reuses the hash-chained `audit`, `wazuh_api`, `db`, `models` — one audit chain,
+one AR client) and runs as its own process.
+
+- **Schema** (`ingest/alembic/…b3d5f7a9c1e2`): `soar_actions` (idempotent on
+  tenant+incident+playbook+action+target), `soar_tenant_settings` (kill switch, circuit
+  breaker, block default/max seconds, rate + scope limits), `soar_global_settings` (global
+  kill switch), `soar_allowlist`, `soar_worker_state` (poll cursor). Applied to the lab.
+- **Worker** (`app/soar/worker.py`, run `python -m app.soar.worker`): polls open incidents
+  from Postgres with an **overlap window** behind the `(updated_at, id)` cursor, so an
+  incident committing with an `updated_at` earlier than the cursor is still seen; the
+  idempotency constraint makes the re-read a no-op (test:
+  `test_overlap_window_processes_late_incident_exactly_once`). Off the hot path.
+- **Confidence gate** (`gate.py`): ≥2 independent non-model signals (rule match / TI hit /
+  known repeat / KEV); model scores are recorded but never counted and never sole trigger.
+- **Safety rails** (`rails.py`): kill switch (global + per-tenant), allowlist
+  (RFC1918/loopback/link-local/multicast/reserved + agent-and-manager IPs + admin CIDRs),
+  anti-spoof (refuse an IP corroborated by a single alert — a forged log line — unless
+  TI-confirmed; real activity like a brute force has many), timed blocks
+  (default 1 h, capped at the admin max), per-tenant hourly rate limit and per-run scope
+  limit (both trip the circuit breaker), idempotency (DB constraint). Every
+  request/refuse/breaker-trip is in the hash-chained audit log.
+- **Containment dispatch** (`actions.py` + AR script
+  `intel/active_response/shadowtracer-fw-drop`): `apply_block`/`reverse_block` call the
+  ShadowTracer AR script with `add`/`delete`, giving SOAR API-driven block **and** reverse
+  (the basis for timed expiry + undo). In (a) the worker records actions only (status
+  `requested`/`refused`); execution lands with approvals in (c).
+- **Deploy**: opt-in `soar-worker` compose service under the `soar` profile (won't auto-start
+  in a running lab). Tests: `test_soar_worker.py` (9), `test_soar_actions.py` (2), module
+  self-checks in gate/rails/triggers. Console suite 197 green.
+
+**Still to come (per the agreed staging):** (b) shadow mode + earned autonomy · (c) playbooks
+model/migration + approvals (four-eyes, expiry) + undo · (d) disable_account /
+collect_evidence / quarantine_file · (e) notifiers (email/webhook/Slack/Discord/Telegram) ·
+(f) metrics. Console pages + live lab VERIFY (incl. re-enrolling agent-ubuntu-1 with NET_ADMIN
+into the test tenant) follow after (f). Windows netsh/route-null stay plan-only.

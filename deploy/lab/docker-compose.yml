@@ -1374,6 +1374,31 @@ services:
       lab:
         ipv4_address: 172.28.0.36
 
+  # Phase 9 SOAR worker. Shares the console-backend image (same app package) but runs the poll
+  # loop instead of the API. Opt-in via the "soar" profile so it never auto-starts a response
+  # engine in a lab the owner is using; start it for VERIFY with:
+  #   docker compose --profile soar up -d soar-worker
+  soar-worker:
+    profiles: ["soar"]
+    build:
+      context: ../..
+      dockerfile: deploy/lab/console-backend.Dockerfile
+    image: shadowtracer-lab/console-backend:local
+    hostname: soar-worker
+    restart: unless-stopped
+    mem_limit: 160m
+    memswap_limit: 160m
+    command: ["python3", "-m", "app.soar.worker"]
+    environment: *console-backend-env
+    volumes:
+      - ./kafka-certs/ca.crt:/etc/kafka-certs/ca.crt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      lab:
+        ipv4_address: 172.28.0.48
+
   caddy:
     build:
       context: ../..

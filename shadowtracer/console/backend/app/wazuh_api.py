@@ -83,3 +83,20 @@ def list_agents(base_url: str) -> list[dict]:
             "version": a.get("version"),
         })
     return out
+
+
+def run_command(base_url: str, agent_id: str, script: str, arguments: list[str], srcip: str) -> None:
+    """Dispatch a custom AR script (the !script form, which bypasses ar.conf command validation)
+    to one agent via PUT /active-response. srcip is the AR active key; arguments become extra_args
+    (e.g. ['add'] / ['delete'] for the ShadowTracer firewall script). Raises WazuhApiError if the
+    manager reports the command was not sent to the agent. Phase 9 SOAR containment dispatch."""
+    body = json.dumps({"command": f"!{script}", "arguments": arguments,
+                       "alert": {"data": {"srcip": srcip}}}).encode()
+    data = _request(
+        f"{base_url}/active-response?agents_list={agent_id}", method="PUT",
+        headers={"Authorization": f"Bearer {_token(base_url)}", "Content-Type": "application/json"},
+        data=body)
+    affected = data.get("data", {}).get("total_affected_items", 0)
+    if affected < 1:
+        failed = data.get("data", {}).get("failed_items")
+        raise WazuhApiError(f"AR '{script}' not dispatched to agent {agent_id}: {failed}")

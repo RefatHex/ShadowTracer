@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""ShadowTracer firewall active-response (Phase 9 SOAR). Runs on the AGENT, invoked by Wazuh
+active response (manager -> agent execd) over the API !shadowtracer-fw-drop form. Unlike the stock
+firewall-drop, the action (add | delete) is taken from the FIRST extra_arg, so the SAME script both
+applies and REVERSES a block through the manager API (the stock script keys on execd's add/delete
+phase, which the API custom form can't drive) — this is what lets SOAR own timed expiry and undo.
+
+Message on stdin: {"version":1,"parameters":{"extra_args":["add"|"delete"],"alert":{"data":{"srcip":"<ip>"}}}}.
+srcip is validated as a real IP (no shell, args passed as a list) and must NOT be private/loopback —
+that belongs to the SOAR allowlist rail, but the agent refuses it too (defence in depth). A single
+INPUT DROP rule per srcip: add is idempotent (checked first), delete removes it; both no-op cleanly.
+"""
+import ipaddress
+import json
+import subprocess
+import sys
+
+IPTABLES = "/sbin/iptables"
+
+
+def _rule_args(ip: str) -> list[str]:
+    return ["-s", ip, "-j", "DROP"]
+
+
+def main() -> int:
+    raw = sys.stdin.readline()
+    if not raw:
+        return 0
+    try:
+        msg = json.loads(raw)
+    except ValueError:
+        return 0
+    params = msg.get("parameters") or {}
+    extra = params.get("extra_args") or []
+    action = (extra[0] if extra else "add").lower()
+    alert = params.get("alert") or msg.get("alert") or {}
+    srcip = ((alert.get("data") or {}).get("srcip") or "").strip()
+
+    try:
+        addr = ipaddress.ip_address(srcip)
+    except ValueError:
+        return 0                      # no/invalid IP: nothing to do
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
+        return 0                      # agent-side allowlist guard: never block internal
+
+    present = subprocess.run([IPTABLES, "-C", "INPUT", *_rule_args(srcip)],
+                             capture_output=True).returncode == 0
+    if action == "delete":
+        if present:
+            subprocess.run([IPTABLES, "-D", "INPUT", *_rule_args(srcip)], capture_output=True)
+    else:                             # add (default)
+        if not present:
+            subprocess.run([IPTABLES, "-I", "INPUT", "1", *_rule_args(srcip)], capture_output=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
