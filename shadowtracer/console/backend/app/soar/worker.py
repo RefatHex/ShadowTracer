@@ -22,7 +22,7 @@ from .. import audit, wazuh_api
 from ..config import load_settings
 from ..db import make_session_factory
 from ..models import incident_alerts, incidents, tenants
-from . import gate, rails, triggers
+from . import earned_autonomy, gate, rails, triggers
 from .models import (soar_actions, soar_allowlist, soar_global_settings,
                      soar_tenant_settings, soar_worker_state)
 
@@ -108,13 +108,26 @@ def default_protected_ips(tenant_key: str) -> set[str]:
         return set()
 
 
+def _resolve(pb_mode: str, gate_passed: bool, decision) -> tuple[str, str, str | None, str]:
+    """Map playbook mode + confidence gate + rails into (status, effective_mode, approved_by, event).
+    shadow -> record the would-have action, execute nothing. auto -> only when the gate passes and the
+    rails didn't downgrade (earned autonomy, no human); otherwise it falls back to an approval request.
+    The confidence gate is what keeps a 1-signal or model-only incident out of auto."""
+    if pb_mode == "shadow":
+        return "shadow", "shadow", None, "soar.shadow"
+    if pb_mode == "auto" and gate_passed and not decision.force_approval:
+        return "approved", "auto", "auto", "soar.auto_approved"
+    return "requested", "approval", None, "soar.requested"
+
+
 def _record_action(db, *, tenant_key, incident_id, playbook_key, action_type, target, agent_id,
-                   mode, status, signals, refuse_reason, block_seconds) -> bool:
+                   mode, status, signals, refuse_reason, block_seconds, approved_by=None) -> bool:
     """Idempotent insert. Returns True if a new row was created (so the caller audits once)."""
     stmt = pg_insert(soar_actions).values(
         tenant_key=tenant_key, incident_id=incident_id, playbook_key=playbook_key,
         action_type=action_type, target=target, agent_id=agent_id, mode=mode, status=status,
         signals=signals, refuse_reason=refuse_reason, block_seconds=block_seconds,
+        approved_by=approved_by,
     ).on_conflict_do_nothing(constraint="soar_actions_idempotent").returning(soar_actions.c.id)
     return db.execute(stmt).first() is not None
 
@@ -130,9 +143,11 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
     allow_cidrs = _allow_cidrs(db, tenant_key)
     observations = _observation_count(db, inc["id"])
     ti_confirmed = (inc.get("ti_confidence") or 0) >= TI_MIN
-    _, signals = gate.evaluate(inc)
+    gate_passed, signals = gate.evaluate(inc)
 
     for playbook_key, action_type, targets in plays:
+        pb_mode = earned_autonomy.playbook_mode(db, tenant_key, playbook_key)   # default 'shadow'
+
         # Scope limit: one run may act on at most scope_limit targets; overflow trips the breaker.
         scope = st["scope_limit_per_run"]
         if len(targets) > scope:
@@ -152,8 +167,9 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
             if not decision.allowed:
                 if _record_action(db, tenant_key=tenant_key, incident_id=inc["id"],
                                   playbook_key=playbook_key, action_type=action_type, target=ip,
-                                  agent_id=inc.get("agent_id"), mode="approval", status="refused",
-                                  signals=signals, refuse_reason=decision.refuse_reason, block_seconds=None):
+                                  agent_id=inc.get("agent_id"), mode=pb_mode, status="refused",
+                                  signals=signals, refuse_reason=decision.refuse_reason,
+                                  block_seconds=None, approved_by=None):
                     _audit(db, tenant_key, "soar.refused",
                            f"{action_type}:{ip} ({decision.refuse_reason})", "refused")
                 continue
@@ -164,11 +180,13 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
 
             block_seconds = rails.clamp_block_seconds(
                 None, st["block_default_seconds"], st["block_max_seconds"])
+            status, mode_rec, approved_by, event = _resolve(pb_mode, gate_passed, decision)
             if _record_action(db, tenant_key=tenant_key, incident_id=inc["id"],
                               playbook_key=playbook_key, action_type=action_type, target=ip,
-                              agent_id=inc.get("agent_id"), mode="approval", status="requested",
-                              signals=signals, refuse_reason=None, block_seconds=block_seconds):
-                _audit(db, tenant_key, "soar.requested", f"{action_type}:{ip}", "requested")
+                              agent_id=inc.get("agent_id"), mode=mode_rec, status=status,
+                              signals=signals, refuse_reason=None, block_seconds=block_seconds,
+                              approved_by=approved_by):
+                _audit(db, tenant_key, event, f"{action_type}:{ip}", status)
 
 
 def poll_once(session_factory, *, protected_ips_fn=default_protected_ips, now=None) -> int:

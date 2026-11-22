@@ -53,18 +53,19 @@ def _actions(db, incident_id):
                       ).mappings().all()
 
 
-def test_brute_force_public_ip_requests_block_and_audits(db, sf):
+def test_brute_force_public_ip_shadow_records_would_have_acted(db, sf):
+    # Default mode is shadow: a qualifying incident records a would-have action, executes nothing.
     insert_tenant(db, TK)
     iid = _mk_incident(db, source_ips=["8.8.8.8"])
     worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
     acts = _actions(db, iid)
     assert len(acts) == 1
     a = acts[0]
-    assert a["status"] == "requested" and a["action_type"] == "block_ip" and a["target"] == "8.8.8.8"
-    assert a["mode"] == "approval" and a["block_seconds"] == 3600          # timed, tenant default
+    assert a["status"] == "shadow" and a["mode"] == "shadow"
+    assert a["action_type"] == "block_ip" and a["target"] == "8.8.8.8" and a["block_seconds"] == 3600
     assert any(s["type"] == "rule_match" for s in a["signals"])
     audit = db.execute(text("SELECT action, outcome FROM audit_log WHERE actor='soar-worker'")).mappings().all()
-    assert ("soar.requested", "requested") in {(r["action"], r["outcome"]) for r in audit}
+    assert ("soar.shadow", "shadow") in {(r["action"], r["outcome"]) for r in audit}
 
 
 def test_internal_ip_is_refused_by_allowlist(db, sf):
@@ -94,7 +95,7 @@ def test_anti_spoof_single_source_with_ti_allowed(db, sf):
     insert_tenant(db, TK)
     iid = _mk_incident(db, source_ips=["8.8.8.8"], sources=1, ti=90)        # TI overrides single source
     worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
-    assert _actions(db, iid)[0]["status"] == "requested"
+    assert _actions(db, iid)[0]["status"] == "shadow"                       # allowed -> would-have (default mode)
 
 
 def test_global_kill_switch_refuses(db, sf):
@@ -137,10 +138,39 @@ def test_scope_limit_trips_breaker_and_caps_targets(db, sf):
     assert tripped["circuit_breaker_tripped"] and tripped["circuit_breaker_reason"] == "scope_limit"
 
 
+def test_auto_mode_with_two_signals_auto_approves(db, sf):
+    # Promoted playbook in auto: an incident that clears the confidence gate (rule + TI = 2 signals)
+    # is approved with no human (approved_by='auto').
+    insert_tenant(db, TK)
+    db.execute(text("INSERT INTO soar_playbooks (tenant_key, playbook_key, mode) "
+                    "VALUES (:t, 'builtin-ti-malicious-ip', 'auto')"), {"t": TK})
+    db.commit()
+    iid = _mk_incident(db, source_ips=["8.8.8.8"], ti=90)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    a = _actions(db, iid)[0]
+    assert a["status"] == "approved" and a["mode"] == "auto" and a["approved_by"] == "auto"
+
+
+def test_auto_mode_with_single_signal_downgrades_to_approval(db, sf):
+    # Auto playbook but only one counted signal (rule match, no TI/repeat) -> gate fails -> the action
+    # is NOT auto-executed; it falls back to an approval request. (Gate keeps weak incidents out of auto.)
+    insert_tenant(db, TK)
+    db.execute(text("INSERT INTO soar_playbooks (tenant_key, playbook_key, mode) "
+                    "VALUES (:t, 'builtin-ssh-brute-force', 'auto')"), {"t": TK})
+    db.commit()
+    iid = _mk_incident(db, source_ips=["8.8.8.8"], sources=3)               # corroborated, but no TI/repeat
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    a = _actions(db, iid)[0]
+    assert a["status"] == "requested" and a["mode"] == "approval" and a["approved_by"] is None
+
+
 def test_rate_limit_trips_breaker(db, sf):
     insert_tenant(db, TK)
     db.execute(text("INSERT INTO soar_tenant_settings (tenant_key, rate_limit_per_hour) VALUES (:t, 1)"),
                {"t": TK})
+    # rate limit counts real (non-shadow) actions, so put the playbook in approval mode
+    db.execute(text("INSERT INTO soar_playbooks (tenant_key, playbook_key, mode) "
+                    "VALUES (:t, 'builtin-ti-malicious-ip', 'approval')"), {"t": TK})
     db.commit()
     _mk_incident(db, source_ips=["8.8.8.8"], ti=90)
     _mk_incident(db, source_ips=["9.9.9.9"], ti=90)

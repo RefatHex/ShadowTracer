@@ -2,7 +2,7 @@
 metadata so the console API and the worker share one table registry."""
 
 from sqlalchemy import (
-    BigInteger, Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer,
+    BigInteger, Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer,
     SmallInteger, String, Table, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -27,7 +27,25 @@ soar_tenant_settings = Table(
     Column("block_max_seconds", Integer, nullable=False, server_default="86400"),
     Column("rate_limit_per_hour", Integer, nullable=False, server_default="10"),
     Column("scope_limit_per_run", Integer, nullable=False, server_default="5"),
+    # Phase 9 (b): earned-autonomy promotion gate (shadow -> auto).
+    Column("promotion_min_precision", Float, nullable=False, server_default="0.95"),
+    Column("promotion_min_incidents", Integer, nullable=False, server_default="20"),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
+# Phase 9 (b): per-playbook mode + promotion audit. Every playbook starts in shadow. Phase 9 (c)
+# extends this table with the versioned YAML / steps / trigger columns.
+soar_playbooks = Table(
+    "soar_playbooks", metadata,
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
+    Column("playbook_key", Text, primary_key=True),
+    Column("mode", Text, nullable=False, server_default="shadow"),
+    Column("promoted_at", DateTime(timezone=True), nullable=True),
+    Column("promoted_by", Text, nullable=True),
+    Column("promoted_from", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint("mode IN ('shadow','approval','auto')", name="soar_playbooks_mode_check"),
 )
 
 soar_allowlist = Table(

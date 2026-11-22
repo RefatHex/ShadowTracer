@@ -226,8 +226,30 @@ one AR client) and runs as its own process.
   in a running lab). Tests: `test_soar_worker.py` (9), `test_soar_actions.py` (2), module
   self-checks in gate/rails/triggers. Console suite 197 green.
 
-**Still to come (per the agreed staging):** (b) shadow mode + earned autonomy · (c) playbooks
-model/migration + approvals (four-eyes, expiry) + undo · (d) disable_account /
-collect_evidence / quarantine_file · (e) notifiers (email/webhook/Slack/Discord/Telegram) ·
-(f) metrics. Console pages + live lab VERIFY (incl. re-enrolling agent-ubuntu-1 with NET_ADMIN
-into the test tenant) follow after (f). Windows netsh/route-null stay plan-only.
+## 7. Build log — commit (b): shadow mode + earned autonomy
+
+- **Schema** (`…c4e6a8b0d2f4`): `soar_playbooks` (per-playbook `mode` shadow|approval|auto +
+  promotion audit — (c) extends it with the versioned YAML); `soar_tenant_settings` gains
+  `promotion_min_precision` (0.95) + `promotion_min_incidents` (20).
+- **Shadow is the default** (`earned_autonomy.playbook_mode`): a never-promoted playbook runs
+  in shadow, so the worker records a **would-have** action (`status='shadow'`) and executes
+  nothing. The rails still apply — a shadow action on an allowlisted/spoofed IP is still
+  `refused`, recording what we'd actually have done.
+- **The confidence gate now bites**: in `auto`, an action is auto-approved
+  (`status='approved'`, `approved_by='auto'`, no human) only when the gate passes (≥2
+  independent signals) and the rails didn't downgrade; a 1-signal or model-only incident
+  falls back to an approval request. (`worker._resolve`.)
+- **Shadow precision** (`earned_autonomy.compute_precision`): per playbook, over incidents
+  that later got an analyst verdict — `triage_status='escalated'` = TP, `'false_positive'` =
+  FP, counted per distinct incident. **Promotion gate** (`can_promote_to_auto` / `set_mode`):
+  an admin may switch shadow→auto only at precision ≥ threshold over ≥ N verdicted incidents;
+  below either, the switch is refused and audited (`soar.promotion_refused`); a successful
+  switch is audited (`soar.playbook_mode_changed`). Demotion/approval need no gate.
+- **Tests**: `test_soar_earned_autonomy.py` (6) + 2 worker auto-mode tests. Console suite 205
+  green; CI floor 197→205.
+
+**Still to come (per the agreed staging):** (c) playbooks model/migration + approvals
+(four-eyes, expiry) + undo · (d) disable_account / collect_evidence / quarantine_file ·
+(e) notifiers (email/webhook/Slack/Discord/Telegram) · (f) metrics. Console pages + live lab
+VERIFY (incl. re-enrolling agent-ubuntu-1 with NET_ADMIN into the test tenant) follow after
+(f). Windows netsh/route-null stay plan-only.
