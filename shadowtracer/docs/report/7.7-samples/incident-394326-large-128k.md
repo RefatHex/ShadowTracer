@@ -1,29 +1,29 @@
 # Investigation sample — incident 394326 (large-128k)
 
 - model: `gemma4:e4b` · prompt_version: `7.7-v1`
-- latency: 10550 ms · tokens: 3269 · num_ctx: 8192
+- latency: 13008 ms · tokens: 3650 · num_ctx: 8192 · max_tokens: 2000 · done_reason: stop
 - claims (sentences): 5 · verified: 5 · unverified: 0
 - tool calls requested: none
 
 ## Summary (LLM, cited)
 
-**SUMMARY:** Incident 394326 is a high-priority alert [E1] related to numerous failed authentication attempts [E2].
+**SUMMARY:** Incident 394326 is a closed incident with a triage status of new, involving 128532 alerts [E1].
 
-**TIMELINE:** The incident first appeared on 2026-11-06 09:04:29.603000+00:00 [E1] and was last seen on 2026-11-06 09:19:23.164000+00:00 [E1].
+**TIMELINE:** The incident first appeared on 2026-11-06 09:04:29.603000+00:00 and was last seen on 2026-11-06 09:19:23.164000+00:00 [E1].
 
-**TECHNIQUES:** The incident involves T1110.001 Password Guessing and T1021.004 SSH [E1, E6, E7].
+**TECHNIQUES:** The incident involves T1110.001 Password Guessing and T1021.004 SSH, which are associated with credential-access and lateral-movement tactics [E1, E6, E7].
 
-**NEXT_STEPS:** Review the 128532 alerts [E1] and the top rule 5710 "sshd: Attempt to login using a non-exist" [E2].
+**NEXT_STEPS:** Review the 128532 alerts and the top rule 5710 "sshd: Attempt to login using a non-exist" [E1, E2].
 
-**CONFIDENCE:** Medium, because the incident is based on failed login attempts [E2].
+**CONFIDENCE:** Medium, because the evidence is untrusted log data collected from a possibly-compromised environment [E1].
 
 ## Per-sentence verification
 
-- [OK ] cites=['E1', 'E2'] — Incident 394326 is a high-priority alert [E1] related to numerous failed authentication attempts [E2].
-- [OK ] cites=['E1', 'E1'] — The incident first appeared on 2026-11-06 09:04:29.603000+00:00 [E1] and was last seen on 2026-11-06 09:19:23.164000+00:00 [E1].
-- [OK ] cites=['E1', 'E6', 'E7'] — The incident involves T1110.001 Password Guessing and T1021.004 SSH [E1, E6, E7].
-- [OK ] cites=['E1', 'E2'] — Review the 128532 alerts [E1] and the top rule 5710 "sshd: Attempt to login using a non-exist" [E2].
-- [OK ] cites=['E2'] — Medium, because the incident is based on failed login attempts [E2].
+- [OK ] cites=['E1'] — Incident 394326 is a closed incident with a triage status of new, involving 128532 alerts [E1].
+- [OK ] cites=['E1'] — The incident first appeared on 2026-11-06 09:04:29.603000+00:00 and was last seen on 2026-11-06 09:19:23.164000+00:00 [E1].
+- [OK ] cites=['E1', 'E6', 'E7'] — The incident involves T1110.001 Password Guessing and T1021.004 SSH, which are associated with credential-access and lateral-movement tactics [E1, E6, E7].
+- [OK ] cites=['E1', 'E2'] — Review the 128532 alerts and the top rule 5710 "sshd: Attempt to login using a non-exist" [E1, E2].
+- [OK ] cites=['E1'] — Medium, because the evidence is untrusted log data collected from a possibly-compromised environment [E1].
 
 ## Evidence pack (gathered in code; what the LLM was given)
 

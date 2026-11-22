@@ -1,29 +1,29 @@
 # Investigation sample — incident 378567 (ssh-brute-force)
 
 - model: `gemma4:e4b` · prompt_version: `7.7-v1`
-- latency: 11429 ms · tokens: 3720 · num_ctx: 8192
+- latency: 14213 ms · tokens: 4074 · num_ctx: 8192 · max_tokens: 2000 · done_reason: stop
 - claims (sentences): 5 · verified: 5 · unverified: 0
 - tool calls requested: none
 
 ## Summary (LLM, cited)
 
-**SUMMARY:** Incident 378567 is a high-priority event [E1] characterized by 70 alerts [E1] originating from the external source IP 45.33.32.157 [E2].
+**SUMMARY:** Incident 378567 is a high-priority incident [E1] involving authentication failures [E1] from external source IP 45.33.32.157 [E2].
 
-**TIMELINE:** The activity began on 2026-11-05 21:55:34.577000+00:00 [E1] and concluded on 2026-11-05 22:01:34.605000+00:00 [E1].
+**TIMELINE:** The incident was first seen on 2026-11-05 21:55:34.577000+00:00 [E1] and last seen on 2026-11-05 22:01:34.605000+00:00 [E1].
 
-**TECHNIQUES:** The activity aligns with T1110.001 Password Guessing and T1110 Brute Force [E1, E6, E8], as evidenced by rule 5710 "sshd: Attempt to login using a non-exist" [E2].
+**TECHNIQUES:** The activity aligns with T1110.001 Password Guessing [E6] and T1110 Brute Force [E8] due to multiple alerts for "sshd: Attempt to login using a non-exist" [E2].
 
-**NEXT_STEPS:** Review the full log data associated with the source IP 45.33.32.157 [E2, E4] to determine the target system.
+**NEXT_STEPS:** Review the threat intelligence hits for ipv4 45.33.32.157 [E4] and investigate the relationship graph [E5].
 
-**CONFIDENCE:** High, because the incident is correlated with multiple specific rules and external threat intelligence hits [E2, E4].
+**CONFIDENCE:** Medium, because the evidence only shows failed login attempts [E2].
 
 ## Per-sentence verification
 
-- [OK ] cites=['E1', 'E1', 'E2'] — Incident 378567 is a high-priority event [E1] characterized by 70 alerts [E1] originating from the external source IP 45.33.32.157 [E2].
-- [OK ] cites=['E1', 'E1'] — The activity began on 2026-11-05 21:55:34.577000+00:00 [E1] and concluded on 2026-11-05 22:01:34.605000+00:00 [E1].
-- [OK ] cites=['E1', 'E6', 'E8', 'E2'] — The activity aligns with T1110.001 Password Guessing and T1110 Brute Force [E1, E6, E8], as evidenced by rule 5710 "sshd: Attempt to login using a non-exist" [E2].
-- [OK ] cites=['E2', 'E4'] — Review the full log data associated with the source IP 45.33.32.157 [E2, E4] to determine the target system.
-- [OK ] cites=['E2', 'E4'] — High, because the incident is correlated with multiple specific rules and external threat intelligence hits [E2, E4].
+- [OK ] cites=['E1', 'E1', 'E2'] — Incident 378567 is a high-priority incident [E1] involving authentication failures [E1] from external source IP 45.33.32.157 [E2].
+- [OK ] cites=['E1', 'E1'] — The incident was first seen on 2026-11-05 21:55:34.577000+00:00 [E1] and last seen on 2026-11-05 22:01:34.605000+00:00 [E1].
+- [OK ] cites=['E6', 'E8', 'E2'] — The activity aligns with T1110.001 Password Guessing [E6] and T1110 Brute Force [E8] due to multiple alerts for "sshd: Attempt to login using a non-exist" [E2].
+- [OK ] cites=['E4', 'E5'] — Review the threat intelligence hits for ipv4 45.33.32.157 [E4] and investigate the relationship graph [E5].
+- [OK ] cites=['E2'] — Medium, because the evidence only shows failed login attempts [E2].
 
 ## Evidence pack (gathered in code; what the LLM was given)
 

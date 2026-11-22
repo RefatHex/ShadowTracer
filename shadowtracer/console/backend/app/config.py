@@ -94,7 +94,7 @@ class Settings:
     llm_api_key: str | None = None
     llm_timeout_seconds: int = 120
     llm_num_ctx: int = 8192
-    llm_max_tokens: int = 900
+    llm_max_tokens: int = 2000       # headroom so 5-section summaries aren't cut off (done_reason guard too)
     llm_keep_alive: str = "30m"                   # keep the local model resident between calls (no reloads)
     investigation_daily_limit: int = 50          # investigations per tenant per UTC day
     investigation_token_daily_limit: int = 300000  # LLM tokens per tenant per UTC day
@@ -168,7 +168,7 @@ def load_settings() -> Settings:
         llm_api_key=(_env_or_file("LLM_API_KEY") or None),
         llm_timeout_seconds=int(os.environ.get("LLM_TIMEOUT_SECONDS", "120")),
         llm_num_ctx=int(os.environ.get("LLM_NUM_CTX", "8192")),
-        llm_max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "900")),
+        llm_max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "2000")),
         llm_keep_alive=os.environ.get("LLM_KEEP_ALIVE", "30m"),
         investigation_daily_limit=int(os.environ.get("INVESTIGATION_DAILY_LIMIT", "50")),
         investigation_token_daily_limit=int(os.environ.get("INVESTIGATION_TOKEN_DAILY_LIMIT", "300000")),

@@ -94,10 +94,13 @@ class LLMClient:
             raise LLMUnavailable(f"LLM endpoint error: {type(e).__name__}") from None
         data = r.json()
         if self._openai:
-            msg = (data.get("choices") or [{}])[0].get("message", {})
+            choice = (data.get("choices") or [{}])[0]
+            msg = choice.get("message", {})
+            # OpenAI uses finish_reason="length" for an output cut off at max_tokens -> normalise to "length"
             return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls"),
-                    "usage": data.get("usage") or {}}
+                    "usage": data.get("usage") or {}, "done_reason": choice.get("finish_reason")}
         msg = data.get("message", {})                    # native schema
         pe, ev = int(data.get("prompt_eval_count", 0) or 0), int(data.get("eval_count", 0) or 0)
         return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls"),
+                "done_reason": data.get("done_reason"),  # "stop" | "length" | ...
                 "usage": {"prompt_tokens": pe, "completion_tokens": ev, "total_tokens": pe + ev}}

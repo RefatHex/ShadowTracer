@@ -95,7 +95,7 @@ export function InvestigationPanel({ incidentId }: { incidentId: number }) {
         </p>
       )}
 
-      {inv && inv.status === 'ok' && inv.sections && (
+      {inv && (inv.status === 'ok' || inv.status === 'truncated') && inv.sections && (
         <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
           {SECTIONS.filter((k) => inv.sections?.[k]?.trim()).map((k) => (
             <div key={k} className="mb-2">
@@ -110,7 +110,7 @@ export function InvestigationPanel({ incidentId }: { incidentId: number }) {
         </div>
       )}
 
-      {unverified.length > 0 && inv?.status === 'ok' && (
+      {unverified.length > 0 && (inv?.status === 'ok' || inv?.status === 'truncated') && (
         <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Unverified — not backed by the cited evidence</p>
           {unverified.map((s, i) => (

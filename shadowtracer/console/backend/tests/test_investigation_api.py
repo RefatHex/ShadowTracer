@@ -15,7 +15,7 @@ from app.investigation import verify as verifymod
 class FakeLLM:
     model = "fake-model"
 
-    def __init__(self, content=None, raise_unavailable=False, tool_calls=None):
+    def __init__(self, content=None, raise_unavailable=False, tool_calls=None, done_reason="stop"):
         self._content = content or (
             "SUMMARY: Incident has 70 alerts correlated by source IP [E1].\n"
             "TIMELINE: Activity across one window [E1].\n"
@@ -24,6 +24,7 @@ class FakeLLM:
             "CONFIDENCE: Medium, limited evidence [E1].")
         self._raise = raise_unavailable
         self._tool_calls = tool_calls
+        self._done_reason = done_reason
 
     def health(self):
         return not self._raise
@@ -32,7 +33,8 @@ class FakeLLM:
         if self._raise:
             raise LLMUnavailable("fake endpoint down")
         tc = self._tool_calls if tools else None      # only offer tool calls on the first (tools) pass
-        return {"content": self._content, "tool_calls": tc, "usage": {"total_tokens": 1234}}
+        return {"content": self._content, "tool_calls": tc, "usage": {"total_tokens": 1234},
+                "done_reason": self._done_reason}
 
 
 def _hdr(client, db, tenant, role="analyst"):
@@ -82,6 +84,20 @@ def test_investigate_empty_summary_has_its_own_status(client, db, tenant, monkey
     assert g["status"] == "empty_summary"
     assert g["message"] and "no summary" in g["message"].lower()
     assert g["evidence"] and any(e["id"] == "E1" for e in g["evidence"])   # evidence pack still shown
+
+
+def test_investigate_truncated_output_status(client, db, tenant, monkeypatch):
+    # When the model stops on "length" (hit max_tokens), the run is marked 'truncated' (NOT 'ok'); the
+    # sections are still returned and shown, with a message that the summary was cut off.
+    _tid, tkey = tenant
+    inc = _make_incident(db, tkey, agent_id="002")
+    _patch_llm(monkeypatch, FakeLLM(done_reason="length"))
+    r = client.post(f"/api/incidents/{inc}/investigate", headers=_hdr(client, db, tenant))
+    assert r.status_code == 202
+    g = client.get(f"/api/incidents/{inc}/investigation", headers=_hdr(client, db, tenant)).json()
+    assert g["status"] == "truncated"
+    assert g["message"] and "cut off" in g["message"].lower()
+    assert g["sections"]["SUMMARY"]                      # partial summary still shown
 
 
 def test_investigate_cross_tenant_is_404(client, db, tenant, monkeypatch):

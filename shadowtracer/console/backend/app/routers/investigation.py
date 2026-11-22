@@ -55,11 +55,14 @@ def _run_job(session_factory, settings: Settings, user: CurrentUser, incident_id
         try:
             result = run_llm(_client(settings), db, user, settings, incident_id, evidence, meta)
             latency_ms, tokens = int((time.monotonic() - t0) * 1000), result["tokens"]
-            if any((result.get("sections") or {}).values()):
-                status = "ok"
-            else:                                    # model produced no usable text - evidence still shown
-                status = "empty_summary"
+            if not any((result.get("sections") or {}).values()):
+                status = "empty_summary"             # model produced no usable text - evidence still shown
                 message = "The model returned no summary. The evidence pack is shown below."
+            elif result.get("done_reason") == "length":
+                status = "truncated"                 # output hit max_tokens - summary is cut off
+                message = "The summary was cut off (output length limit); it may be incomplete."
+            else:
+                status = "ok"
         except LLMUnavailable:
             status = "llm_unavailable"
             message = ("The investigation model is unavailable. The evidence pack is shown; "

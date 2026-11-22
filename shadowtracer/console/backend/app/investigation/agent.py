@@ -151,4 +151,5 @@ def run_llm(client: LLMClient, db, user, settings, incident_id: int,
         "model": client.model,
         "prompt_version": PROMPT_VERSION,
         "tokens": tokens,
+        "done_reason": final.get("done_reason"),     # "length" -> output was cut off at max_tokens
     }
