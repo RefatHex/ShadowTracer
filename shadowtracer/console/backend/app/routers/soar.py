@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..audit import append_entry
 from ..rbac import ADMIN_ONLY, ANALYST_OR_ABOVE, CurrentUser
 from ..deps import get_db
-from ..soar import approvals, notify
+from ..soar import approvals, metrics as metrics_logic, notify
 from ..soar.models import soar_channels
 
 router = APIRouter(prefix="/api/soar", tags=["soar"])
@@ -39,6 +39,12 @@ def _load(db, user: CurrentUser, action_id: int) -> dict:
 @router.get("/approvals")
 def pending(db: Session = Depends(get_db), user: CurrentUser = Depends(ANALYST_OR_ABOVE)):
     return {"pending": approvals.list_pending(db, user.tenant_key)}
+
+
+@router.get("/metrics")
+def metrics(db: Session = Depends(get_db), user: CurrentUser = Depends(ANALYST_OR_ABOVE)):
+    """MTTD / MTTC, automation rate, undo rate, false-positive action rate (last 30 days)."""
+    return metrics_logic.compute(db, user.tenant_key)
 
 
 @router.get("/actions")

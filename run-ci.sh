@@ -29,7 +29,7 @@ declare -A DIR=(
 )
 # Recorded MINIMUM collected-test count per suite. Raise it when you add tests; lower it ONLY when you
 # deliberately remove some (say why in the commit). A drop below this is a hard failure.
-declare -A MIN=( [console]=235 [ingest]=66 [correlate]=75 [ml]=77 [intel]=109 )
+declare -A MIN=( [console]=238 [ingest]=66 [correlate]=75 [ml]=77 [intel]=109 )
 
 ALL=(console ingest correlate ml intel)
 

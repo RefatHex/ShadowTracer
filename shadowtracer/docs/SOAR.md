@@ -318,6 +318,25 @@ Notification-only escalation; messages link to the console, no inbound buttons/c
   unconfigured send nothing. Opt-in `SOAR_MANUAL_NOTIFY_TEST` hits real Discord/Telegram. Console
   suite 235 green; CI floor 223→235.
 
-**Still to come (per the agreed staging):** (f) metrics (MTTD/MTTR/MTTC, automation rate, undo
-rate). Console pages + live lab VERIFY (incl. re-enrolling agent-ubuntu-1 with NET_ADMIN into the
-test tenant) follow after (f). Windows netsh/route-null stay plan-only.
+## 11. Build log — commit (f): metrics
+
+- **`metrics.py`** (+ `GET /api/soar/metrics`, analyst+, tenant-scoped): computed from
+  `soar_actions` + `incidents` with no new storage. Per-incident timeline (first alert →
+  incident → requested → executed) gives **MTTD** (first alert → incident) and **MTTC** (first
+  alert → contained), plus the mean request and approve→execute latencies. Rates: **automation
+  rate** (auto executions / all executions), **undo rate**, and **false-positive action rate**
+  (actions on incidents an analyst later verdicted `false_positive`, over verdicted incidents).
+  Division-by-zero yields `null`, not an error.
+- **Tests**: `test_soar_metrics.py` (3) — timings + rates on seeded data, empty tenant, endpoint
+  auth. Console suite 238 green; CI floor 235→238.
+
+## Backend complete — what's left (follow-up)
+
+Commits (a)–(f) are the backend-complete milestone agreed with the owner. **Not yet done (next
+session):** the console pages (Playbooks with shadow precision, Approvals queue, Action history +
+undo, Asset automation levels, SOAR settings incl. allowlist/limits/kill switch/channels) and the
+full live-lab VERIFY matrix — which first needs the one-line lab fix: **re-enrol agent-ubuntu-1
+(NET_ADMIN) into the test tenant** so a registered, capable victim exists for an end-to-end
+firewall-drop through the manager API. **Windows netsh/route-null stay plan-only** until the VMs
+exist. No containment is driven by the LLM agent or a model score alone; nothing runs on the hot
+path; the SOAR worker is a single light poller (budget ~160 MB, like the other light workers).
