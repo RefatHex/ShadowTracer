@@ -804,3 +804,90 @@ API). If the evidence pack ever exceeds the context, the prompt-truncation guard
 (`evidence_too_large`) rather than summarise on a clamped prompt.
 
 Screenshot: `docs/report/7.7-investigation.png`.
+
+## 22. Phase 7.8 — attack recurrence forecasting (per fingerprint and per campaign)
+
+Restores "forecasting" from the original scope: for each attack fingerprint and each campaign with
+enough history, predict the **next likely window**. Advisory/experimental — a **hint**, never an alert;
+nothing is blocked or suppressed from a forecast.
+
+**Occurrences → events.** Occurrence times come from Postgres `incidents.first_seen` (per
+`fingerprint_key`, and per campaign via `campaign_incidents`). Raw incidents are **not** the recurrence
+unit: lab (and real) attacks fire *many* incidents at once (an ART batch, a brute-force spray), so the
+inter-arrival gaps are full of zeros and any window degenerates to a point. We **collapse bursts** —
+occurrences within 1 h are one **event** — and forecast the inter-**event** gaps. `< 4` distinct events
+→ **"not enough history"**.
+
+**Model (pure stdlib — no numpy/statsmodels/Prophet).** (a) **inter-event gap distribution**: the
+predicted window is the inter-quartile band of the gaps added to the last event (`[last+q25, last+q75]`,
+a ~50 % central band for the next run); (b) **hour-of-week profile**: the modal 0=Mon 00:00 … 167=Sun
+23:00 bin and its concentration, reported and used as a confidence signal. **Confidence** = high/medium/
+low from event count + gap coefficient-of-variation. Output per subject: predicted start/end,
+probability, confidence, event + raw-incident counts, median gap, model version (`7.8-gap-how-v2`).
+
+**Where it runs.** Stored tenant-scoped in `recurrence_forecasts` (one row per tenant × subject). The
+**ml-enricher** recomputes every tenant **hourly** (`FORECAST_INTERVAL_SECONDS`, off the hot path); the
+console also **recomputes on view** when a new occurrence has arrived since the stored row, so "new
+occurrence → forecast updates" is immediate without coupling the correlator to the ML package. Hot path
+untouched. Memory: the job is a few hundred stdlib-only timestamps per subject inside the existing
+1280 m enricher — negligible; no new dependency, no model loaded.
+
+**Console.** The Attack-library fingerprint detail and the Campaigns page show a **"Next likely"** line
+(window, confidence, `probability`, event count) with a small **timeline of past events, the forecast
+window shaded**, labelled **"Forecast (experimental, hint only)"**. API `analyst+`, tenant-scoped;
+cross-tenant subject → 404. Screenshot: `docs/report/7.8-forecast.png`.
+
+### Backtest (rolling-origin): hide each later event, predict it from the earlier ones
+
+Window **hit rate** and median **window width** vs two baselines — (1) *last-gap* (point ±10 %),
+(2) *uniform over the mean gap* (`[last, last+mean]`). A narrow window that hits beats a wide one.
+
+| level | eligible | method | hit rate | median window |
+|---|---|---|---|---|
+| **exact fingerprints** | 42 | **model (gap IQR)** | **44.3 %** | **1.5 h** |
+| | | last-gap (±10 %) | 20.0 % | 0.6 h |
+| | | uniform-over-mean | 80.2 % | 7.6 h |
+| **campaigns** | 13 | model | 34.6 % | 0.3 h |
+| | | last-gap | 39.5 % | 0.5 h |
+| | | uniform-over-mean | 75.3 % | 3.1 h |
+
+The model's IQR window is **well-calibrated** (nominal 50 % → 44 % out-of-sample on fingerprints) and
+clearly beats "same gap as last time" (44 % vs 20 %) at comparable width. The uniform baseline only
+"wins" on raw hit rate by being ~5× wider — useless as a "next likely" hint.
+
+**Split by data origin** (`agent_id` prefix): `load-*` = scripted load generator; numeric (`001`,`060`)
+= Wazuh-agent-driven (ART/replay).
+
+| origin | method | hit rate | median window |
+|---|---|---|---|
+| agent (23 fp) | model | 46.1 % | 0.6 h |
+| load_script (19 fp) | model | 40.6 % | 14.5 h |
+
+**All lab occurrence times are synthetic** — ART/Caldera batches via `st-record`, the normal-run
+generator, or replay timestamps; there is **no organic/live recurrence** here. A fixed-schedule generator
+would be *trivially* predictable (near-constant gaps); the lab's runs were ad-hoc, so after burst-
+collapse they are actually **irregular** (model hit ~44 %), which is why the numbers are modest rather
+than inflated. **These results do not demonstrate real-world forecasting ability** — they show the
+pipeline, calibration and baselines on synthetic timing.
+
+### Families (optional level): Qdrant-grouped fingerprints
+
+Using the 7.5 incident vectors (collection `incidents`, tenant-filtered, normalised → cosine), each
+fingerprint's centroid is greedily clustered; occurrence times are still pooled from Postgres (Qdrant
+only decides grouping). Threshold chosen on the backtest:
+
+| level | eligible | hit rate | median window |
+|---|---|---|---|
+| exact fingerprints | 42 | 44.3 % | 1.5 h |
+| families @ cos ≥ 0.95 | 20 | 45.1 % | 1.1 h |
+
+Grouping finds genuinely near-identical attacks — e.g. a family of **17 fingerprints** all cosine
+~0.999 (`be461ccc…`, `36d082c6…`, `d807aae9…`, …), and a family of 4 (`abdf5f6c…` seed, members at
+cos 0.95–0.99). But it **does not help forecasting here and reduces eligibility** (20 vs 42 groups):
+family members fire in the **same ART batches**, so pooling their times adds no new events. Per the
+task's rule — *if grouping makes forecasts worse, keep exact fingerprints as the default* — **exact
+fingerprints are the default**; families is analysed above but not shipped as a separate UI/API level.
+
+**Limits.** Synthetic timing only (see above). Burst window fixed at 1 h. The IQR window is a ~50 %
+band, not a guarantee; `probability` is the nominal band mass, and the backtest hit rate is the honest
+out-of-sample number. Low event counts (4–7) give low confidence. No forecast ever triggers an action.

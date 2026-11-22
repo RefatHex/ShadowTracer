@@ -3,6 +3,7 @@ import { useAuth } from './AuthContext'
 import * as api from './api'
 import type { Campaign } from './api'
 import { GraphView } from './GraphView'
+import { ForecastPanel } from './ForecastPanel'
 
 // Phase 7.6 follow-up: campaigns list + the campaign relationship graph (the graph endpoint and
 // GraphView existed; nothing navigated to a campaign). A campaign links incidents that share an
@@ -75,6 +76,7 @@ export function CampaignsPage() {
           <h2 className="mb-1 text-sm font-semibold text-gray-700 dark:text-gray-300">
             Campaign #{open.id} — {open.actor_type}:{open.actor_value} · {open.incident_count} incidents
           </h2>
+          <ForecastPanel kind="campaign" id={open.id} />
           <GraphView kind="campaign" id={open.id} />
         </div>
       )}

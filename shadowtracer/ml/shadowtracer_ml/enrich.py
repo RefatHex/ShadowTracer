@@ -335,7 +335,9 @@ def main(argv=None) -> int:
     poll = float(os.environ.get("ML_POLL_SECONDS", "15"))
     label_every = float(os.environ.get("LABEL_INTERVAL_SECONDS", "300"))
     consistency_every = float(os.environ.get("ML_SIM_CONSISTENCY_SECONDS", "3600"))
+    forecast_every = float(os.environ.get("FORECAST_INTERVAL_SECONDS", "3600"))   # Phase 7.8, hourly
     last_label = last_consistency = 0.0
+    last_forecast = 0.0
     while True:
         try:
             online_server.maybe_train(engine, ch, tl)   # Phase 7.3: learn new labelled incidents, checkpoint
@@ -358,6 +360,10 @@ def main(argv=None) -> int:
                 for t in tl:
                     log.info("labels %s", json.dumps(labels.run_all(engine, ch, t), default=str))
                 last_label = time.monotonic()
+            if time.monotonic() - last_forecast > forecast_every:   # Phase 7.8: recurrence forecasts (hourly)
+                from . import forecast
+                log.info("forecast %s", json.dumps(forecast.recompute_all(engine)))
+                last_forecast = time.monotonic()
             if r["incidents"] >= BATCH or a["incidents"] >= BATCH or s["indexed"] >= BATCH:
                 continue
         except Exception:  # noqa: BLE001 - keep the worker alive; the batch is retried

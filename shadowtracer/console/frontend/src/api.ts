@@ -709,6 +709,34 @@ export async function runInvestigation(accessToken: string, incidentId: number):
   return handle<Investigation>(resp)
 }
 
+// Phase 7.8: attack recurrence forecast (experimental, hint only, analyst+).
+export interface Forecast {
+  status: 'ok' | 'not_enough_history'
+  occurrences?: number
+  raw_occurrences?: number
+  predicted_start?: string
+  predicted_end?: string
+  probability?: number
+  confidence?: 'low' | 'medium' | 'high'
+  median_gap_seconds?: number
+  modal_hour_of_week?: number
+  hour_of_week_concentration?: number
+  last_occurrence?: string
+  model_version?: string
+  computed_at?: string
+  events?: string[]
+}
+
+export async function fetchFingerprintForecast(accessToken: string, fingerprintKey: string): Promise<Forecast> {
+  const resp = await fetch(`${API_BASE}/api/fingerprints/${encodeURIComponent(fingerprintKey)}/forecast`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<Forecast>(resp)
+}
+
+export async function fetchCampaignForecast(accessToken: string, campaignId: number): Promise<Forecast> {
+  const resp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/forecast`, { headers: authHeaders(accessToken), credentials: 'include' })
+  return handle<Forecast>(resp)
+}
+
 export async function fetchIncidentGraph(accessToken: string, incidentId: number): Promise<GraphData> {
   const resp = await fetch(`${API_BASE}/api/incidents/${incidentId}/graph`, { headers: authHeaders(accessToken), credentials: 'include' })
   return handle<GraphData>(resp)

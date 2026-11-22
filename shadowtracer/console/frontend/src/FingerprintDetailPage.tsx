@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from './AuthContext'
 import * as api from './api'
 import type { FingerprintDetail } from './api'
+import { ForecastPanel } from './ForecastPanel'
 
 export function FingerprintDetailPage({ fingerprintKey, onBack }: { fingerprintKey: string; onBack: () => void }) {
   const { session } = useAuth()
@@ -68,6 +69,8 @@ export function FingerprintDetailPage({ fingerprintKey, onBack }: { fingerprintK
         {fp.occurrence_count} occurrences · suppression: {fp.suppression_state}
         {fp.suppression_expires_at && ` (expires ${fp.suppression_expires_at})`}
       </p>
+
+      <ForecastPanel kind="fingerprint" id={fp.fingerprint_key} />
 
       <div className="mb-6 grid grid-cols-2 gap-4 text-sm">
         <div>
