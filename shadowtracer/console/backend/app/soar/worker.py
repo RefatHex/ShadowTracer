@@ -22,7 +22,7 @@ from .. import audit, wazuh_api
 from ..config import load_settings
 from ..db import make_session_factory
 from ..models import incident_alerts, incidents, tenants
-from . import earned_autonomy, gate, rails, triggers
+from . import actions, earned_autonomy, gate, playbooks, rails, triggers
 from .models import (soar_actions, soar_allowlist, soar_global_settings,
                      soar_tenant_settings, soar_worker_state)
 
@@ -178,8 +178,9 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
                 _trip_breaker(db, tenant_key, decision.breaker_trip_reason, now)
                 st["circuit_breaker_tripped"] = True
 
+            pb_block = playbooks.block_seconds_for(db, tenant_key, playbook_key, st["block_default_seconds"])
             block_seconds = rails.clamp_block_seconds(
-                None, st["block_default_seconds"], st["block_max_seconds"])
+                pb_block, st["block_default_seconds"], st["block_max_seconds"])
             status, mode_rec, approved_by, event = _resolve(pb_mode, gate_passed, decision)
             if _record_action(db, tenant_key=tenant_key, incident_id=inc["id"],
                               playbook_key=playbook_key, action_type=action_type, target=ip,
@@ -189,12 +190,51 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
                 _audit(db, tenant_key, event, f"{action_type}:{ip}", status)
 
 
+def expire_stale(db, now: datetime.datetime, *, reverse_fn=actions.reverse_block,
+                 base_url_fn=lambda t: wazuh_api.endpoints().get(t)) -> None:
+    """Two time-based transitions (Phase 9 c): an unanswered approval request past its tenant TTL
+    expires as no-action (and should escalate a notification — Phase 9 e); an executed block past its
+    expiry is reversed and marked expired. A reverse that can't reach the manager is left to retry."""
+    # unanswered approvals -> expired (no action)
+    stale = db.execute(text("""
+        SELECT a.id, a.tenant_key, a.action_type, a.target
+        FROM soar_actions a LEFT JOIN soar_tenant_settings s ON s.tenant_key = a.tenant_key
+        WHERE a.status = 'requested'
+          AND a.created_at < :now - make_interval(secs => COALESCE(s.approval_ttl_seconds, 3600))
+    """), {"now": now}).mappings().all()
+    for a in stale:
+        db.execute(soar_actions.update().where(soar_actions.c.id == a["id"])
+                   .values(status="expired", expired_at=now, updated_at=now))
+        _audit(db, a["tenant_key"], "soar.approval_expired",
+               f"{a['action_type']}:{a['target']}", "expired")
+
+    # executed blocks past expiry -> reverse + expired
+    due = db.execute(text("""
+        SELECT id, tenant_key, agent_id, action_type, target FROM soar_actions
+        WHERE status = 'executed' AND block_expires_at IS NOT NULL AND block_expires_at < :now
+    """), {"now": now}).mappings().all()
+    for a in due:
+        base = base_url_fn(a["tenant_key"])
+        if not base:
+            continue
+        try:
+            reverse_fn(base, a["agent_id"], a["target"])
+        except wazuh_api.WazuhApiError:
+            log.warning("soar: expiry reverse failed for action %s; will retry", a["id"])
+            continue
+        db.execute(soar_actions.update().where(soar_actions.c.id == a["id"])
+                   .values(status="expired", expired_at=now, updated_at=now))
+        _audit(db, a["tenant_key"], "soar.block_expired",
+               f"{a['action_type']}:{a['target']}", "expired")
+
+
 def poll_once(session_factory, *, protected_ips_fn=default_protected_ips, now=None) -> int:
     """One poll cycle. Returns the number of incidents examined. Exactly-once processing is the
     idempotency constraint's job, not the cursor's — the overlap re-read is deliberately at-least-once."""
     now = now or _utcnow()
     examined = 0
     with session_factory() as db:
+        expire_stale(db, now)
         cur = db.execute(select(soar_worker_state.c.cursor_updated_at, soar_worker_state.c.cursor_id)
                          .where(soar_worker_state.c.id == 1)).first()
         since = (cur[0] - OVERLAP) if cur else datetime.datetime.min

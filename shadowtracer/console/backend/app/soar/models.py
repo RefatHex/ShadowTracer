@@ -30,11 +30,12 @@ soar_tenant_settings = Table(
     # Phase 9 (b): earned-autonomy promotion gate (shadow -> auto).
     Column("promotion_min_precision", Float, nullable=False, server_default="0.95"),
     Column("promotion_min_incidents", Integer, nullable=False, server_default="20"),
+    # Phase 9 (c): unanswered approval request TTL (then expires as no-action).
+    Column("approval_ttl_seconds", Integer, nullable=False, server_default="3600"),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
-# Phase 9 (b): per-playbook mode + promotion audit. Every playbook starts in shadow. Phase 9 (c)
-# extends this table with the versioned YAML / steps / trigger columns.
+# Phase 9 (b)+(c): per-playbook mode + promotion audit, plus the admin-edited versioned definition.
 soar_playbooks = Table(
     "soar_playbooks", metadata,
     Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
@@ -43,9 +44,23 @@ soar_playbooks = Table(
     Column("promoted_at", DateTime(timezone=True), nullable=True),
     Column("promoted_by", Text, nullable=True),
     Column("promoted_from", Text, nullable=True),
+    Column("definition", JSONB, nullable=True),            # trigger / required signals / steps / duration
+    Column("version", Integer, nullable=False, server_default="1"),
+    Column("block_seconds", Integer, nullable=True),        # per-playbook block duration override
+    Column("updated_by", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     CheckConstraint("mode IN ('shadow','approval','auto')", name="soar_playbooks_mode_check"),
+)
+
+soar_playbook_versions = Table(
+    "soar_playbook_versions", metadata,
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
+    Column("playbook_key", Text, primary_key=True),
+    Column("version", Integer, primary_key=True),
+    Column("definition", JSONB, nullable=False),
+    Column("created_by", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
 soar_allowlist = Table(

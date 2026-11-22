@@ -248,8 +248,28 @@ one AR client) and runs as its own process.
 - **Tests**: `test_soar_earned_autonomy.py` (6) + 2 worker auto-mode tests. Console suite 205
   green; CI floor 197→205.
 
-**Still to come (per the agreed staging):** (c) playbooks model/migration + approvals
-(four-eyes, expiry) + undo · (d) disable_account / collect_evidence / quarantine_file ·
-(e) notifiers (email/webhook/Slack/Discord/Telegram) · (f) metrics. Console pages + live lab
-VERIFY (incl. re-enrolling agent-ubuntu-1 with NET_ADMIN into the test tenant) follow after
-(f). Windows netsh/route-null stay plan-only.
+## 8. Build log — commit (c): playbooks + approvals (four-eyes, expiry) + undo
+
+- **Schema** (`…d2f4a6c8e0b1`): `soar_playbooks` gains `definition` (JSONB), `version`,
+  `block_seconds` override, `updated_by`; `soar_playbook_versions` keeps every version
+  (append-only); `soar_tenant_settings` gains `approval_ttl_seconds` (3600).
+- **Playbooks** (`playbooks.py`): the 3 shipped definitions (SSH brute → block; TI IP →
+  block; malware/YARA → collect_evidence + quarantine (approval) + notify). `upsert_playbook`
+  bumps the version, appends to history, audits. The worker reads each playbook's block
+  duration (`block_seconds_for`).
+- **Approvals** (`approvals.py` + `routers/soar.py`, `/api/soar/*`, analyst+): `GET
+  /approvals` queue, `GET /actions` history, `POST /approvals/{id}/approve|deny`, `POST
+  /actions/{id}/undo`. Approve requires a reason, enforces **four-eyes** (approver ≠ playbook
+  owner) and RBAC (block_ip = analyst+; disable_account/quarantine = admin, for (d)), then
+  dispatches the block via Wazuh AR and sets a timed expiry; deny → refused; a cross-tenant
+  action id is invisible (404). Every approve/deny/execute/undo is audited.
+- **Undo + timed expiry** (`approvals.undo`, `worker.expire_stale`): undo reverses an
+  executed block (one call). The worker sweep expires an unanswered request as **no-action**
+  (escalation notification in (e)) and reverses an executed block past its expiry.
+- **Tests**: `test_soar_approvals.py` (8), `test_soar_expiry_playbooks.py` (4). Console suite
+  217 green; CI floor 205→217.
+
+**Still to come (per the agreed staging):** (d) disable_account / collect_evidence /
+quarantine_file · (e) notifiers (email/webhook/Slack/Discord/Telegram) · (f) metrics. Console
+pages + live lab VERIFY (incl. re-enrolling agent-ubuntu-1 with NET_ADMIN into the test
+tenant) follow after (f). Windows netsh/route-null stay plan-only.

@@ -23,6 +23,7 @@ from .routers import vulnerabilities as vulnerabilities_router
 from .routers import ti as ti_router
 from .routers import investigation as investigation_router
 from .routers import forecast as forecast_router
+from .routers import soar as soar_router
 from .security_headers import SecurityHeadersMiddleware, install_generic_error_handler
 
 
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(campaigns_router.router)
     app.include_router(investigation_router.router)
     app.include_router(forecast_router.router)
+    app.include_router(soar_router.router)
     app.include_router(similar_router.router)
     app.include_router(model_assessment_router.router)
 
