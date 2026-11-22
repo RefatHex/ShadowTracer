@@ -294,6 +294,30 @@ pipeline.
 
 The three scripts deploy onto agents (like `shadowtracer-fw-drop`) at live-VERIFY time.
 
-**Still to come (per the agreed staging):** (e) notifiers (email/webhook/Slack/Discord/
-Telegram) · (f) metrics. Console pages + live lab VERIFY (incl. re-enrolling agent-ubuntu-1
-with NET_ADMIN into the test tenant) follow after (f). Windows netsh/route-null stay plan-only.
+## 10. Build log — commit (e): notifiers (email / webhook / Slack / Discord / Telegram)
+
+Notification-only escalation; messages link to the console, no inbound buttons/callbacks.
+
+- **Schema** (`…e1a3c5b7d9f2`): `soar_channels` (per-tenant per-channel config — off by default,
+  detail level, severity threshold, throttle + batch window); `soar_notifications` (the delivery
+  queue: queued→sent|failed, attempts, backoff, 429 retry-after).
+- **Notifier** (`notify.py`): five senders (email via SMTP; webhook/slack/discord/telegram/shuffle
+  via httpx). **Secrets are env-only** (`SOAR_CHANNEL_SECRETS` JSON) — never in the DB/logs/API;
+  the API reports configured/not. **Redaction by construction**: the context is whitelisted to
+  `SAFE_KEYS` at enqueue, so raw logs, log usernames, secrets and IOC lists can never reach a
+  payload. **Detail level**: minimal (severity, title, status, console link) vs standard (+ host,
+  ATT&CK, action). **Delivery** (`deliver_pending`): queued, exponential backoff, honours HTTP 429
+  `Retry-After`, per-channel throttle, and **burst batching** (many due on a channel → one summary).
+  A send failure stays in the queue and never blocks the action (`notify_safe`).
+- **Events wired**: approval_needed (worker request), action_executed/undone (approvals),
+  circuit_breaker_tripped + approval_expired (worker). The worker runs `deliver_pending` each poll.
+- **API** (`routers/soar.py`, admin): `GET /channels` (config + configured flag, no secrets),
+  `PUT /channels/{channel}` (enable/detail/etc., audited), `POST /channels/{channel}/test`.
+- **Tests** (`test_soar_notify.py`, 11 + 1 opt-in): each channel to a local mock server, mock SMTP,
+  minimal vs standard, redaction, 429 retry-after, 50-event burst → one summary, disabled/
+  unconfigured send nothing. Opt-in `SOAR_MANUAL_NOTIFY_TEST` hits real Discord/Telegram. Console
+  suite 235 green; CI floor 223→235.
+
+**Still to come (per the agreed staging):** (f) metrics (MTTD/MTTR/MTTC, automation rate, undo
+rate). Console pages + live lab VERIFY (incl. re-enrolling agent-ubuntu-1 with NET_ADMIN into the
+test tenant) follow after (f). Windows netsh/route-null stay plan-only.

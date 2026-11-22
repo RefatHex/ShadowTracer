@@ -22,7 +22,7 @@ from .. import audit, wazuh_api
 from ..config import load_settings
 from ..db import make_session_factory
 from ..models import incident_alerts, incidents, tenants
-from . import actions, earned_autonomy, gate, playbooks, rails, triggers
+from . import actions, earned_autonomy, gate, notify, playbooks, rails, triggers
 from .models import (soar_actions, soar_allowlist, soar_global_settings,
                      soar_tenant_settings, soar_worker_state)
 
@@ -94,6 +94,8 @@ def _trip_breaker(db, tenant_key: str, reason: str, now: datetime.datetime) -> N
                .values(circuit_breaker_tripped=True, circuit_breaker_reason=reason,
                        circuit_breaker_tripped_at=now, updated_at=now))
     _audit(db, tenant_key, "soar.circuit_breaker_tripped", reason, "tripped")
+    notify.notify_safe(db, tenant_key, "circuit_breaker_tripped",
+                       {"incident_title": "circuit breaker", "action_status": reason, "severity": 0}, 0)
 
 
 def default_protected_ips(tenant_key: str) -> set[str]:
@@ -188,6 +190,10 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
                               signals=signals, refuse_reason=None, block_seconds=block_seconds,
                               approved_by=approved_by):
                 _audit(db, tenant_key, event, f"{action_type}:{ip}", status)
+                if status == "requested":                    # escalate: an approval is needed
+                    ctx = notify.incident_ctx(db, tenant_key, inc["id"])
+                    ctx.update({"action": action_type, "action_status": "requested"})
+                    notify.notify_safe(db, tenant_key, "approval_needed", ctx, ctx.get("severity") or 0)
 
 
 def expire_stale(db, now: datetime.datetime, *, reverse_fn=actions.reverse_block,
@@ -207,6 +213,9 @@ def expire_stale(db, now: datetime.datetime, *, reverse_fn=actions.reverse_block
                    .values(status="expired", expired_at=now, updated_at=now))
         _audit(db, a["tenant_key"], "soar.approval_expired",
                f"{a['action_type']}:{a['target']}", "expired")
+        notify.notify_safe(db, a["tenant_key"], "approval_expired",
+                           {"incident_title": f"{a['action_type']}:{a['target']}",
+                            "action_status": "expired (no action)", "severity": 0}, 0)
 
     # executed blocks past expiry -> reverse + expired
     due = db.execute(text("""
@@ -263,6 +272,10 @@ def poll_once(session_factory, *, protected_ips_fn=default_protected_ips, now=No
         db.execute(soar_worker_state.update().where(soar_worker_state.c.id == 1)
                    .values(cursor_updated_at=max_updated, cursor_id=max_id, updated_at=now))
         db.commit()
+        try:
+            notify.deliver_pending(db, now)
+        except Exception:                           # delivery never breaks the poll cycle
+            log.exception("soar notify delivery failed")
     return examined
 
 

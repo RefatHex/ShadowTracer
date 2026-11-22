@@ -63,6 +63,42 @@ soar_playbook_versions = Table(
     Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
+# Phase 9 (e): per-tenant notification channel config. Secrets are NOT here (env only).
+soar_channels = Table(
+    "soar_channels", metadata,
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
+    Column("channel", Text, primary_key=True),
+    Column("enabled", Boolean, nullable=False, server_default="false"),
+    Column("detail_level", Text, nullable=False, server_default="minimal"),
+    Column("min_severity", Integer, nullable=False, server_default="0"),
+    Column("throttle_seconds", Integer, nullable=False, server_default="0"),
+    Column("batch_window_seconds", Integer, nullable=False, server_default="60"),
+    Column("updated_by", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint("channel IN ('email','webhook','slack','discord','telegram','shuffle')",
+                    name="soar_channels_channel_check"),
+    CheckConstraint("detail_level IN ('minimal','standard')", name="soar_channels_detail_check"),
+)
+
+soar_notifications = Table(
+    "soar_notifications", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), nullable=False),
+    Column("channel", Text, nullable=False),
+    Column("event", Text, nullable=False),
+    Column("severity", Integer, nullable=False, server_default="0"),
+    Column("context", JSONB, nullable=False, server_default="{}"),
+    Column("status", Text, nullable=False, server_default="queued"),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("next_attempt_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("retry_after_until", DateTime(timezone=True), nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("sent_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint("status IN ('queued','sent','failed')", name="soar_notifications_status_check"),
+)
+
 soar_allowlist = Table(
     "soar_allowlist", metadata,
     Column("id", BigInteger, primary_key=True),

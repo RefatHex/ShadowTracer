@@ -15,7 +15,7 @@ import datetime
 from sqlalchemy import select, text
 
 from .. import audit, wazuh_api
-from . import actions
+from . import actions, notify
 from .models import soar_actions, soar_playbooks
 
 # action types that require admin to approve (the rest: analyst+). quarantine/disable land in (d).
@@ -92,6 +92,9 @@ def approve(db, tenant_key: str, tenant_id: int | None, action: dict, approver: 
         executed_at=now, block_expires_at=expires, updated_at=now))
     audit.append_entry(db, approver, tenant_id, "soar.executed",
                        f"{action['action_type']}:{action['target']}", "executed")
+    ctx = notify.incident_ctx(db, tenant_key, action["incident_id"])
+    ctx.update({"action": action["action_type"], "action_status": "executed"})
+    notify.notify_safe(db, tenant_key, "action_executed", ctx, ctx.get("severity") or 0)
     return get_action(db, tenant_key, action["id"])
 
 
@@ -124,4 +127,7 @@ def undo(db, tenant_key: str, tenant_id: int | None, action: dict, actor: str, r
         status="undone", undone_at=now, updated_at=now))
     audit.append_entry(db, actor, tenant_id, "soar.undone",
                        f"{action['action_type']}:{action['target']}", "undone")
+    ctx = notify.incident_ctx(db, tenant_key, action["incident_id"])
+    ctx.update({"action": action["action_type"], "action_status": "undone"})
+    notify.notify_safe(db, tenant_key, "action_undone", ctx, ctx.get("severity") or 0)
     return get_action(db, tenant_key, action["id"])

@@ -71,6 +71,10 @@ x-console-backend-env: &console-backend-env
   LLM_MODEL: ${LLM_MODEL:-gemma4:e4b}
   LLM_API_KEY: ${LLM_API_KEY:-}
   WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD:-wazuh-wui}
+  # Phase 9 SOAR notifications: channel secrets (webhook URLs / bot token+chat id / SMTP) as a JSON
+  # map {tenant_key: {channel: {...}}}; NEVER stored in the DB. Empty = no channel configured.
+  SOAR_CHANNEL_SECRETS: ${SOAR_CHANNEL_SECRETS:-}
+  SOAR_CONSOLE_BASE: ${SOAR_CONSOLE_BASE:-}
   # Phase 7.5: the Similar-past-incidents API queries Qdrant by the incident's stored vector.
   QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
