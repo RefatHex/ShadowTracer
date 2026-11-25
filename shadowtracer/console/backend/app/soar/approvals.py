@@ -75,7 +75,8 @@ def approve(db, tenant_key: str, tenant_id: int | None, action: dict, approver: 
 
     now = _now()
     try:
-        actions.apply_action(action["action_type"], base, action["agent_id"], action["target"])
+        actions.apply_action(action["action_type"], base, action["agent_id"], action["target"],
+                             ttl_seconds=action["block_seconds"] if action["action_type"] == "block_ip" else None)
     except wazuh_api.WazuhApiError as e:
         db.execute(soar_actions.update().where(soar_actions.c.id == action["id"]).values(
             status="failed", error=str(e), approved_by=approver, reason=reason, updated_at=now))

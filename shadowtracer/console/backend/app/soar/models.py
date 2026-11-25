@@ -5,7 +5,7 @@ from sqlalchemy import (
     BigInteger, Boolean, CheckConstraint, Column, DateTime, Float, ForeignKey, Integer,
     SmallInteger, String, Table, Text, UniqueConstraint, func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 from ..models import metadata
 
@@ -32,7 +32,23 @@ soar_tenant_settings = Table(
     Column("promotion_min_incidents", Integer, nullable=False, server_default="20"),
     # Phase 9 (c): unanswered approval request TTL (then expires as no-action).
     Column("approval_ttl_seconds", Integer, nullable=False, server_default="3600"),
+    # Phase 9 follow-up A2: repeat-offender escalation (SOAR-owned).
+    Column("repeat_window_seconds", Integer, nullable=False, server_default="86400"),
+    Column("escalation_schedule", ARRAY(Integer), nullable=False, server_default="{3600,21600,86400}"),
     Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+)
+
+# Phase 9 follow-up A1: admin-set automation level per agent or role_tag.
+soar_asset_levels = Table(
+    "soar_asset_levels", metadata,
+    Column("tenant_key", String(64), ForeignKey("tenants.tenant_key"), primary_key=True),
+    Column("scope_type", Text, primary_key=True),
+    Column("scope_value", Text, primary_key=True),
+    Column("level", Text, nullable=False),
+    Column("updated_by", Text, nullable=True),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    CheckConstraint("scope_type IN ('agent','role_tag')", name="soar_asset_levels_scope_check"),
+    CheckConstraint("level IN ('full','approval','none')", name="soar_asset_levels_level_check"),
 )
 
 # Phase 9 (b)+(c): per-playbook mode + promotion audit, plus the admin-edited versioned definition.

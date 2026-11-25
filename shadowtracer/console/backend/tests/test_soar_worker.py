@@ -13,6 +13,9 @@ from conftest import insert_tenant
 
 TK = "soar-test-tenant"
 NOW = datetime.datetime(2026, 11, 22, 12, 0, 0, tzinfo=datetime.timezone.utc)
+# Public IPs the tests use, all treated as reaching us through a trusted network decoder field (A4).
+_TRUST = {"8.8.8.8", "9.9.9.9", "1.1.1.1", "208.67.222.222"}
+TRUSTF = lambda tk, aids: _TRUST
 
 
 @pytest.fixture
@@ -57,7 +60,7 @@ def test_brute_force_public_ip_shadow_records_would_have_acted(db, sf):
     # Default mode is shadow: a qualifying incident records a would-have action, executes nothing.
     insert_tenant(db, TK)
     iid = _mk_incident(db, source_ips=["8.8.8.8"])
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
     acts = _actions(db, iid)
     assert len(acts) == 1
     a = acts[0]
@@ -71,7 +74,7 @@ def test_brute_force_public_ip_shadow_records_would_have_acted(db, sf):
 def test_internal_ip_is_refused_by_allowlist(db, sf):
     insert_tenant(db, TK)
     iid = _mk_incident(db, source_ips=["10.0.0.5"])
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
     acts = _actions(db, iid)
     assert len(acts) == 1 and acts[0]["status"] == "refused"
     assert acts[0]["refuse_reason"] == "allowlist:rfc1918_internal"
@@ -80,21 +83,21 @@ def test_internal_ip_is_refused_by_allowlist(db, sf):
 def test_agent_own_ip_is_refused(db, sf):
     insert_tenant(db, TK)
     iid = _mk_incident(db, source_ips=["8.8.8.8"])
-    worker.poll_once(sf, protected_ips_fn=lambda t: {"8.8.8.8"}, now=NOW)   # 8.8.8.8 is an agent IP here
+    worker.poll_once(sf, protected_ips_fn=lambda t: {"8.8.8.8"}, blockable_ips_fn=TRUSTF, now=NOW)   # 8.8.8.8 is an agent IP here
     assert _actions(db, iid)[0]["refuse_reason"] == "allowlist:manager_or_agent_ip"
 
 
 def test_anti_spoof_single_source_no_ti_refused(db, sf):
     insert_tenant(db, TK)
     iid = _mk_incident(db, source_ips=["8.8.8.8"], sources=1)               # one corroborating alert, no TI
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
     assert _actions(db, iid)[0]["refuse_reason"] == "anti_spoof:single_observation_no_ti"
 
 
 def test_anti_spoof_single_source_with_ti_allowed(db, sf):
     insert_tenant(db, TK)
     iid = _mk_incident(db, source_ips=["8.8.8.8"], sources=1, ti=90)        # TI overrides single source
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
     assert _actions(db, iid)[0]["status"] == "shadow"                       # allowed -> would-have (default mode)
 
 
@@ -103,7 +106,7 @@ def test_global_kill_switch_refuses(db, sf):
     db.execute(text("UPDATE soar_global_settings SET kill_switch=true WHERE id=1"))
     db.commit()
     iid = _mk_incident(db, source_ips=["8.8.8.8"])
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
     assert _actions(db, iid)[0]["refuse_reason"] == "kill_switch"
 
 
@@ -115,9 +118,9 @@ def test_overlap_window_processes_late_incident_exactly_once(db, sf):
                {"c": NOW})                                                  # cursor ahead of the incident
     db.commit()
     iid = _mk_incident(db, source_ips=["8.8.8.8"], updated_at=NOW - datetime.timedelta(seconds=30))
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)         # within the 120s overlap
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)         # within the 120s overlap
     assert len(_actions(db, iid)) == 1
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)         # re-read: idempotent no-op
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)         # re-read: idempotent no-op
     assert len(_actions(db, iid)) == 1
     # cursor never regressed below the late row
     cur = db.execute(text("SELECT cursor_updated_at FROM soar_worker_state WHERE id=1")).scalar()
@@ -131,7 +134,7 @@ def test_scope_limit_trips_breaker_and_caps_targets(db, sf):
     db.commit()
     ips = ["8.8.8.8", "9.9.9.9", "1.1.1.1", "208.67.222.222"]
     iid = _mk_incident(db, source_ips=ips, ti=90)                           # ti so anti-spoof passes
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
     assert len(_actions(db, iid)) == 2                                      # capped to scope_limit
     tripped = db.execute(text("SELECT circuit_breaker_tripped, circuit_breaker_reason "
                               "FROM soar_tenant_settings WHERE tenant_key=:t"), {"t": TK}).mappings().first()
@@ -144,9 +147,11 @@ def test_auto_mode_with_two_signals_auto_approves(db, sf):
     insert_tenant(db, TK)
     db.execute(text("INSERT INTO soar_playbooks (tenant_key, playbook_key, mode) "
                     "VALUES (:t, 'builtin-ti-malicious-ip', 'auto')"), {"t": TK})
+    db.execute(text("INSERT INTO soar_asset_levels (tenant_key, scope_type, scope_value, level) "
+                    "VALUES (:t, 'agent', '001', 'full')"), {"t": TK})   # auto needs a 'full' asset
     db.commit()
     iid = _mk_incident(db, source_ips=["8.8.8.8"], ti=90)
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
     a = _actions(db, iid)[0]
     assert a["status"] == "approved" and a["mode"] == "auto" and a["approved_by"] == "auto"
 
@@ -159,7 +164,7 @@ def test_auto_mode_with_single_signal_downgrades_to_approval(db, sf):
                     "VALUES (:t, 'builtin-ssh-brute-force', 'auto')"), {"t": TK})
     db.commit()
     iid = _mk_incident(db, source_ips=["8.8.8.8"], sources=3)               # corroborated, but no TI/repeat
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=NOW)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
     a = _actions(db, iid)[0]
     assert a["status"] == "requested" and a["mode"] == "approval" and a["approved_by"] is None
 
@@ -176,7 +181,79 @@ def test_rate_limit_trips_breaker(db, sf):
     _mk_incident(db, source_ips=["9.9.9.9"], ti=90)
     # rate limit counts rows created in the last real hour, so the poll's logical `now` must be real
     # time here (not the fixed future NOW used for cursor math elsewhere).
-    worker.poll_once(sf, protected_ips_fn=lambda t: set(), now=datetime.datetime.now(datetime.timezone.utc))
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=datetime.datetime.now(datetime.timezone.utc))
     tripped = db.execute(text("SELECT circuit_breaker_tripped, circuit_breaker_reason "
                               "FROM soar_tenant_settings WHERE tenant_key=:t"), {"t": TK}).mappings().first()
     assert tripped["circuit_breaker_tripped"] and tripped["circuit_breaker_reason"] == "rate_limit"
+
+
+# --- Phase 9 follow-up A1/A2/A4 ---
+
+def test_asset_level_none_refuses_containment(db, sf):
+    # A1: a 'none' asset is never contained; the action is refused (notify still runs elsewhere).
+    insert_tenant(db, TK)
+    db.execute(text("INSERT INTO soar_asset_levels (tenant_key, scope_type, scope_value, level) "
+                    "VALUES (:t, 'agent', '001', 'none')"), {"t": TK})
+    db.commit()
+    iid = _mk_incident(db, source_ips=["8.8.8.8"], ti=90)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
+    a = _actions(db, iid)[0]
+    assert a["status"] == "refused" and a["refuse_reason"] == "asset_level_none"
+
+
+def test_asset_level_approval_never_auto(db, sf):
+    # A1: an 'approval' asset never auto-executes even under an auto playbook.
+    insert_tenant(db, TK)
+    db.execute(text("INSERT INTO soar_playbooks (tenant_key, playbook_key, mode) "
+                    "VALUES (:t, 'builtin-ti-malicious-ip', 'auto')"), {"t": TK})
+    db.execute(text("INSERT INTO soar_asset_levels (tenant_key, scope_type, scope_value, level) "
+                    "VALUES (:t, 'agent', '001', 'approval')"), {"t": TK})
+    db.commit()
+    iid = _mk_incident(db, source_ips=["8.8.8.8"], ti=90)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
+    a = _actions(db, iid)[0]
+    assert a["status"] == "requested" and a["approved_by"] is None       # downgraded, not auto
+
+
+def test_role_tag_level_applies_when_no_agent_override(db, sf):
+    # A1: resolution falls back to the agent's role_tag level.
+    insert_tenant(db, TK)
+    db.execute(text("INSERT INTO agent_role_tags (tenant_key, agent_id, role_tag) VALUES (:t, '001', 'crown-jewels')"),
+               {"t": TK})
+    db.execute(text("INSERT INTO soar_asset_levels (tenant_key, scope_type, scope_value, level) "
+                    "VALUES (:t, 'role_tag', 'crown-jewels', 'none')"), {"t": TK})
+    db.commit()
+    iid = _mk_incident(db, source_ips=["8.8.8.8"], ti=90)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
+    assert _actions(db, iid)[0]["refuse_reason"] == "asset_level_none"
+
+
+def test_repeat_offender_escalates_duration(db, sf):
+    # A2: a second block on the same IP within the window gets the next (longer) schedule step.
+    insert_tenant(db, TK)
+    # a prior executed block on 8.8.8.8 (first offense already happened)
+    pi = _mk_incident(db, source_ips=["8.8.8.8"], ti=90)
+    db.execute(text("INSERT INTO soar_actions (tenant_key, incident_id, playbook_key, action_type, "
+                    "target, mode, status, created_at) VALUES (:t, :i, 'builtin-ti-malicious-ip', "
+                    "'block_ip', '8.8.8.8', 'approval', 'executed', :c)"),
+               {"t": TK, "i": pi, "c": NOW - datetime.timedelta(hours=1)})
+    # put the playbook in approval mode so the new action is a real (non-shadow) block_ip
+    db.execute(text("INSERT INTO soar_playbooks (tenant_key, playbook_key, mode) "
+                    "VALUES (:t, 'builtin-ti-malicious-ip', 'approval')"), {"t": TK})
+    db.commit()
+    iid = _mk_incident(db, source_ips=["8.8.8.8"], ti=90)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(), blockable_ips_fn=TRUSTF, now=NOW)
+    a = [x for x in _actions(db, iid) if x["status"] == "requested"][0]
+    assert a["block_seconds"] == 21600                                   # 2nd offense -> 6h (schedule[1])
+    assert any(s["type"] == "repeat_offender" for s in a["signals"])
+
+
+def test_provenance_untrusted_field_refused(db, sf):
+    # A4: an IP that did NOT arrive via a trusted network decoder field is never blockable, regardless
+    # of count/TI. Models a log-injection line where the IP only appears inside a username field.
+    insert_tenant(db, TK)
+    iid = _mk_incident(db, source_ips=["8.8.8.8"], ti=90, sources=5)
+    worker.poll_once(sf, protected_ips_fn=lambda t: set(),
+                     blockable_ips_fn=lambda tk, aids: set(), now=NOW)   # provenance: no trusted field
+    a = _actions(db, iid)[0]
+    assert a["status"] == "refused" and a["refuse_reason"] == "anti_spoof:untrusted_field"

@@ -64,6 +64,9 @@ x-console-backend-env: &console-backend-env
   # set WAZUH_API_PASSWORD in deploy/lab/.env to override the lab default.
   WAZUH_API_ENDPOINTS: '{"${TEST_TENANT_KEY}":"https://shadowtracer-worker-test:55000"}'
   WAZUH_API_USER: ${WAZUH_API_USER:-wazuh-wui}
+  # Phase 9 A5: least-privilege SOAR dispatch user (falls back to WAZUH_API_* if unset).
+  SOAR_WAZUH_API_USER: ${SOAR_WAZUH_API_USER:-}
+  SOAR_WAZUH_API_PASSWORD: ${SOAR_WAZUH_API_PASSWORD:-}
   # Phase 7.7: investigation agent LLM (OpenAI-compatible). Default = local Ollama on the host GPU;
   # host.docker.internal is the Windows host. LLM_API_KEY is optional and NEVER logged. External
   # providers are a per-tenant admin opt-in (off by default).

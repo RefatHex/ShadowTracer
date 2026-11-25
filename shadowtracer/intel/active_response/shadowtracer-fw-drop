@@ -1,25 +1,82 @@
 #!/usr/bin/env python3
-"""ShadowTracer firewall active-response (Phase 9 SOAR). Runs on the AGENT, invoked by Wazuh
-active response (manager -> agent execd) over the API !shadowtracer-fw-drop form. Unlike the stock
-firewall-drop, the action (add | delete) is taken from the FIRST extra_arg, so the SAME script both
-applies and REVERSES a block through the manager API (the stock script keys on execd's add/delete
-phase, which the API custom form can't drive) — this is what lets SOAR own timed expiry and undo.
+"""ShadowTracer firewall active-response (Phase 9 SOAR; agent-side expiry added in follow-up A3).
+Runs on the AGENT, invoked by Wazuh active response over the API !shadowtracer-fw-drop form. The
+action is the FIRST extra_arg, so the SAME script both applies and REVERSES a block through the API:
 
-Message on stdin: {"version":1,"parameters":{"extra_args":["add"|"delete"],"alert":{"data":{"srcip":"<ip>"}}}}.
-srcip is validated as a real IP (no shell, args passed as a list) and must NOT be private/loopback —
-that belongs to the SOAR allowlist rail, but the agent refuses it too (defence in depth). A single
-INPUT DROP rule per srcip: add is idempotent (checked first), delete removes it; both no-op cleanly.
+  extra_args = ["add", "<ip>", "<ttl_seconds>"]   apply a timed block
+             = ["delete", "<ip>"]                  reverse a block now
+             = ["sweep"]                           remove any blocks whose TTL has elapsed
+
+Agent-side expiry (A3): every timed block is recorded in a local manifest with its absolute expiry,
+and the script removes due blocks ITSELF — on every invocation AND when a periodic Wazuh command wodle
+calls it with "sweep". So a block still lifts on time even if the SOAR worker is dead; the worker's own
+sweep stays as a second, independent timer. srcip is validated and private/loopback IPs are refused
+(defence in depth beneath SOAR's allowlist). No shell.
 """
 import ipaddress
 import json
+import os
 import subprocess
 import sys
+import time
 
 IPTABLES = "/sbin/iptables"
+MANIFEST = os.environ.get("ST_FW_MANIFEST", "/var/ossec/active-response/shadowtracer-fw.json")
 
 
-def _rule_args(ip: str) -> list[str]:
+def _rule(ip):
     return ["-s", ip, "-j", "DROP"]
+
+
+def _present(ip):
+    return subprocess.run([IPTABLES, "-C", "INPUT", *_rule(ip)], capture_output=True).returncode == 0
+
+
+def _add(ip):
+    if not _present(ip):
+        subprocess.run([IPTABLES, "-I", "INPUT", "1", *_rule(ip)], capture_output=True)
+
+
+def _remove(ip):
+    while _present(ip):
+        subprocess.run([IPTABLES, "-D", "INPUT", *_rule(ip)], capture_output=True)
+
+
+def _load():
+    try:
+        with open(MANIFEST) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save(m):
+    tmp = MANIFEST + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(m, f)
+        os.replace(tmp, MANIFEST)
+    except OSError:
+        pass
+
+
+def _sweep(manifest, now):
+    """Remove every block whose expiry has passed; return the surviving manifest."""
+    keep = {}
+    for ip, expires in manifest.items():
+        if expires and now >= expires:
+            _remove(ip)
+        else:
+            keep[ip] = expires
+    return keep
+
+
+def _valid_public(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (a.is_private or a.is_loopback or a.is_link_local or a.is_multicast)
 
 
 def main() -> int:
@@ -27,30 +84,35 @@ def main() -> int:
     if not raw:
         return 0
     try:
-        msg = json.loads(raw)
+        params = (json.loads(raw).get("parameters") or {})
     except ValueError:
         return 0
-    params = msg.get("parameters") or {}
     extra = params.get("extra_args") or []
     action = (extra[0] if extra else "add").lower()
-    alert = params.get("alert") or msg.get("alert") or {}
-    srcip = ((alert.get("data") or {}).get("srcip") or "").strip()
+    ip = extra[1] if len(extra) > 1 else ""
+    now = int(time.time())
 
-    try:
-        addr = ipaddress.ip_address(srcip)
-    except ValueError:
-        return 0                      # no/invalid IP: nothing to do
-    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
-        return 0                      # agent-side allowlist guard: never block internal
+    manifest = _sweep(_load(), now)          # self-expire on every invocation (A3)
 
-    present = subprocess.run([IPTABLES, "-C", "INPUT", *_rule_args(srcip)],
-                             capture_output=True).returncode == 0
+    if action == "sweep":
+        _save(manifest)
+        return 0
+    if not _valid_public(ip):
+        _save(manifest)
+        return 0
     if action == "delete":
-        if present:
-            subprocess.run([IPTABLES, "-D", "INPUT", *_rule_args(srcip)], capture_output=True)
-    else:                             # add (default)
-        if not present:
-            subprocess.run([IPTABLES, "-I", "INPUT", "1", *_rule_args(srcip)], capture_output=True)
+        _remove(ip)
+        manifest.pop(ip, None)
+    else:                                     # add
+        ttl = 0
+        if len(extra) > 2:
+            try:
+                ttl = int(extra[2])
+            except ValueError:
+                ttl = 0
+        _add(ip)
+        manifest[ip] = (now + ttl) if ttl > 0 else 0   # 0 = no agent-side expiry (worker/undo only)
+    _save(manifest)
     return 0
 
 

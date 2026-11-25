@@ -75,7 +75,7 @@ def test_http_channel_delivers_to_mock(db, monkeypatch, mock, channel, secret):
     _secrets(monkeypatch, TK, {channel: sec})
     _enable(db, channel)
     notify.enqueue(db, TK, "action_executed", {"incident_title": "inc 7", "severity": 3}, 3)
-    assert notify.deliver_pending(db, NOW) == 1
+    assert notify.deliver_pending(db) == 1
     assert len(mock.received) == 1 and "inc 7" in mock.received[0]
 
 
@@ -94,7 +94,7 @@ def test_email_delivers_via_mock_smtp(db, monkeypatch):
     _secrets(monkeypatch, TK, {"email": {"to": "soc@x.io", "smtp_host": "localhost", "smtp_port": 25}})
     _enable(db, "email")
     notify.enqueue(db, TK, "action_executed", {"incident_title": "inc 9", "severity": 2}, 2)
-    assert notify.deliver_pending(db, NOW) == 1
+    assert notify.deliver_pending(db) == 1
     assert "inc 9" in sent["body"]
 
 
@@ -105,7 +105,7 @@ def test_minimal_vs_standard_detail(db, monkeypatch, mock):
     notify.enqueue(db, TK, "action_executed",
                    {"incident_title": "inc 1", "severity": 5, "host": "agent-ubuntu-1",
                     "technique": "T1110", "action": "block_ip"}, 5)
-    notify.deliver_pending(db, NOW)
+    notify.deliver_pending(db)
     body = mock.received[0]
     assert "agent-ubuntu-1" in body and "T1110" in body          # standard includes host + technique
 
@@ -119,7 +119,7 @@ def test_redaction_drops_unsafe_fields(db, monkeypatch, mock):
                    {"incident_title": "inc 1", "severity": 5,
                     "raw_log": "Nov 22 sshd: Failed password for root from 1.2.3.4",
                     "username": "root", "secret": "xoxb-TOKEN"}, 5)
-    notify.deliver_pending(db, NOW)
+    notify.deliver_pending(db)
     body = mock.received[0]
     assert "Failed password" not in body and "xoxb-TOKEN" not in body and "1.2.3.4" not in body
 
@@ -129,14 +129,14 @@ def test_429_is_retried_after_retry_after(db, monkeypatch, mock):
     _secrets(monkeypatch, TK, {"slack": {"webhook_url": mock.url}})
     _enable(db, "slack")
     notify.enqueue(db, TK, "action_executed", {"incident_title": "inc 1", "severity": 1}, 1)
+    t0 = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=10)  # >= enqueue time
     mock.status = 429
-    assert notify.deliver_pending(db, NOW) == 0                  # throttled, stays queued
+    assert notify.deliver_pending(db, t0) == 0             # throttled, stays queued
     row = db.execute(text("SELECT status, retry_after_until FROM soar_notifications")).mappings().first()
-    assert row["status"] == "queued" and row["retry_after_until"] == NOW + datetime.timedelta(seconds=2)
-    # not yet due
-    assert notify.deliver_pending(db, NOW + datetime.timedelta(seconds=1)) == 0
+    assert row["status"] == "queued" and row["retry_after_until"] == t0 + datetime.timedelta(seconds=2)
+    assert notify.deliver_pending(db, t0 + datetime.timedelta(seconds=1)) == 0   # not yet due
     mock.status = 200
-    assert notify.deliver_pending(db, NOW + datetime.timedelta(seconds=3)) == 1
+    assert notify.deliver_pending(db, t0 + datetime.timedelta(seconds=3)) == 1
 
 
 def test_burst_is_batched_into_one_message(db, monkeypatch, mock):
@@ -145,7 +145,7 @@ def test_burst_is_batched_into_one_message(db, monkeypatch, mock):
     _enable(db, "slack")
     for i in range(50):
         notify.enqueue(db, TK, "action_executed", {"incident_title": f"inc {i}", "severity": 1}, 1)
-    sent = notify.deliver_pending(db, NOW)
+    sent = notify.deliver_pending(db)
     assert sent == 50 and len(mock.received) == 1               # 50 events -> one summary POST
     assert "50 SOAR events" in mock.received[0]
 
@@ -158,7 +158,7 @@ def test_disabled_channel_sends_nothing(db, monkeypatch, mock):
                {"t": TK})
     db.commit()
     queued = notify.enqueue(db, TK, "action_executed", {"incident_title": "x", "severity": 9}, 9)
-    assert queued == 0 and notify.deliver_pending(db, NOW) == 0 and mock.received == []
+    assert queued == 0 and notify.deliver_pending(db) == 0 and mock.received == []
 
 
 def test_unconfigured_channel_is_not_queued(db, monkeypatch, mock):

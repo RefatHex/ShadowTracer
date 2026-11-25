@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from ..audit import append_entry
 from ..rbac import ADMIN_ONLY, ANALYST_OR_ABOVE, CurrentUser
 from ..deps import get_db
-from ..soar import approvals, metrics as metrics_logic, notify
-from ..soar.models import soar_channels
+from ..soar import approvals, assets, metrics as metrics_logic, notify
+from ..soar.models import soar_channels, soar_tenant_settings
 
 router = APIRouter(prefix="/api/soar", tags=["soar"])
 
@@ -27,6 +27,16 @@ class ChannelConfig(BaseModel):
     min_severity: int | None = None
     throttle_seconds: int | None = None
     batch_window_seconds: int | None = None
+
+
+class AssetLevel(BaseModel):
+    scope_type: str
+    scope_value: str
+    level: str
+
+
+class KillSwitch(BaseModel):
+    enabled: bool
 
 
 def _load(db, user: CurrentUser, action_id: int) -> dict:
@@ -125,6 +135,35 @@ def set_channel(channel: str, body: ChannelConfig, db: Session = Depends(get_db)
     append_entry(db, str(user.user_id), user.tenant_id, "soar.channel_configured",
                  f"{channel}:{'on' if fields.get('enabled') else 'off'}", "updated")
     return {"ok": True, "channel": channel, **fields}
+
+
+@router.get("/asset-levels")
+def asset_levels(db: Session = Depends(get_db), user: CurrentUser = Depends(ADMIN_ONLY)):
+    return {"levels": assets.list_levels(db, user.tenant_key), "default": assets.DEFAULT_LEVEL}
+
+
+@router.put("/asset-levels")
+def set_asset_level(body: AssetLevel, db: Session = Depends(get_db),
+                    user: CurrentUser = Depends(ADMIN_ONLY)):
+    try:
+        return assets.set_level(db, user.tenant_key, user.tenant_id, body.scope_type,
+                                body.scope_value, body.level, str(user.user_id))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put("/settings/kill-switch")
+def kill_switch(body: KillSwitch, db: Session = Depends(get_db),
+                user: CurrentUser = Depends(ADMIN_ONLY)):
+    """Toggle the tenant kill switch (stops all containment). Audited; notifies the channels."""
+    db.execute(pg_insert(soar_tenant_settings).values(tenant_key=user.tenant_key, kill_switch=body.enabled)
+               .on_conflict_do_update(index_elements=["tenant_key"], set_={"kill_switch": body.enabled}))
+    append_entry(db, str(user.user_id), user.tenant_id, "soar.kill_switch_toggled",
+                 f"tenant={'on' if body.enabled else 'off'}", "on" if body.enabled else "off")
+    notify.notify_safe(db, user.tenant_key, "kill_switch_toggled",
+                       {"incident_title": "kill switch", "action_status": "on" if body.enabled else "off",
+                        "severity": 0}, 0)
+    return {"ok": True, "kill_switch": body.enabled}
 
 
 @router.post("/channels/{channel}/test")

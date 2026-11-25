@@ -14,7 +14,7 @@ from test_incidents_api import _token_for, app_settings, client, tenant  # noqa:
 def _mock_dispatch(monkeypatch):
     calls = []
     monkeypatch.setattr(approvals.actions, "apply_action",
-                        lambda at, base, agent, tgt: calls.append(("add", at, base, agent, tgt)))
+                        lambda at, base, agent, tgt, ttl_seconds=None: calls.append(("add", at, base, agent, tgt)))
     monkeypatch.setattr(approvals.actions, "reverse_action",
                         lambda at, base, agent, tgt: calls.append(("del", at, base, agent, tgt)))
     return calls
@@ -173,3 +173,36 @@ def test_collect_evidence_runs_for_analyst_and_undo_refused(client, db, tenant, 
     assert r.status_code == 200 and r.json()["status"] == "executed"
     r = client.post(f"/api/soar/actions/{aid}/undo", headers=h)
     assert r.status_code == 409 and "not reversible" in r.json()["detail"]
+
+
+# --- Phase 9 follow-up: asset-levels + kill-switch API (admin, audited) ---
+
+def test_set_asset_level_admin_only_and_audited(client, db, tenant):
+    tid, tk = tenant
+    # analyst forbidden
+    r = client.put("/api/soar/asset-levels", json={"scope_type": "agent", "scope_value": "001", "level": "none"},
+                   headers=_hdr(client, db, tenant, role="analyst"))
+    assert r.status_code == 403
+    # admin ok + audited
+    r = client.put("/api/soar/asset-levels", json={"scope_type": "agent", "scope_value": "001", "level": "none"},
+                   headers=_hdr(client, db, tenant, role="admin"))
+    assert r.status_code == 200 and r.json()["level"] == "none"
+    assert db.execute(text("SELECT count(*) FROM audit_log WHERE action='soar.asset_level_set'")).scalar() == 1
+    assert db.execute(text("SELECT level FROM soar_asset_levels WHERE tenant_key=:t AND scope_value='001'"),
+                      {"t": tk}).scalar() == "none"
+
+
+def test_set_asset_level_rejects_bad_level(client, db, tenant):
+    r = client.put("/api/soar/asset-levels", json={"scope_type": "agent", "scope_value": "001", "level": "nope"},
+                   headers=_hdr(client, db, tenant, role="admin"))
+    assert r.status_code == 400
+
+
+def test_kill_switch_toggle_audited(client, db, tenant):
+    tid, tk = tenant
+    r = client.put("/api/soar/settings/kill-switch", json={"enabled": True},
+                   headers=_hdr(client, db, tenant, role="admin"))
+    assert r.status_code == 200 and r.json()["kill_switch"] is True
+    assert db.execute(text("SELECT kill_switch FROM soar_tenant_settings WHERE tenant_key=:t"),
+                      {"t": tk}).scalar() is True
+    assert db.execute(text("SELECT count(*) FROM audit_log WHERE action='soar.kill_switch_toggled'")).scalar() == 1

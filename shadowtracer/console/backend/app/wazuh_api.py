@@ -41,12 +41,13 @@ def _request(url: str, method: str = "GET", headers: dict | None = None, data: b
         raise WazuhApiError(str(e)) from e
 
 
-def _token(base_url: str) -> str:
-    cached = _TOKENS.get(base_url)
+def _token(base_url: str, user: str | None = None, pw: str | None = None) -> str:
+    user = user or os.environ.get("WAZUH_API_USER", "wazuh-wui")
+    pw = pw if pw is not None else os.environ.get("WAZUH_API_PASSWORD", "")
+    cache_key = f"{base_url}|{user}"
+    cached = _TOKENS.get(cache_key)
     if cached and cached[1] > time.time():
         return cached[0]
-    user = os.environ.get("WAZUH_API_USER", "wazuh-wui")
-    pw = os.environ.get("WAZUH_API_PASSWORD", "")
     if not pw:
         raise WazuhApiError("WAZUH_API_PASSWORD not set")
     import base64
@@ -56,8 +57,18 @@ def _token(base_url: str) -> str:
     token = body.get("data", {}).get("token")
     if not token:
         raise WazuhApiError("no token in authenticate response")
-    _TOKENS[base_url] = (token, time.time() + _TOKEN_TTL)
+    _TOKENS[cache_key] = (token, time.time() + _TOKEN_TTL)
     return token
+
+
+def _soar_token(base_url: str) -> str:
+    """Least-privilege SOAR credentials for active-response dispatch (Phase 9 A5). Falls back to the
+    shared read-only API user only if the dedicated SOAR user isn't configured."""
+    user = os.environ.get("SOAR_WAZUH_API_USER") or os.environ.get("WAZUH_API_USER", "wazuh-wui")
+    pw = os.environ.get("SOAR_WAZUH_API_PASSWORD")
+    if pw is None:
+        pw = os.environ.get("WAZUH_API_PASSWORD", "")
+    return _token(base_url, user, pw)
 
 
 def list_agents(base_url: str) -> list[dict]:
@@ -94,7 +105,7 @@ def run_command(base_url: str, agent_id: str, script: str, arguments: list[str],
                        "alert": {"data": {"srcip": srcip}}}).encode()
     data = _request(
         f"{base_url}/active-response?agents_list={agent_id}", method="PUT",
-        headers={"Authorization": f"Bearer {_token(base_url)}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {_soar_token(base_url)}", "Content-Type": "application/json"},
         data=body)
     affected = data.get("data", {}).get("total_affected_items", 0)
     if affected < 1:

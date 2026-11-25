@@ -23,11 +23,17 @@ def pick_script(os_family: str | None) -> str:
     return ACTION_SCRIPTS["block_ip"][0]
 
 
-def apply_action(action_type: str, base_url: str, agent_id: str, target: str) -> None:
+def apply_action(action_type: str, base_url: str, agent_id: str, target: str,
+                 ttl_seconds: int | None = None) -> None:
     """Apply a containment action on one agent. Subject goes in both srcip (block_ip reads it) and the
-    second extra_arg (the account/file scripts read it). Raises wazuh_api.WazuhApiError on failure."""
+    second extra_arg (the account/file scripts read it). For block_ip, ttl_seconds is passed as a third
+    arg so the agent script records the block with its expiry and lifts it itself (A3). Raises
+    wazuh_api.WazuhApiError on failure."""
     script, verb, _ = ACTION_SCRIPTS[action_type]
-    wazuh_api.run_command(base_url, agent_id, script, [verb, target], target)
+    args = [verb, target]
+    if action_type == "block_ip" and ttl_seconds:
+        args.append(str(ttl_seconds))
+    wazuh_api.run_command(base_url, agent_id, script, args, target)
 
 
 def reverse_action(action_type: str, base_url: str, agent_id: str, target: str) -> None:

@@ -61,13 +61,17 @@ def anti_spoof_ok(observations: int, ti_confirmed: bool) -> bool:
 
 
 def guard(ip: str, *, global_kill: bool, tenant_kill: bool, breaker_tripped: bool,
-          allow_cidrs: list[str], protected_ips: set[str], observations: int,
+          allow_cidrs: list[str], protected_ips: set[str], trusted_field: bool, observations: int,
           ti_confirmed: bool, actions_last_hour: int, rate_limit: int) -> Decision:
     if global_kill or tenant_kill:
         return Decision(False, "kill_switch")
     allow, why = is_allowlisted(ip, allow_cidrs, protected_ips)
     if allow:
         return Decision(False, f"allowlist:{why}")
+    # Provenance first: the IP must have reached us through a network-layer decoder field, never from
+    # user-controllable text — regardless of count. TI does NOT bypass this (it only relaxes the count).
+    if not trusted_field:
+        return Decision(False, "anti_spoof:untrusted_field")
     if not anti_spoof_ok(observations, ti_confirmed):
         return Decision(False, "anti_spoof:single_observation_no_ti")
     if actions_last_hour >= rate_limit:
@@ -92,14 +96,18 @@ if __name__ == "__main__":  # self-check
     assert anti_spoof_ok(1, False) is False                            # single forged observation, no TI
     assert anti_spoof_ok(1, True) is True                              # TI overrides
     assert anti_spoof_ok(2, False) is True                             # corroborated
-    assert guard("10.0.0.5", global_kill=False, tenant_kill=False, breaker_tripped=False,
-                 allow_cidrs=[], protected_ips=set(), observations=5, ti_confirmed=True,
-                 actions_last_hour=0, rate_limit=10).allowed is False  # internal refused
+    def g(ip, **kw):
+        base = dict(global_kill=False, tenant_kill=False, breaker_tripped=False, allow_cidrs=[],
+                    protected_ips=set(), trusted_field=True, observations=5, ti_confirmed=True,
+                    actions_last_hour=0, rate_limit=10)
+        base.update(kw)
+        return guard(ip, **base)
+    assert g("10.0.0.5").allowed is False                              # internal refused (allowlist)
+    assert g("8.8.8.8", trusted_field=False).refuse_reason == "anti_spoof:untrusted_field"
     assert guard("8.8.8.8", global_kill=True, tenant_kill=False, breaker_tripped=False,
-                 allow_cidrs=[], protected_ips=set(), observations=5, ti_confirmed=True,
-                 actions_last_hour=0, rate_limit=10).refuse_reason == "kill_switch"
-    d = guard("8.8.8.8", global_kill=False, tenant_kill=False, breaker_tripped=False, allow_cidrs=[],
-              protected_ips=set(), observations=5, ti_confirmed=True, actions_last_hour=10, rate_limit=10)
+                 allow_cidrs=[], protected_ips=set(), trusted_field=True, observations=5,
+                 ti_confirmed=True, actions_last_hour=0, rate_limit=10).refuse_reason == "kill_switch"
+    d = g("8.8.8.8", actions_last_hour=10)
     assert d.allowed and d.force_approval and d.breaker_trip_reason == "rate_limit"
     assert clamp_block_seconds(None, 3600, 86400) == 3600
     assert clamp_block_seconds(999999, 3600, 86400) == 86400

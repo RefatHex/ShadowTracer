@@ -22,7 +22,8 @@ from .. import audit, wazuh_api
 from ..config import load_settings
 from ..db import make_session_factory
 from ..models import incident_alerts, incidents, tenants
-from . import actions, earned_autonomy, gate, notify, playbooks, rails, triggers
+from . import (actions, assets, earned_autonomy, gate, notify, playbooks, provenance,
+               rails, repeat_offender, triggers)
 from .models import (soar_actions, soar_allowlist, soar_global_settings,
                      soar_tenant_settings, soar_worker_state)
 
@@ -110,14 +111,16 @@ def default_protected_ips(tenant_key: str) -> set[str]:
         return set()
 
 
-def _resolve(pb_mode: str, gate_passed: bool, decision) -> tuple[str, str, str | None, str]:
-    """Map playbook mode + confidence gate + rails into (status, effective_mode, approved_by, event).
-    shadow -> record the would-have action, execute nothing. auto -> only when the gate passes and the
-    rails didn't downgrade (earned autonomy, no human); otherwise it falls back to an approval request.
-    The confidence gate is what keeps a 1-signal or model-only incident out of auto."""
+def _resolve(pb_mode: str, asset_level: str, gate_passed: bool, decision) -> tuple[str, str, str | None, str]:
+    """Map playbook mode + asset level + confidence gate + rails into
+    (status, effective_mode, approved_by, event). shadow -> record a would-have action, execute
+    nothing. auto -> no human, but only on a 'full' asset with a passing gate and no rail downgrade;
+    otherwise an approval request. The gate keeps a 1-signal or model-only incident out of auto."""
     if pb_mode == "shadow":
         return "shadow", "shadow", None, "soar.shadow"
-    if pb_mode == "auto" and gate_passed and not decision.force_approval:
+    # Auto executes with no human ONLY when the asset is 'full' AND the gate passes AND the rails did
+    # not downgrade. An 'approval' asset never auto-executes even under an auto playbook.
+    if pb_mode == "auto" and asset_level == "full" and gate_passed and not decision.force_approval:
         return "approved", "auto", "auto", "soar.auto_approved"
     return "requested", "approval", None, "soar.requested"
 
@@ -134,7 +137,8 @@ def _record_action(db, *, tenant_key, incident_id, playbook_key, action_type, ta
     return db.execute(stmt).first() is not None
 
 
-def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[str]) -> None:
+def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[str],
+                     trusted_ips: set[str]) -> None:
     tenant_key = inc["tenant_key"]
     plays = triggers.match(inc)
     if not plays:
@@ -146,9 +150,21 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
     observations = _observation_count(db, inc["id"])
     ti_confirmed = (inc.get("ti_confidence") or 0) >= TI_MIN
     gate_passed, signals = gate.evaluate(inc)
+    level = assets.asset_level(db, tenant_key, inc.get("agent_id"))      # A1: full | approval | none
 
     for playbook_key, action_type, targets in plays:
         pb_mode = earned_autonomy.playbook_mode(db, tenant_key, playbook_key)   # default 'shadow'
+
+        # A1: a 'none' asset is never contained — refuse every target (audited); notify already ran.
+        if level == "none":
+            for ip in targets:
+                if _record_action(db, tenant_key=tenant_key, incident_id=inc["id"],
+                                  playbook_key=playbook_key, action_type=action_type, target=ip,
+                                  agent_id=inc.get("agent_id"), mode=pb_mode, status="refused",
+                                  signals=signals, refuse_reason="asset_level_none",
+                                  block_seconds=None, approved_by=None):
+                    _audit(db, tenant_key, "soar.refused", f"{action_type}:{ip} (asset_level_none)", "refused")
+            continue
 
         # Scope limit: one run may act on at most scope_limit targets; overflow trips the breaker.
         scope = st["scope_limit_per_run"]
@@ -162,9 +178,9 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
             decision = rails.guard(
                 ip, global_kill=gkill, tenant_kill=st["kill_switch"],
                 breaker_tripped=st["circuit_breaker_tripped"], allow_cidrs=allow_cidrs,
-                protected_ips=protected_ips, observations=observations,
-                ti_confirmed=ti_confirmed, actions_last_hour=actions_last_hour,
-                rate_limit=st["rate_limit_per_hour"])
+                protected_ips=protected_ips, trusted_field=(ip in trusted_ips),
+                observations=observations, ti_confirmed=ti_confirmed,
+                actions_last_hour=actions_last_hour, rate_limit=st["rate_limit_per_hour"])
 
             if not decision.allowed:
                 if _record_action(db, tenant_key=tenant_key, incident_id=inc["id"],
@@ -180,14 +196,25 @@ def process_incident(db, inc: dict, now: datetime.datetime, protected_ips: set[s
                 _trip_breaker(db, tenant_key, decision.breaker_trip_reason, now)
                 st["circuit_breaker_tripped"] = True
 
-            pb_block = playbooks.block_seconds_for(db, tenant_key, playbook_key, st["block_default_seconds"])
-            block_seconds = rails.clamp_block_seconds(
-                pb_block, st["block_default_seconds"], st["block_max_seconds"])
-            status, mode_rec, approved_by, event = _resolve(pb_mode, gate_passed, decision)
+            # A2: repeat-offender escalation owns the block duration for block_ip.
+            action_signals = list(signals)
+            if action_type == "block_ip":
+                block_seconds, prior = repeat_offender.duration_for(
+                    db, tenant_key, ip, schedule=st["escalation_schedule"],
+                    window_seconds=st["repeat_window_seconds"], cap=st["block_max_seconds"], now=now)
+                if prior:
+                    action_signals.append({"type": "repeat_offender",
+                                           "detail": f"offense #{prior + 1} → {block_seconds}s", "counts": False})
+            else:
+                pb_block = playbooks.block_seconds_for(db, tenant_key, playbook_key, st["block_default_seconds"])
+                block_seconds = rails.clamp_block_seconds(
+                    pb_block, st["block_default_seconds"], st["block_max_seconds"])
+            signals_for_row = action_signals
+            status, mode_rec, approved_by, event = _resolve(pb_mode, level, gate_passed, decision)
             if _record_action(db, tenant_key=tenant_key, incident_id=inc["id"],
                               playbook_key=playbook_key, action_type=action_type, target=ip,
                               agent_id=inc.get("agent_id"), mode=mode_rec, status=status,
-                              signals=signals, refuse_reason=None, block_seconds=block_seconds,
+                              signals=signals_for_row, refuse_reason=None, block_seconds=block_seconds,
                               approved_by=approved_by):
                 _audit(db, tenant_key, event, f"{action_type}:{ip}", status)
                 if status == "requested":                    # escalate: an approval is needed
@@ -239,10 +266,33 @@ def expire_stale(db, now: datetime.datetime, *, reverse_fn=actions.reverse_block
                f"{a['action_type']}:{a['target']}", "expired")
 
 
-def poll_once(session_factory, *, protected_ips_fn=default_protected_ips, now=None) -> int:
+def _alert_ids(db, incident_id: int) -> list[str]:
+    return [r[0] for r in db.execute(select(incident_alerts.c.alert_id)
+            .where(incident_alerts.c.incident_id == incident_id)).all()]
+
+
+def _notify_incident_opened(db, inc: dict) -> None:
+    """A6: incident_opened (once per incident, severity gated at the channel). Deduped on the incident."""
+    tk = inc["tenant_key"]
+    seen = db.execute(text("SELECT 1 FROM soar_notifications WHERE tenant_key=:t AND event='incident_opened' "
+                           "AND context->>'incident_id' = :i LIMIT 1"),
+                      {"t": tk, "i": str(inc["id"])}).first()
+    if seen:
+        return
+    ctx = notify.incident_ctx(db, tk, inc["id"])
+    ctx["action_status"] = "opened"
+    notify.notify_safe(db, tk, "incident_opened", ctx, ctx.get("severity") or 0)
+
+
+def poll_once(session_factory, *, protected_ips_fn=default_protected_ips,
+              blockable_ips_fn=None, now=None) -> int:
     """One poll cycle. Returns the number of incidents examined. Exactly-once processing is the
-    idempotency constraint's job, not the cursor's — the overlap re-read is deliberately at-least-once."""
+    idempotency constraint's job, not the cursor's — the overlap re-read is deliberately at-least-once.
+    blockable_ips_fn(tenant_key, alert_ids) -> set of IPs that reached us through a trusted network
+    decoder field (A4); None uses the live ClickHouse lookup."""
     now = now or _utcnow()
+    if blockable_ips_fn is None:
+        blockable_ips_fn = provenance.make_default_fn(load_settings())
     examined = 0
     with session_factory() as db:
         expire_stale(db, now)
@@ -261,7 +311,9 @@ def poll_once(session_factory, *, protected_ips_fn=default_protected_ips, now=No
             if tk not in ip_cache:
                 ip_cache[tk] = protected_ips_fn(tk)
             try:
-                process_incident(db, dict(inc), now, ip_cache[tk])
+                _notify_incident_opened(db, dict(inc))
+                trusted = blockable_ips_fn(tk, _alert_ids(db, inc["id"]))
+                process_incident(db, dict(inc), now, ip_cache[tk], trusted)
             except Exception:                       # one bad incident never stalls the poll
                 log.exception("soar: failed to process incident %s", inc["id"])
                 db.rollback()
@@ -283,10 +335,11 @@ def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = load_settings()
     sf = make_session_factory(settings)
+    blockable = provenance.make_default_fn(settings)         # built once, reused each poll
     log.info("soar worker started (poll %ss, overlap %ss)", POLL_INTERVAL, OVERLAP.total_seconds())
     while True:
         try:
-            n = poll_once(sf)
+            n = poll_once(sf, blockable_ips_fn=blockable)
             log.debug("soar poll examined %d incidents", n)
         except Exception:
             log.exception("soar poll cycle failed")

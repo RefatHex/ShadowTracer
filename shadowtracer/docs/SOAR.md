@@ -332,11 +332,51 @@ Notification-only escalation; messages link to the console, no inbound buttons/c
 
 ## Backend complete — what's left (follow-up)
 
-Commits (a)–(f) are the backend-complete milestone agreed with the owner. **Not yet done (next
-session):** the console pages (Playbooks with shadow precision, Approvals queue, Action history +
-undo, Asset automation levels, SOAR settings incl. allowlist/limits/kill switch/channels) and the
-full live-lab VERIFY matrix — which first needs the one-line lab fix: **re-enrol agent-ubuntu-1
-(NET_ADMIN) into the test tenant** so a registered, capable victim exists for an end-to-end
-firewall-drop through the manager API. **Windows netsh/route-null stay plan-only** until the VMs
-exist. No containment is driven by the LLM agent or a model score alone; nothing runs on the hot
-path; the SOAR worker is a single light poller (budget ~160 MB, like the other light workers).
+Commits (a)–(f) are the backend-complete milestone agreed with the owner.
+
+## 12. Build log — follow-up Part A: backend gaps
+
+- **A1 asset automation levels** (`assets.py`, migration `f3b5d7a9c1e4` → `soar_asset_levels`):
+  admin tags an agent or a whole role_tag as full | approval | none (default approval; resolution
+  agent → role_tag → default). Enforced in the worker: `none` → containment refused
+  (`asset_level_none`, audited; incident notification still fires); `approval` → never auto even
+  under an auto playbook; `full` → the playbook mode applies. API `GET/PUT /api/soar/asset-levels`
+  (admin, audited).
+- **A2 repeat-offender escalation** (`repeat_offender.py`): Wazuh's `repeated_offenders` doesn't
+  apply to API-dispatched custom scripts, so SOAR owns it — per tenant+IP, count prior blocks in
+  the look-back window and pick the escalating schedule step (default 1h→6h→24h, capped at the
+  admin max). Recorded on the action (a `repeat_offender` signal). Config on
+  `soar_tenant_settings` (`repeat_window_seconds`, `escalation_schedule`).
+- **A3 agent-side expiry** (`shadowtracer-fw-drop`): each timed block is recorded on the agent with
+  its absolute expiry; the script removes due blocks ITSELF on every call and on a periodic Wazuh
+  `command` wodle (`sweep`), so a block still lifts on time even if the SOAR worker is dead. The
+  worker's `expire_stale` stays as the second, independent timer. The block TTL is passed as the
+  third AR arg (`actions.apply_action`).
+- **A4 anti-spoof by provenance** (`provenance.py`): an IP is blockable only if it reached us as the
+  `src_endpoint_ip` of a **trusted network decoder** (`TRUSTED_DECODERS`), never because it was
+  parsed out of user-controllable text — so a log-injection line that puts an IP in a username field
+  is never blockable, regardless of count/TI. The count check stays as an extra condition
+  (`rails.guard` now takes `trusted_field`). The live lookup joins the incident's alerts to
+  ClickHouse; injectable for tests.
+- **A5 least-privilege API user** (`provision-soar-api-user.sh`, `wazuh_api._soar_token`): a
+  dedicated Wazuh user with a policy allowing only `active-response:command` on the test-tenant
+  agents; SOAR authenticates as it (`SOAR_WAZUH_API_*`, env only) instead of wazuh-wui, so a leaked
+  SOAR credential can't manage agents or read logs. (Wazuh RBAC has no per-script resource; the
+  shadowtracer-* restriction is enforced on our side.)
+- **A6 notifications wired**: `incident_opened` (once per incident, severity-gated, deduped) and
+  `kill_switch_toggled` (on the kill-switch API) added to the notifier events.
+- **Tests**: A1/A2/A4 at the worker level + asset-level/kill-switch API tests (console suite 246
+  green); A3 verified offline (sweep logic) with the live 2-minute-expiry timer in Part C.
+- **A5 verified live** against the lab manager: the `soar` user fires `PUT /active-response` (**200**)
+  but is denied `DELETE /agents` (**403**) and `GET /manager/logs` (**403**); agent:read stays
+  allowed (a responder needs agent IDs). Provisioned with `rbac_mode: white` (deny-by-default). The
+  SOAR worker now authenticates as `soar` (creds in the gitignored `.env`, never committed).
+
+> **Note:** this followed a lab recovery — a host reset had left a native Windows PostgreSQL squatting
+> host port 5432, blocking the lab's Docker Postgres; cleared by stopping the Windows service, after
+> which Postgres reattached to the lab network and the suite ran clean.
+
+**Not yet done:** the console pages (Part B) and the live-lab VERIFY matrix (Part C) — which first
+needs **re-enrolling agent-ubuntu-1 (NET_ADMIN) into the test tenant**. **Windows netsh/route-null
+stay plan-only** until the VMs exist. No containment is driven by the LLM agent or a model score
+alone; nothing runs on the hot path; the SOAR worker is a single light poller (~160 MB).
