@@ -4,15 +4,15 @@ Four-eyes and reason-required are enforced in the logic layer. A cross-tenant ac
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from ..audit import append_entry
 from ..rbac import ADMIN_ONLY, ANALYST_OR_ABOVE, CurrentUser
 from ..deps import get_db
-from ..soar import approvals, assets, metrics as metrics_logic, notify
-from ..soar.models import soar_channels, soar_tenant_settings
+from ..soar import approvals, assets, earned_autonomy, metrics as metrics_logic, notify, playbooks
+from ..soar.models import (soar_allowlist, soar_channels, soar_playbooks, soar_tenant_settings)
 
 router = APIRouter(prefix="/api/soar", tags=["soar"])
 
@@ -177,3 +177,113 @@ def test_channel(channel: str, db: Session = Depends(get_db), user: CurrentUser 
                             only_channel=channel)
     append_entry(db, str(user.user_id), user.tenant_id, "soar.channel_test", channel, "queued")
     return {"queued": queued}
+
+
+# --- playbooks (list + promote) ---
+
+class ModeChange(BaseModel):
+    mode: str
+
+
+@router.get("/playbooks")
+def list_playbooks(db: Session = Depends(get_db), user: CurrentUser = Depends(ANALYST_OR_ABOVE)):
+    """Each shipped/edited playbook with its mode, version, and shadow precision + verdict count."""
+    stored = {r["playbook_key"]: dict(r) for r in db.execute(select(soar_playbooks).where(
+        soar_playbooks.c.tenant_key == user.tenant_key)).mappings().all()}
+    keys = sorted(set(playbooks.DEFAULT_PLAYBOOKS) | set(stored))
+    out = []
+    for key in keys:
+        pb = stored.get(key, {})
+        ok, reason, stats = earned_autonomy.can_promote_to_auto(db, user.tenant_key, key)
+        default = playbooks.DEFAULT_PLAYBOOKS.get(key, {})
+        out.append({
+            "playbook_key": key,
+            "title": (pb.get("definition") or default).get("title", key),
+            "mode": pb.get("mode", "shadow"),
+            "version": pb.get("version", 1),
+            "block_seconds": playbooks.block_seconds_for(db, user.tenant_key, key, 3600),
+            "precision": stats["precision"], "verdict_count": stats["count"],
+            "can_promote_to_auto": ok, "promote_blocked_reason": reason,
+            "min_precision": stats.get("min_precision"), "min_incidents": stats.get("min_incidents"),
+            "promoted_by": pb.get("promoted_by"), "updated_by": pb.get("updated_by"),
+        })
+    return {"playbooks": out}
+
+
+@router.post("/playbooks/{playbook_key}/mode")
+def set_playbook_mode(playbook_key: str, body: ModeChange, db: Session = Depends(get_db),
+                      user: CurrentUser = Depends(ADMIN_ONLY)):
+    try:
+        res = earned_autonomy.set_mode(db, user.tenant_key, user.tenant_id, playbook_key,
+                                       body.mode, str(user.user_id))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not res["ok"]:
+        raise HTTPException(status_code=409, detail=res["reason"] or "promotion refused")
+    return res
+
+
+# --- settings (tenant limits/thresholds + allowlist + kill switches) ---
+
+class SettingsUpdate(BaseModel):
+    block_default_seconds: int | None = None
+    block_max_seconds: int | None = None
+    rate_limit_per_hour: int | None = None
+    scope_limit_per_run: int | None = None
+    approval_ttl_seconds: int | None = None
+    promotion_min_precision: float | None = None
+    promotion_min_incidents: int | None = None
+    repeat_window_seconds: int | None = None
+    escalation_schedule: list[int] | None = None
+    circuit_breaker_tripped: bool | None = None       # admin reset of the breaker
+
+
+class AllowlistEntry(BaseModel):
+    cidr: str
+    note: str | None = None
+
+
+@router.get("/settings")
+def get_settings(db: Session = Depends(get_db), user: CurrentUser = Depends(ANALYST_OR_ABOVE)):
+    row = db.execute(select(soar_tenant_settings).where(
+        soar_tenant_settings.c.tenant_key == user.tenant_key)).mappings().first()
+    allow = [dict(r) for r in db.execute(select(soar_allowlist).where(
+        soar_allowlist.c.tenant_key == user.tenant_key).order_by(soar_allowlist.c.cidr)).mappings().all()]
+    gkill = db.execute(text("SELECT kill_switch FROM soar_global_settings WHERE id=1")).scalar()
+    return {"settings": dict(row) if row else None, "allowlist": allow, "global_kill_switch": gkill}
+
+
+@router.put("/settings")
+def update_settings(body: SettingsUpdate, db: Session = Depends(get_db),
+                    user: CurrentUser = Depends(ADMIN_ONLY)):
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="no fields to update")
+    db.execute(pg_insert(soar_tenant_settings).values(tenant_key=user.tenant_key, **fields)
+               .on_conflict_do_update(index_elements=["tenant_key"], set_=fields))
+    append_entry(db, str(user.user_id), user.tenant_id, "soar.settings_updated",
+                 ",".join(sorted(fields)), "updated")
+    db.commit()
+    return {"ok": True, **fields}
+
+
+@router.post("/allowlist")
+def add_allowlist(body: AllowlistEntry, db: Session = Depends(get_db),
+                  user: CurrentUser = Depends(ADMIN_ONLY)):
+    db.execute(pg_insert(soar_allowlist).values(tenant_key=user.tenant_key, cidr=body.cidr, note=body.note)
+               .on_conflict_do_nothing(constraint="soar_allowlist_identity"))
+    append_entry(db, str(user.user_id), user.tenant_id, "soar.allowlist_add", body.cidr, "added")
+    db.commit()
+    return {"ok": True, "cidr": body.cidr}
+
+
+@router.delete("/allowlist/{entry_id}")
+def del_allowlist(entry_id: int, db: Session = Depends(get_db), user: CurrentUser = Depends(ADMIN_ONLY)):
+    row = db.execute(select(soar_allowlist).where(
+        soar_allowlist.c.id == entry_id, soar_allowlist.c.tenant_key == user.tenant_key)).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+    db.execute(soar_allowlist.delete().where(soar_allowlist.c.id == entry_id))
+    append_entry(db, str(user.user_id), user.tenant_id, "soar.allowlist_del", row["cidr"], "removed")
+    db.commit()
+    return {"ok": True}

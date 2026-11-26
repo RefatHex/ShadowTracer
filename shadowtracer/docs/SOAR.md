@@ -376,6 +376,27 @@ Commits (a)–(f) are the backend-complete milestone agreed with the owner.
 > host port 5432, blocking the lab's Docker Postgres; cleared by stopping the Windows service, after
 > which Postgres reattached to the lab network and the suite ran clean.
 
+## 13. Build log — follow-up Part B: console pages
+
+One **SOAR** nav tab (`SoarPage.tsx`) with five sub-tabs, analyst/admin-gated to match the API, plus a
+metrics strip (MTTD / MTTC / automation / undo / FP-action rate):
+
+- **Approvals** — pending queue; approve/deny with a required reason; four-eyes / RBAC errors shown
+  inline (the API's 403/409 detail).
+- **Action history** — status filters, expiry countdown on executed blocks, one-click undo (hidden for
+  read-only collect_evidence).
+- **Playbooks** — mode badge, version, **shadow precision + verdict count** against the threshold, and a
+  Promote-to-auto button that is disabled with the reason when below the gate.
+- **Asset levels** (admin) — set full/approval/none per agent or role_tag.
+- **Settings** (admin) — kill switch + circuit-breaker reset, limits/escalation schedule (read), allowlist
+  add/remove, and the notification channels with configured/not-configured badges, enable toggle, detail
+  level, and a **Send test** button.
+
+Supporting API added to `routers/soar.py`: `GET /playbooks`, `POST /playbooks/{key}/mode` (admin, gated),
+`GET/PUT /settings`, `POST/DELETE /allowlist` (+ a `DELETE` grant migration `a7c9e1f3b5d8`). Tests:
+`test_soar_console_api.py` (6). Console suite 252 green; frontend `tsc`/build/lint clean. Screenshot
+`docs/report/9-soar.png`.
+
 **Not yet done:** the console pages (Part B) and the live-lab VERIFY matrix (Part C) — which first
 needs **re-enrolling agent-ubuntu-1 (NET_ADMIN) into the test tenant**. **Windows netsh/route-null
 stay plan-only** until the VMs exist. No containment is driven by the LLM agent or a model score

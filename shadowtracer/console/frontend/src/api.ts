@@ -761,3 +761,89 @@ export async function fetchCampaigns(accessToken: string): Promise<Campaign[]> {
   const resp = await fetch(`${API_BASE}/api/campaigns`, { headers: authHeaders(accessToken), credentials: 'include' })
   return handle<Campaign[]>(resp)
 }
+
+// --- Phase 9 SOAR ---
+export interface SoarSignal { type: string; detail: string; counts: boolean }
+export interface SoarAction {
+  id: number; incident_id: number; playbook_key: string; action_type: string; target: string
+  agent_id: string | null; mode: string; status: string; signals: SoarSignal[]
+  refuse_reason: string | null; block_seconds: number | null; block_expires_at: string | null
+  reason: string | null; approved_by: string | null; created_at: string; executed_at: string | null
+}
+export interface SoarPlaybook {
+  playbook_key: string; title: string; mode: string; version: number; block_seconds: number | null
+  precision: number | null; verdict_count: number; can_promote_to_auto: boolean
+  promote_blocked_reason: string | null; min_precision: number; min_incidents: number
+}
+export interface SoarChannel {
+  channel: string; enabled: boolean; detail_level: string; min_severity: number
+  throttle_seconds: number; batch_window_seconds: number; configured: boolean
+}
+export interface SoarMetrics {
+  executions: number; mttd_seconds: number | null; mttc_seconds: number | null
+  mean_to_execute_seconds: number | null; automation_rate: number | null; undo_rate: number | null
+  false_positive_action_rate: number | null; counts: Record<string, number>
+}
+export interface SoarSettings {
+  settings: Record<string, unknown> | null
+  allowlist: { id: number; cidr: string; note: string | null }[]
+  global_kill_switch: boolean
+}
+export interface AssetLevelRow { scope_type: string; scope_value: string; level: string }
+
+const j = (t: string) => ({ ...authHeaders(t), 'Content-Type': 'application/json' })
+
+export async function fetchSoarApprovals(t: string): Promise<{ pending: SoarAction[] }> {
+  return handle(await fetch(`${API_BASE}/api/soar/approvals`, { headers: authHeaders(t), credentials: 'include' }))
+}
+export async function fetchSoarActions(t: string): Promise<{ actions: SoarAction[] }> {
+  return handle(await fetch(`${API_BASE}/api/soar/actions`, { headers: authHeaders(t), credentials: 'include' }))
+}
+export async function approveAction(t: string, id: number, reason: string): Promise<SoarAction> {
+  return handle(await fetch(`${API_BASE}/api/soar/approvals/${id}/approve`, { method: 'POST', headers: j(t), credentials: 'include', body: JSON.stringify({ reason }) }))
+}
+export async function denyAction(t: string, id: number, reason: string): Promise<SoarAction> {
+  return handle(await fetch(`${API_BASE}/api/soar/approvals/${id}/deny`, { method: 'POST', headers: j(t), credentials: 'include', body: JSON.stringify({ reason }) }))
+}
+export async function undoAction(t: string, id: number): Promise<SoarAction> {
+  return handle(await fetch(`${API_BASE}/api/soar/actions/${id}/undo`, { method: 'POST', headers: authHeaders(t), credentials: 'include' }))
+}
+export async function fetchSoarPlaybooks(t: string): Promise<{ playbooks: SoarPlaybook[] }> {
+  return handle(await fetch(`${API_BASE}/api/soar/playbooks`, { headers: authHeaders(t), credentials: 'include' }))
+}
+export async function setPlaybookMode(t: string, key: string, mode: string): Promise<unknown> {
+  return handle(await fetch(`${API_BASE}/api/soar/playbooks/${encodeURIComponent(key)}/mode`, { method: 'POST', headers: j(t), credentials: 'include', body: JSON.stringify({ mode }) }))
+}
+export async function fetchSoarMetrics(t: string): Promise<SoarMetrics> {
+  return handle(await fetch(`${API_BASE}/api/soar/metrics`, { headers: authHeaders(t), credentials: 'include' }))
+}
+export async function fetchSoarChannels(t: string): Promise<{ channels: SoarChannel[] }> {
+  return handle(await fetch(`${API_BASE}/api/soar/channels`, { headers: authHeaders(t), credentials: 'include' }))
+}
+export async function setSoarChannel(t: string, channel: string, cfg: Partial<SoarChannel>): Promise<unknown> {
+  return handle(await fetch(`${API_BASE}/api/soar/channels/${channel}`, { method: 'PUT', headers: j(t), credentials: 'include', body: JSON.stringify(cfg) }))
+}
+export async function testSoarChannel(t: string, channel: string): Promise<{ queued: number }> {
+  return handle(await fetch(`${API_BASE}/api/soar/channels/${channel}/test`, { method: 'POST', headers: authHeaders(t), credentials: 'include' }))
+}
+export async function fetchAssetLevels(t: string): Promise<{ levels: AssetLevelRow[]; default: string }> {
+  return handle(await fetch(`${API_BASE}/api/soar/asset-levels`, { headers: authHeaders(t), credentials: 'include' }))
+}
+export async function setAssetLevel(t: string, row: AssetLevelRow): Promise<unknown> {
+  return handle(await fetch(`${API_BASE}/api/soar/asset-levels`, { method: 'PUT', headers: j(t), credentials: 'include', body: JSON.stringify(row) }))
+}
+export async function fetchSoarSettings(t: string): Promise<SoarSettings> {
+  return handle(await fetch(`${API_BASE}/api/soar/settings`, { headers: authHeaders(t), credentials: 'include' }))
+}
+export async function updateSoarSettings(t: string, patch: Record<string, unknown>): Promise<unknown> {
+  return handle(await fetch(`${API_BASE}/api/soar/settings`, { method: 'PUT', headers: j(t), credentials: 'include', body: JSON.stringify(patch) }))
+}
+export async function setKillSwitch(t: string, enabled: boolean): Promise<unknown> {
+  return handle(await fetch(`${API_BASE}/api/soar/settings/kill-switch`, { method: 'PUT', headers: j(t), credentials: 'include', body: JSON.stringify({ enabled }) }))
+}
+export async function addAllowlist(t: string, cidr: string, note: string): Promise<unknown> {
+  return handle(await fetch(`${API_BASE}/api/soar/allowlist`, { method: 'POST', headers: j(t), credentials: 'include', body: JSON.stringify({ cidr, note }) }))
+}
+export async function delAllowlist(t: string, id: number): Promise<unknown> {
+  return handle(await fetch(`${API_BASE}/api/soar/allowlist/${id}`, { method: 'DELETE', headers: authHeaders(t), credentials: 'include' }))
+}

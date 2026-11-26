@@ -14,6 +14,7 @@ import { VulnerabilitiesPage } from './VulnerabilitiesPage'
 import { LiveViewPage } from './LiveViewPage'
 import { AgentsPage } from './AgentsPage'
 import { CampaignsPage } from './CampaignsPage'
+import { SoarPage } from './SoarPage'
 import { LoginPage } from './LoginPage'
 
 // A handful of screens - deliberately no router library for this: one
@@ -27,6 +28,7 @@ type View =
   | { name: 'fingerprints' }
   | { name: 'fingerprint'; key: string }
   | { name: 'campaigns' }
+  | { name: 'soar' }
   | { name: 'attack-coverage' }
   | { name: 'vulnerabilities' }
   | { name: 'iocs' }
@@ -42,6 +44,7 @@ function NavBar({ view, onNavigate }: { view: View; onNavigate: (v: View) => voi
     { label: 'Incidents', view: { name: 'incidents' } },
     { label: 'Attack library', view: { name: 'fingerprints' } },
     { label: 'Campaigns', view: { name: 'campaigns' } },
+    { label: 'SOAR', view: { name: 'soar' } },
     { label: 'ATT&CK coverage', view: { name: 'attack-coverage' } },
     { label: 'Vulnerabilities', view: { name: 'vulnerabilities' } },
     { label: 'Threat intel', view: { name: 'iocs' } },
@@ -110,6 +113,7 @@ function viewFromHash(): View {
   if (h === '#/live') return { name: 'live' }
   if (h === '#/agents') return { name: 'agents' }
   if (h === '#/campaigns') return { name: 'campaigns' }
+  if (h === '#/soar') return { name: 'soar' }
   return { name: 'alerts' }
 }
 
@@ -145,6 +149,7 @@ function AppContent() {
         <FingerprintDetailPage fingerprintKey={view.key} onBack={() => setView({ name: 'fingerprints' })} />
       )}
       {view.name === 'campaigns' && <CampaignsPage />}
+      {view.name === 'soar' && <SoarPage />}
       {view.name === 'attack-coverage' && <AttackCoveragePage />}
       {view.name === 'vulnerabilities' && <VulnerabilitiesPage />}
       {view.name === 'iocs' && <IocBrowserPage />}
