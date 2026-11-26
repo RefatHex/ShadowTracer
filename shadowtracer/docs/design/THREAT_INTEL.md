@@ -1615,6 +1615,29 @@ now carries these high-risk paths as realtime entries (UPSTREAM.md) so a real ho
 chain. Running it live needs a non-WSL host; burst test and `image-cache.sh save` are tracked with
 it in OPTIMIZATION_BACKLOG (D18, D19).
 
+**Correction (Phase 9 follow-up, 2026-11-26) — the agent-side scan never ran on the lab agents.**
+A direct binary check on all four running agents found **neither `yr` nor `python3`** present
+(`agent-ubuntu-1/2`: neither; `agent-rocky-1/2`: python3 3.9.18 but no `yr`). The deployed
+`shadowtracer-lab/agent-ubuntu:local` image therefore cannot run `shadowtracer-yara-scan` at all —
+it is (was) a `#!/usr/bin/env python3` script that also shells out to `yr`. So contrary to the
+"the scan binary + `yr` … are on the agent" wiring note above, **the YARA-X active-response scan has
+never executed on a lab agent.** The EICAR match (`SUSP_Just_EICAR`) and the ~0.31 s / 74 MB figures
+quoted above were obtained by running the scanner **off-agent** (a dev/build host that had `yr` +
+python3), not from a live agent AR run. The agent's merged `ar.conf` wiring and rule 110200/110201
+logtest checks are real, but the scan step they trigger would have silently no-op'd on these agents.
+Fix: the script is **rewritten in bash** (Phase 9 follow-up, like the SOAR AR scripts — no python3
+dependency); `yr` must still be baked into the agent image (the Dockerfile's yr install must actually
+land in the deployed image — the current one predates it) before a live EICAR→match can be shown.
+Until then this remains unproven on real agents.
+
+*Does this invalidate the "256 file changes, 41 (16%) reached VirusTotal" funnel figure (§10.0)?*
+**No.** That number comes from a **different pipeline** — the VirusTotal funnel running in the
+`ti-sync` container over real **FIM-hash** events shipped from the agents (FIM→spool→ti-sync), which
+needs no agent-side python3/`yr` — not from the off-agent YARA run, so it still holds. The only
+consequence here is that a **YARA match**, which §A2 lists as one of the funnel's signal-gate inputs,
+never actually fired on an agent, so it contributed **0** of those 41; the 41 were sent on the other
+signals (new-and-rare hash, etc.), and the 84% free-layer filter is unaffected.
+
 **Shared-file distribution (check 2).** Compiled rules are distributed to agents via Wazuh
 **agent-group shared files**; the agent image holds only the YARA-X binary. 4.14.8 limits:
 `MAX_SHARED_PATH = 200` (path length, `src/remoted/remoted.h:28`); **no per-file byte cap** (the

@@ -1,120 +1,73 @@
-#!/usr/bin/env python3
-"""ShadowTracer firewall active-response (Phase 9 SOAR; agent-side expiry added in follow-up A3).
-Runs on the AGENT, invoked by Wazuh active response over the API !shadowtracer-fw-drop form. The
-action is the FIRST extra_arg, so the SAME script both applies and REVERSES a block through the API:
+#!/bin/bash
+# ShadowTracer firewall active-response (Phase 9 SOAR; agent-side expiry A3). Runs on the AGENT,
+# invoked by Wazuh active response over the API !shadowtracer-fw-drop form. Shell (not Python) because
+# minimal agents have no python3. The action is the FIRST extra_arg, so the SAME script both applies
+# and REVERSES a block through the API:
+#   extra_args = ["add","<ip>","<ttl_seconds>"]  apply a timed block
+#              = ["delete","<ip>"]                reverse now
+#              = ["sweep"]                         remove blocks whose TTL elapsed
+# Agent-side expiry (A3): every timed block is recorded in a local manifest ("<ip> <expiry_epoch>"
+# per line) and the script removes due blocks ITSELF on every invocation and when a periodic Wazuh
+# command wodle calls it with "sweep" — so a block lifts on time even if the SOAR worker is dead; the
+# worker's own sweep stays as a second timer. Private/loopback IPs are refused (defence in depth).
+set -u
+IPTABLES="${ST_IPTABLES:-/sbin/iptables}"
+[ -x "$IPTABLES" ] || IPTABLES=iptables
+MANIFEST="${ST_FW_MANIFEST:-/var/ossec/active-response/shadowtracer-fw.json}"
 
-  extra_args = ["add", "<ip>", "<ttl_seconds>"]   apply a timed block
-             = ["delete", "<ip>"]                  reverse a block now
-             = ["sweep"]                           remove any blocks whose TTL has elapsed
+read -r MSG || MSG=""
+field() { printf '%s' "$MSG" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -1; }
+# extra_args array -> nth element (1-based)
+arg() { printf '%s' "$MSG" | sed -n 's/.*"extra_args":\[\([^]]*\)\].*/\1/p' | tr ',' '\n' | sed -n "${1}p" | tr -d '"'; }
 
-Agent-side expiry (A3): every timed block is recorded in a local manifest with its absolute expiry,
-and the script removes due blocks ITSELF — on every invocation AND when a periodic Wazuh command wodle
-calls it with "sweep". So a block still lifts on time even if the SOAR worker is dead; the worker's own
-sweep stays as a second, independent timer. srcip is validated and private/loopback IPs are refused
-(defence in depth beneath SOAR's allowlist). No shell.
-"""
-import ipaddress
-import json
-import os
-import subprocess
-import sys
-import time
+ACTION=$(arg 1); [ -n "$ACTION" ] || ACTION=add
+IP=$(field srcip); [ -n "$IP" ] || IP=$(arg 2)
+TTL=$(arg 3)
+NOW=$(date +%s)
 
-IPTABLES = "/sbin/iptables"
-MANIFEST = os.environ.get("ST_FW_MANIFEST", "/var/ossec/active-response/shadowtracer-fw.json")
+present() { $IPTABLES -C INPUT -s "$1" -j DROP 2>/dev/null; }
+add_rule() { present "$1" || $IPTABLES -I INPUT 1 -s "$1" -j DROP 2>/dev/null; }
+del_rule() { while present "$1"; do $IPTABLES -D INPUT -s "$1" -j DROP 2>/dev/null || break; done; }
 
+# self-sweep: drop rules whose expiry has passed, rewrite the manifest with survivors
+sweep() {
+  [ -f "$MANIFEST" ] || return 0
+  tmp="$MANIFEST.tmp"; : > "$tmp"
+  while read -r mip mexp; do
+    [ -n "$mip" ] || continue
+    if [ -n "$mexp" ] && [ "$mexp" != "0" ] && [ "$NOW" -ge "$mexp" ]; then
+      del_rule "$mip"
+    else
+      printf '%s %s\n' "$mip" "$mexp" >> "$tmp"
+    fi
+  done < "$MANIFEST"
+  mv -f "$tmp" "$MANIFEST" 2>/dev/null || rm -f "$tmp"
+}
 
-def _rule(ip):
-    return ["-s", ip, "-j", "DROP"]
+manifest_set() {  # ip expiry
+  touch "$MANIFEST"
+  grep -v "^$1 " "$MANIFEST" > "$MANIFEST.tmp" 2>/dev/null || : > "$MANIFEST.tmp"
+  printf '%s %s\n' "$1" "$2" >> "$MANIFEST.tmp"
+  mv -f "$MANIFEST.tmp" "$MANIFEST"
+}
+manifest_del() {
+  [ -f "$MANIFEST" ] || return 0
+  grep -v "^$1 " "$MANIFEST" > "$MANIFEST.tmp" 2>/dev/null; mv -f "$MANIFEST.tmp" "$MANIFEST"
+}
 
+sweep
 
-def _present(ip):
-    return subprocess.run([IPTABLES, "-C", "INPUT", *_rule(ip)], capture_output=True).returncode == 0
+[ "$ACTION" = sweep ] && exit 0
 
+# agent-side allowlist guard: never block private / loopback / link-local / multicast
+case "$IP" in
+  ''|10.*|127.*|169.254.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|22[4-9].*|23*.*) exit 0 ;;
+esac
 
-def _add(ip):
-    if not _present(ip):
-        subprocess.run([IPTABLES, "-I", "INPUT", "1", *_rule(ip)], capture_output=True)
-
-
-def _remove(ip):
-    while _present(ip):
-        subprocess.run([IPTABLES, "-D", "INPUT", *_rule(ip)], capture_output=True)
-
-
-def _load():
-    try:
-        with open(MANIFEST) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def _save(m):
-    tmp = MANIFEST + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump(m, f)
-        os.replace(tmp, MANIFEST)
-    except OSError:
-        pass
-
-
-def _sweep(manifest, now):
-    """Remove every block whose expiry has passed; return the surviving manifest."""
-    keep = {}
-    for ip, expires in manifest.items():
-        if expires and now >= expires:
-            _remove(ip)
-        else:
-            keep[ip] = expires
-    return keep
-
-
-def _valid_public(ip):
-    try:
-        a = ipaddress.ip_address(ip)
-    except ValueError:
-        return False
-    return not (a.is_private or a.is_loopback or a.is_link_local or a.is_multicast)
-
-
-def main() -> int:
-    raw = sys.stdin.readline()
-    if not raw:
-        return 0
-    try:
-        params = (json.loads(raw).get("parameters") or {})
-    except ValueError:
-        return 0
-    extra = params.get("extra_args") or []
-    action = (extra[0] if extra else "add").lower()
-    ip = extra[1] if len(extra) > 1 else ""
-    now = int(time.time())
-
-    manifest = _sweep(_load(), now)          # self-expire on every invocation (A3)
-
-    if action == "sweep":
-        _save(manifest)
-        return 0
-    if not _valid_public(ip):
-        _save(manifest)
-        return 0
-    if action == "delete":
-        _remove(ip)
-        manifest.pop(ip, None)
-    else:                                     # add
-        ttl = 0
-        if len(extra) > 2:
-            try:
-                ttl = int(extra[2])
-            except ValueError:
-                ttl = 0
-        _add(ip)
-        manifest[ip] = (now + ttl) if ttl > 0 else 0   # 0 = no agent-side expiry (worker/undo only)
-    _save(manifest)
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+if [ "$ACTION" = delete ]; then
+  del_rule "$IP"; manifest_del "$IP"
+else
+  add_rule "$IP"
+  if [ -n "$TTL" ] && [ "$TTL" -gt 0 ] 2>/dev/null; then manifest_set "$IP" "$((NOW + TTL))"; else manifest_set "$IP" 0; fi
+fi
+exit 0

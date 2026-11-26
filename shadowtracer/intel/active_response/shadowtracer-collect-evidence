@@ -1,57 +1,25 @@
-#!/usr/bin/env python3
-"""ShadowTracer collect-evidence active-response (Phase 9 d). Runs on the AGENT via the
-!shadowtracer-collect-evidence API form. READ-ONLY: snapshots running processes, network connections
-and recent logins, and writes a one-line JSON record to a log the agent's logcollector ships back,
-where a ShadowTracer rule attaches it to the incident. Runs before disable/quarantine so the analyst
-has the host state the action was taken against. Never changes anything (so: no reverse).
+#!/bin/bash
+# ShadowTracer collect-evidence active-response (Phase 9 d). Runs on the AGENT via the
+# !shadowtracer-collect-evidence API form. Shell (agents have no python3). READ-ONLY: snapshots running
+# processes, network connections and recent logins, and writes a one-line JSON record to a log the
+# agent's logcollector ships back, where a ShadowTracer rule attaches it to the incident. Runs before
+# disable/quarantine so the analyst has the host state. Never changes anything (so: no reverse).
+#   extra_args = ["collect","<tag>"]   (tag is echoed back for correlation)
+set -u
+read -r MSG || MSG=""
+arg() { printf '%s' "$MSG" | sed -n 's/.*"extra_args":\[\([^]]*\)\].*/\1/p' | tr ',' '\n' | sed -n "${1}p" | tr -d '"'; }
+TAG=$(arg 2)
+OUT="${ST_EVIDENCE_LOG:-/var/ossec/logs/shadowtracer-evidence.log}"
+CAP="${ST_EVIDENCE_CAP:-200}"
 
-extra_args = ["collect", "<incident-or-tag>"]  (the tag is echoed back for correlation)
-No shell; each probe is best-effort and bounded, and the output is capped so a noisy host can't
-produce an unbounded log line.
-"""
-import datetime
-import json
-import os
-import subprocess
-import sys
+# JSON-escape a block of text into a single-line array of strings (bounded to CAP lines).
+json_lines() { head -n "$CAP" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{p=""}{printf "%s\"%s\"",p,$0;p=","}'; }
 
-OUT = os.environ.get("ST_EVIDENCE_LOG", "/var/ossec/logs/shadowtracer-evidence.log")
-CAP = int(os.environ.get("ST_EVIDENCE_CAP", "200"))      # max lines per probe
+procs=$(ps -eo pid,user,comm,args --sort=-pcpu 2>/dev/null | json_lines)
+conns=$(ss -tunap 2>/dev/null | json_lines)
+logins=$(last -n 20 2>/dev/null | json_lines)
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-
-def _run(cmd: list[str]) -> list[str]:
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return out.splitlines()[:CAP]
-
-
-def main() -> int:
-    raw = sys.stdin.readline()
-    extra = []
-    if raw:
-        try:
-            extra = (json.loads(raw).get("parameters") or {}).get("extra_args") or []
-        except ValueError:
-            extra = []
-    tag = extra[1] if len(extra) > 1 else ""
-
-    evidence = {
-        "shadowtracer_evidence": True,
-        "tag": tag,
-        "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "processes": _run(["ps", "-eo", "pid,user,comm,args", "--sort=-pcpu"]),
-        "connections": _run(["ss", "-tunap"]),
-        "recent_logins": _run(["last", "-n", "20"]),
-    }
-    try:
-        with open(OUT, "a") as f:
-            f.write(json.dumps(evidence) + "\n")
-    except OSError:
-        return 0
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+printf '{"shadowtracer_evidence":true,"tag":"%s","collected_at":"%s","processes":[%s],"connections":[%s],"recent_logins":[%s]}\n' \
+  "$TAG" "$ts" "$procs" "$conns" "$logins" >> "$OUT" 2>/dev/null
+exit 0

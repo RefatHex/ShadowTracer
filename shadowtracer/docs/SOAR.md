@@ -397,6 +397,66 @@ Supporting API added to `routers/soar.py`: `GET /playbooks`, `POST /playbooks/{k
 `test_soar_console_api.py` (6). Console suite 252 green; frontend `tsc`/build/lint clean. Screenshot
 `docs/report/9-soar.png`.
 
+## 14. Build log — follow-up Part C: live-lab VERIFY
+
+**Lab prep.** `agent-ubuntu-1` (NET_ADMIN) had a stale registration (key 060 the test-tenant
+manager had forgotten); removed it on `shadowtracer-worker-test` (the test tenant's manager) and
+re-enrolled → **ID 061, Active, in the test tenant**, iptables usable.
+
+**Key fix found and made during VERIFY.** The four ShadowTracer AR scripts were written in Python,
+but the lab agents have **no python3** (only `sh`/`bash`/`awk`/`sed`/`perl`) — so execd silently
+failed to run them (the stock `firewall-drop` works because it is a compiled C binary). **Rewrote all
+four in bash** (`shadowtracer-fw-drop`, `-disable-account`, `-quarantine`, `-collect-evidence`). Also
+learned the `!script` API form runs any script in `active-response/bin/` once it is actually runnable
+— no `<command>`/`ar.conf` registration needed. Added an offline self-check `tests/test-fw-drop.sh`
+(wired into `run-ci.sh`).
+
+**Verified LIVE against the test tenant (manager `shadowtracer-worker-test`, agent 061):**
+
+| scenario | result |
+|---|---|
+| Least-privilege API user (A5) | `soar` user: `PUT /active-response` → **200**; `DELETE /agents` → **403**; `GET /manager/logs` → **403** |
+| block_ip end-to-end | SOAR soar-user → execd → `shadowtracer-fw-drop` → real **`-A INPUT -s <ip> -j DROP`** on agent 061 |
+| agent-side timed expiry (A3) | block with a short TTL, then a `sweep` (what the periodic wodle runs) **auto-removed it on time — no worker involved** |
+| disable_account + undo | throwaway user `P → L` on disable, `L → P` on undo; `root` refused |
+| quarantine_file + undo | file in a FIM root moved to the 0600 store + sha256 manifest; restore put it back |
+| collect_evidence (read-only) | wrote a JSON snapshot (processes/connections/recent logins) to the shipped-back log |
+
+**Covered by the automated suite (252 console tests, run green against the recovered lab):** the full
+decision pipeline — shadow default, confidence gate (1-signal → approval, model-only never auto),
+earned-autonomy promotion gate, all safety rails (allowlist, provenance anti-spoof incl. the
+log-injection case, timed blocks, rate + scope limits → circuit breaker, kill switch, idempotency),
+asset levels (none/approval/auto), repeat-offender escalation, approvals (four-eyes, reason, RBAC,
+expiry → no-action), undo, cross-tenant 404, and the notifier (5 channels to mock servers, redaction,
+429 retry-after, burst batching, disabled-sends-nothing).
+
+**MTTC approval vs auto.** `GET /api/soar/metrics` computes MTTC (first alert → contained) and the
+automation rate from `soar_actions` + `incidents`; the auto path (no human step) has the lower MTTC by
+construction (it skips the request→approve latency, which the metric breaks out as
+`mean_to_execute_seconds`). The computation is unit-verified in `test_soar_metrics.py`.
+
+**Deployment notes.** (1) The bash AR scripts must ship in the agent image / shared `active-response/bin`
+(copied onto agent 061 for this run). (2) A periodic **Wazuh `command` wodle** should call
+`shadowtracer-fw-drop sweep` (~1/min) so a block expires agent-side even if the SOAR worker is down —
+the worker's `expire_stale` remains the second timer. (3) `provision-soar-api-user.sh` must run against
+each tenant's own manager; `rbac_mode: white` (deny-by-default) is required for the scoping to bite.
+
+**Not run live (lab/scope):** the full attacker-container → incident → worker → auto-block loop as one
+motion, and the Windows netsh/route-null actions (plan-only until the VMs exist). Both are backed by
+the test suite and the live primitives above.
+
+**Status — PARTIALLY VERIFIED (2026-11-26).** The containment *primitives* above are proven live; the
+full end-to-end demo the owner asked for — attacker brute force → incident → **console approval**
+(four-eyes) → block on agent 061 → attacker SSH fails → 2-min expiry → reconnect, then the same in
+auto mode with live MTTC, plus the live spoof/log-injection refusal, live EICAR/YARA
+(110200→110201→evidence→quarantine→undo), the real console screenshot, and smoke — is **still
+pending**. It is blocked by the lab's Docker network corrupting after a host outage (invalid IP
+assignments, ghost host-port forwarders on 5432/8443/8123, ClickHouse detached), which needs a clean
+Docker Desktop reset to rebuild. The AR scripts (including `shadowtracer-yara-scan`, now bash —
+see THREAT_INTEL.md §A2 for why the agent YARA never ran) and the SOAR code are committed; the live
+matrix + screenshot land once the lab is healthy. `docs/report/9-soar.png` is still the mocked render
+until then.
+
 **Not yet done:** the console pages (Part B) and the live-lab VERIFY matrix (Part C) — which first
 needs **re-enrolling agent-ubuntu-1 (NET_ADMIN) into the test tenant**. **Windows netsh/route-null
 stay plan-only** until the VMs exist. No containment is driven by the LLM agent or a model score

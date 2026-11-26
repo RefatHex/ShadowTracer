@@ -29,7 +29,9 @@ declare -A DIR=(
 )
 # Recorded MINIMUM collected-test count per suite. Raise it when you add tests; lower it ONLY when you
 # deliberately remove some (say why in the commit). A drop below this is a hard failure.
-declare -A MIN=( [console]=252 [ingest]=66 [correlate]=75 [ml]=77 [intel]=109 )
+# intel dropped 109->101: the 8 Python test_yara_scan.py tests were removed when shadowtracer-yara-scan
+# was rewritten to bash (agents have no python3); replaced by the ar-scripts bash self-checks below.
+declare -A MIN=( [console]=252 [ingest]=66 [correlate]=75 [ml]=77 [intel]=101 )
 
 ALL=(console ingest correlate ml intel)
 
@@ -74,6 +76,18 @@ for s in "${suites[@]}"; do
     RESULT[$s]=FAIL; fail=1
   fi
 done
+
+# Phase 9: offline self-checks for the bash active-response scripts (no lab).
+if printf '%s\n' "${suites[@]}" | grep -qx intel; then
+  echo "--- ar-scripts ---"
+  if bash shadowtracer/intel/active_response/tests/test-fw-drop.sh && \
+     bash shadowtracer/intel/active_response/tests/test-yara-scan.sh; then
+    RESULT[ar-scripts]=PASS
+  else
+    RESULT[ar-scripts]=FAIL; fail=1
+  fi
+  suites+=(ar-scripts)
+fi
 
 echo
 echo "=== summary ==="
